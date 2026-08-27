@@ -1,0 +1,21 @@
+# BlueStream Relay Pro - nginx site configuration (generated).
+# Managed by install.sh / bluestream-manager. Do not edit manually.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    # Landing redirect to the bundled player.
+    location = / {
+        return 302 /player/;
+    }
+
+    # HLS output (MIME types, cache headers and CORS).
+    include __NGINX_SNIPPET_DIR__/hls-location.conf;
+
+    # Bundled hls.js player.
+    include __NGINX_SNIPPET_DIR__/player-location.conf;
+}
+
+__HTTPS_BLOCK__

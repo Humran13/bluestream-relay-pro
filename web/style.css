@@ -1,0 +1,78 @@
+/* BlueStream Relay Pro - player styling */
+
+:root {
+  --bg: #111318;
+  --fg: #e8eaf0;
+  --muted: #9aa0ab;
+  --accent: #2ea3ff;
+  --error: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+header {
+  padding: 16px 24px;
+  border-bottom: 1px solid #262a33;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+
+#channel-label {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+video {
+  width: 100%;
+  max-width: 960px;
+  max-height: 70vh;
+  background: #000;
+  border-radius: 8px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.error {
+  margin-top: 16px;
+  padding: 10px 14px;
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  color: var(--error);
+  max-width: 720px;
+}
+
+footer {
+  padding: 12px 24px;
+  border-top: 1px solid #262a33;
+  text-align: center;
+}

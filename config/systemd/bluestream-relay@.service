@@ -1,0 +1,45 @@
+# BlueStream Relay Pro - relay unit template.
+# Instantiated as:  bluestream-relay@<relay-name>.service
+# Installed to:     /etc/systemd/system/bluestream-relay@.service
+#
+# The wrapper reads the root-only relay config, prepares the HLS output
+# directory, then permanently drops privileges (setpriv) before exec'ing
+# FFmpeg. FFmpeg never runs as root.
+
+[Unit]
+Description=BlueStream Relay Pro - Relay %i
+Documentation=file:/usr/local/lib/bluestream/docs/installation.md
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/bluestream/run-relay.sh %i
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# --- Hardening (directives available since systemd 231; OK on Ubuntu 20.04+) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+# Narrow writable paths. The paths must exist before systemd prepares its
+# namespace: install.sh creates them and the manager creates/keeps them.
+ReadWritePaths=/var/www/bluestream/hls
+
+SyslogIdentifier=bluestream-relay-%i
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

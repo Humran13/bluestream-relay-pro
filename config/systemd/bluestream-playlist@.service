@@ -1,0 +1,45 @@
+# BlueStream Relay Pro - playlist unit template.
+# Instantiated as:  bluestream-playlist@<playlist-name>.service
+# Installed to:     /etc/systemd/system/bluestream-playlist@.service
+#
+# The wrapper reads the root-only playlist config, writes the concat file,
+# prepares the HLS output directory, then permanently drops privileges
+# (setpriv) before exec'ing FFmpeg. FFmpeg never runs as root.
+
+[Unit]
+Description=BlueStream Relay Pro - Playlist %i
+Documentation=file:/usr/local/lib/bluestream/docs/playlists.md
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/bluestream/run-playlist.sh %i
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# --- Hardening (directives available since systemd 231; OK on Ubuntu 20.04+) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+# Narrow writable paths. The paths must exist before systemd prepares its
+# namespace: install.sh creates them and the manager creates/keeps them.
+ReadWritePaths=/var/www/bluestream/hls /var/lib/bluestream/run
+
+SyslogIdentifier=bluestream-playlist-%i
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

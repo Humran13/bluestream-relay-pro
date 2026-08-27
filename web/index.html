@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BlueStream Relay Pro - Player</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>BlueStream Relay Pro</h1>
+  <p id="channel-label">HLS Player</p>
+</header>
+<main>
+  <video id="video" controls playsinline></video>
+  <p id="info" class="muted"></p>
+  <div id="error" class="error" hidden></div>
+</main>
+<footer>
+  <p class="muted">Live HLS stream. Open this page with ?relay=&lt;name&gt; or ?playlist=&lt;name&gt;.</p>
+</footer>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="player.js"></script>
+</body>
+</html>

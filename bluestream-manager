@@ -1,0 +1,767 @@
+#!/usr/bin/env bash
+#
+# BlueStream Relay Pro - administration manager.
+#
+# Primary interface:   sudo bluestream-manager
+# Non-interactive CLI: bluestream-manager <command> [arguments]
+# Examples:
+#   sudo bluestream-manager relay add news --type remote-hls --url https://source.example.com/live/index.m3u8 --start
+#   sudo bluestream-manager playlist add channel1 video01.mp4 video02.mp4
+#   sudo bluestream-manager selftest
+#
+# BlueStream Relay Pro 0.1.0 (foundation). See LICENSE for terms.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/lib/common.sh" ]; then
+    BS_ROOT="$SCRIPT_DIR"
+elif [ -d /usr/local/lib/bluestream ] && [ -f /usr/local/lib/bluestream/lib/common.sh ]; then
+    BS_ROOT="/usr/local/lib/bluestream"
+else
+    printf 'BlueStream Relay Pro: cannot locate library files.\n' >&2
+    exit 1
+fi
+
+for _bs_lib in common osdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest; do
+    # shellcheck source=lib/common.sh
+    # shellcheck source=lib/relay.sh
+    # shellcheck source=lib/playlist.sh
+    source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'BlueStream Relay Pro: failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
+done
+unset _bs_lib
+
+bs_setup
+
+banner() {
+    printf '%s==============================================%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s   BlueStream Relay Pro v%s%s\n' "$C_CYAN" "$(bs_version)" "$C_RESET"
+    printf '%s   self-hosted media relay server%s\n' "$C_CYAN" "$C_RESET"
+    printf '%s==============================================%s\n' "$C_BOLD" "$C_RESET"
+}
+
+usage() {
+    cat <<EOF
+BlueStream Relay Pro v$(bs_version) - usage
+
+Interactive:
+  sudo bluestream-manager
+
+Non-interactive commands:
+  status
+  relay list | add | show | start | stop | restart | enable | disable
+  relay edit | source | probe | url | player | logs | health | bandwidth | remove
+  playlist list | create | add | remove | reorder | show | check
+  playlist start | stop | restart | enable | disable | url | player | logs | health
+  media import | list | inspect | remove
+  diagnostics
+  selftest
+  backup [--with-media]
+  restore [<backup-file>]
+  nginx test | reload | restart
+  ssl issue | status | renew
+  firewall status | configure
+  info
+  version
+  help
+
+Run 'bluestream-manager <command> --help' for command-specific help.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Server status / info
+# ---------------------------------------------------------------------------
+cmd_server_status() {
+    bs_step "Server status"
+    printf '  Version          : %s\n' "$(bs_version)"
+    printf '  Hostname         : %s\n' "$(hostname -f 2>/dev/null || hostname)"
+    printf '  OS               : %s %s\n' "$OS_NAME" "$OS_VERSION"
+    printf '  Uptime           : %s\n' "$(uptime -p 2>/dev/null || uptime)"
+    printf '  Load             : %s\n' "$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
+    printf '  Memory           : %s\n' "$(free -h 2>/dev/null | awk '/^Mem:/{print $2" total, "$4" available"}')"
+    printf '  Nginx            : %s\n' "$(systemctl is-active nginx 2>/dev/null)"
+    printf '  FFmpeg           : %s\n' "$(ffmpeg -version 2>/dev/null | head -n1 | cut -c1-70)"
+    printf '  Domain           : %s\n' "${BLUESTREAM_DOMAIN:-(not set)}"
+    printf '  SSL              : %s\n' "$BLUESTREAM_SSL_ENABLED"
+    printf '  Firewall         : %s\n' "$BLUESTREAM_FIREWALL"
+    printf '  Relays           : %s\n' "$(relay_list_names | grep -c . || true)"
+    printf '  Playlists        : %s\n' "$(playlist_list_names | grep -c . || true)"
+    printf '  Managed media    : %s files\n' "$(media_list_names | grep -c . || true)"
+    printf '  Disk /var/lib    : %s\n' "$(bs_disk_free /var/lib 2>/dev/null)"
+    printf '  Disk /var/www    : %s\n' "$(bs_disk_free /var/www 2>/dev/null)"
+}
+
+cmd_info() {
+    banner
+    cat <<EOF
+
+BlueStream Relay Pro is a self-hosted 24/7 media relay server for Ubuntu VPS
+systems. It accepts supported media sources, pulls them continuously and
+exposes a stable public HLS (M3U8) output that works with WordPress, hls.js
+web players, VLC, IPTV players and mobile applications.
+
+  Public M3U8 : https://<domain>/hls/relay/<name>/index.m3u8
+                https://<domain>/hls/playlist/<name>/index.m3u8
+  Player      : https://<domain>/player/?relay=<name>
+                https://<domain>/player/?playlist=<name>
+
+Supported source types: local file, local playlist, remote HLS/M3U8, RTMP,
+RTMPS, RTSP and direct HTTP/HTTPS media files.
+
+Streaming philosophy: stream copy / remux (-c:v copy -c:a copy) for
+compatible H.264 + AAC sources. No automatic transcoding.
+
+H.264 + AAC is the preferred compatibility profile. 4K support depends on
+the source codec/bitrate, VPS bandwidth, server resources, viewer count and
+player compatibility - it is NOT guaranteed on every VPS.
+
+Installation and usage:
+  docs/installation.md, docs/sources.md, docs/playlists.md,
+  docs/wordpress.md, docs/troubleshooting.md, docs/security.md
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Main menu
+# ---------------------------------------------------------------------------
+menu_main() {
+    local choice
+    while true; do
+        banner
+        printf '\nMain menu\n'
+        printf '  1) Server Status\n'
+        printf '  2) Relay Management\n'
+        printf '  3) Playlist Management\n'
+        printf '  4) Media Management\n'
+        printf '  5) Diagnostics\n'
+        printf '  6) Server Management\n'
+        printf '  7) Backup / Restore\n'
+        printf '  8) Project Information\n'
+        printf '  9) Uninstall\n'
+        printf '  0) Exit\n'
+        printf '\nSelection [0-9]: '
+        read -r choice || return 0
+        case "$choice" in
+            1) cmd_server_status ;;
+            2) menu_relay ;;
+            3) menu_playlist ;;
+            4) menu_media ;;
+            5) run_diagnostics ;;
+            6) menu_server ;;
+            7) menu_backup ;;
+            8) cmd_info ;;
+            9) uninstall_entry ;;
+            0) return 0 ;;
+            *) bs_warn "Invalid choice." ;;
+        esac
+        printf '\nPress Enter to continue...'
+        read -r _ || return 0
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Relay menu
+# ---------------------------------------------------------------------------
+menu_relay() {
+    local choice name
+    while true; do
+        bs_step "Relay Management"
+        printf '  1)  Add Relay\n'
+        printf '  2)  List Relays\n'
+        printf '  3)  Relay Status (detail)\n'
+        printf '  4)  Start Relay\n'
+        printf '  5)  Stop Relay\n'
+        printf '  6)  Restart Relay\n'
+        printf '  7)  Enable Relay at Boot\n'
+        printf '  8)  Disable Relay at Boot\n'
+        printf '  9)  Edit Relay\n'
+        printf '  10) Change Source\n'
+        printf '  11) Test / Probe Source\n'
+        printf '  12) Show M3U8 URL\n'
+        printf '  13) Show Web Player URL\n'
+        printf '  14) View Relay Logs\n'
+        printf '  15) Relay Health Check\n'
+        printf '  16) Estimate Bandwidth\n'
+        printf '  17) Remove Relay\n'
+        printf '  0)  Back\n'
+        printf '\nSelection [0-17]: '
+        read -r choice || return 0
+        case "$choice" in
+            1) relay_create ;;
+            2) relay_list ;;
+            3)
+                if relay_select_interactive; then relay_status_detail "$RELAY_SELECTED"; fi ;;
+            4)
+                if relay_select_interactive; then relay_start "$RELAY_SELECTED"; fi ;;
+            5)
+                if relay_select_interactive; then relay_stop "$RELAY_SELECTED"; fi ;;
+            6)
+                if relay_select_interactive; then relay_restart "$RELAY_SELECTED"; fi ;;
+            7)
+                if relay_select_interactive; then relay_enable "$RELAY_SELECTED"; fi ;;
+            8)
+                if relay_select_interactive; then relay_disable "$RELAY_SELECTED"; fi ;;
+            9) relay_edit ;;
+            10) relay_change_source ;;
+            11) relay_probe_source ;;
+            12)
+                if relay_select_interactive; then relay_show_m3u8 "$RELAY_SELECTED"; fi ;;
+            13)
+                if relay_select_interactive; then relay_show_player "$RELAY_SELECTED"; fi ;;
+            14)
+                if relay_select_interactive; then
+                    printf 'Lines to show [100]: '
+                    read -r lines || lines=100
+                    case "$lines" in ''|*[!0-9]*) lines=100 ;; esac
+                    relay_logs "$RELAY_SELECTED" "$lines"
+                fi ;;
+            15)
+                if relay_select_interactive; then relay_health "$RELAY_SELECTED"; fi ;;
+            16) relay_estimate_bandwidth ;;
+            17)
+                if relay_select_interactive; then relay_remove "$RELAY_SELECTED"; fi ;;
+            0) return 0 ;;
+            *) bs_warn "Invalid choice." ;;
+        esac
+        printf '\nPress Enter to continue...'
+        read -r _ || return 0
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Playlist menu
+# ---------------------------------------------------------------------------
+menu_playlist() {
+    local choice name lines
+    while true; do
+        bs_step "Playlist Management"
+        printf '  1)  Create Playlist\n'
+        printf '  2)  List Playlists\n'
+        printf '  3)  Add Video to Playlist\n'
+        printf '  4)  Remove Video from Playlist\n'
+        printf '  5)  Reorder Playlist\n'
+        printf '  6)  Show Playlist Contents\n'
+        printf '  7)  Check Playlist Compatibility\n'
+        printf '  8)  Start Playlist\n'
+        printf '  9)  Stop Playlist\n'
+        printf '  10) Restart Playlist\n'
+        printf '  11) Enable Playlist at Boot\n'
+        printf '  12) Disable Playlist at Boot\n'
+        printf '  13) Show Playlist M3U8 URL\n'
+        printf '  14) Show Player URL\n'
+        printf '  15) Playlist Health Check\n'
+        printf '  16) View Playlist Logs\n'
+        printf '  17) Remove Playlist\n'
+        printf '  0)  Back\n'
+        printf '\nSelection [0-17]: '
+        read -r choice || return 0
+        case "$choice" in
+            1) playlist_create ;;
+            2) playlist_list ;;
+            3) playlist_add_media ;;
+            4) playlist_remove_media ;;
+            5) playlist_reorder ;;
+            6)
+                if playlist_select_interactive; then playlist_show "$PLAYLIST_SELECTED"; fi ;;
+            7)
+                if playlist_select_interactive; then
+                    playlist_load_config "$PLAYLIST_SELECTED" && playlist_check_compat
+                fi ;;
+            8)
+                if playlist_select_interactive; then playlist_start "$PLAYLIST_SELECTED"; fi ;;
+            9)
+                if playlist_select_interactive; then playlist_stop "$PLAYLIST_SELECTED"; fi ;;
+            10)
+                if playlist_select_interactive; then playlist_restart "$PLAYLIST_SELECTED"; fi ;;
+            11)
+                if playlist_select_interactive; then playlist_enable "$PLAYLIST_SELECTED"; fi ;;
+            12)
+                if playlist_select_interactive; then playlist_disable "$PLAYLIST_SELECTED"; fi ;;
+            13)
+                if playlist_select_interactive; then playlist_show_m3u8 "$PLAYLIST_SELECTED"; fi ;;
+            14)
+                if playlist_select_interactive; then playlist_show_player "$PLAYLIST_SELECTED"; fi ;;
+            15)
+                if playlist_select_interactive; then playlist_health "$PLAYLIST_SELECTED"; fi ;;
+            16)
+                if playlist_select_interactive; then
+                    printf 'Lines to show [100]: '
+                    read -r lines || lines=100
+                    case "$lines" in ''|*[!0-9]*) lines=100 ;; esac
+                    playlist_logs "$PLAYLIST_SELECTED" "$lines"
+                fi ;;
+            17)
+                if playlist_select_interactive; then playlist_remove "$PLAYLIST_SELECTED"; fi ;;
+            0) return 0 ;;
+            *) bs_warn "Invalid choice." ;;
+        esac
+        printf '\nPress Enter to continue...'
+        read -r _ || return 0
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Media menu
+# ---------------------------------------------------------------------------
+menu_media() {
+    local choice
+    while true; do
+        bs_step "Media Management"
+        printf '  1) Import Media\n'
+        printf '  2) List Media\n'
+        printf '  3) Inspect Media\n'
+        printf '  4) Remove Managed Media\n'
+        printf '  5) Bandwidth Estimator\n'
+        printf '  0) Back\n'
+        printf '\nSelection [0-5]: '
+        read -r choice || return 0
+        case "$choice" in
+            1) media_import ;;
+            2) media_list ;;
+            3) media_inspect ;;
+            4) media_remove ;;
+            5) media_show_bandwidth ;;
+            0) return 0 ;;
+            *) bs_warn "Invalid choice." ;;
+        esac
+        printf '\nPress Enter to continue...'
+        read -r _ || return 0
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Server menu
+# ---------------------------------------------------------------------------
+menu_server() {
+    local choice
+    while true; do
+        bs_step "Server Management"
+        printf '  1) Test Nginx\n'
+        printf '  2) Reload Nginx\n'
+        printf '  3) Restart Nginx\n'
+        printf '  4) SSL Management\n'
+        printf '  5) Firewall Status\n'
+        printf '  6) Configure Firewall (UFW)\n'
+        printf '  7) Diagnostics\n'
+        printf '  8) Self-Test\n'
+        printf '  9) Project Information\n'
+        printf '  10) Uninstall\n'
+        printf '  0)  Back\n'
+        printf '\nSelection [0-10]: '
+        read -r choice || return 0
+        case "$choice" in
+            1) nginx_test ;;
+            2) nginx_reload ;;
+            3) nginx_restart ;;
+            4) ssl_menu ;;
+            5) firewall_status ;;
+            6) firewall_configure ;;
+            7) run_diagnostics ;;
+            8) run_selftest ;;
+            9) cmd_info ;;
+            10) uninstall_entry ;;
+            0) return 0 ;;
+            *) bs_warn "Invalid choice." ;;
+        esac
+        printf '\nPress Enter to continue...'
+        read -r _ || return 0
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Backup menu
+# ---------------------------------------------------------------------------
+menu_backup() {
+    local choice
+    bs_select "Backup / Restore" choice \
+        "Backup configuration" \
+        "Backup configuration WITH media (large)" \
+        "List backups" \
+        "Restore configuration" || return 0
+    case "$choice" in
+        *WITH*) backup_configs yes ;;
+        Backup*) backup_configs no ;;
+        List*) backup_list ;;
+        Restore*) backup_restore ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Uninstall entry point (defined here; delegates to uninstall.sh if present)
+# ---------------------------------------------------------------------------
+uninstall_entry() {
+    local script
+    if [ -f "$BS_ROOT/uninstall.sh" ]; then
+        script="$BS_ROOT/uninstall.sh"
+    elif [ -f /usr/local/lib/bluestream/uninstall.sh ]; then
+        script="/usr/local/lib/bluestream/uninstall.sh"
+    else
+        bs_die "uninstall.sh not found."
+    fi
+    bs_warn "This will remove BlueStream Relay Pro from this server."
+    bs_confirm "Run the uninstaller now?" || return 1
+    bash "$script"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Non-interactive CLI: relays
+# ---------------------------------------------------------------------------
+cli_relay_add() {
+    local name="" type="" url="" loop="no" restart="5" note="" start=0 enable=0
+    name="${1:-}"
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --type) bs_val2 type --type "$@"; shift 2 ;;
+            --url) bs_val2 url --url "$@"; shift 2 ;;
+            --loop) bs_val2 loop --loop "$@"; shift 2 ;;
+            --restart-sec) bs_val2 restart --restart-sec "$@"; shift 2 ;;
+            --note) bs_val2 note --note "$@"; shift 2 ;;
+            --start) start=1; shift ;;
+            --enable) enable=1; shift ;;
+            *) bs_die "Unknown option: $1" ;;
+        esac
+    done
+    [ -n "$name" ] || bs_die "Usage: relay add <name> --type <type> --url <url> [--loop yes|no] [--restart-sec N] [--start] [--enable]"
+    [ -n "$type" ] || bs_die "--type is required (local-file|remote-hls|rtmp|rtmps|rtsp|http-file)"
+    [ -n "$url" ] || bs_die "--url is required"
+    bs_valid_name "$name" || bs_die "Invalid relay name"
+    bs_valid_type "$type" || bs_die "Invalid relay type: $type"
+    case "$loop" in yes|no) ;; *) bs_die "Invalid --loop (yes|no)" ;; esac
+    bs_valid_restart_sec "$restart" || bs_die "Invalid --restart-sec (1-300)"
+    relay_exists "$name" && bs_die "Relay '$name' already exists"
+
+    RELAY_NAME="$name"; RELAY_TYPE="$type"; RELAY_URL="$url"; RELAY_LOOP="$loop"
+    RELAY_RESTART_SEC="$restart"; RELAY_ENABLED="no"; RELAY_NOTE="$note"
+    RELAY_CREATED="$(bs_now_ts)"
+    relay_config_validate || bs_die "Configuration failed validation"
+    mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null
+    relay_save_config "$name"
+    bs_ok "Relay '$name' created."
+    printf '  M3U8   : %s\n' "$(bs_relay_m3u8_url "$name")"
+    printf '  Player : %s\n' "$(bs_relay_player_url "$name")"
+    [ "$start" = "1" ] && relay_start "$name"
+    [ "$enable" = "1" ] && relay_enable "$name"
+    return 0
+}
+
+cli_relay_edit() {
+    local name="" loop="" restart="" note="" set_loop=0 set_restart=0 set_note=0
+    name="${1:-}"
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --loop) bs_val2 loop --loop "$@"; set_loop=1; shift 2 ;;
+            --restart-sec) bs_val2 restart --restart-sec "$@"; set_restart=1; shift 2 ;;
+            --note) bs_val2 note --note "$@"; set_note=1; shift 2 ;;
+            *) bs_die "Unknown option: $1" ;;
+        esac
+    done
+    [ -n "$name" ] || bs_die "Usage: relay edit <name> [--loop yes|no] [--restart-sec N] [--note TEXT]"
+    relay_load_config "$name" || bs_die "Relay '$name' not found"
+    if [ "$set_loop" = "1" ]; then
+        case "$loop" in yes|no) RELAY_LOOP="$loop" ;; *) bs_die "Invalid --loop (yes|no)" ;; esac
+    fi
+    if [ "$set_restart" = "1" ]; then
+        bs_valid_restart_sec "$restart" || bs_die "Invalid --restart-sec (1-300)"
+        RELAY_RESTART_SEC="$restart"
+    fi
+    [ "$set_note" = "1" ] && RELAY_NOTE="$note"
+    relay_save_config "$name"
+    bs_ok "Relay '$name' updated."
+    if bs_unit_active "$(bs_unit relay "$name")"; then
+        relay_restart "$name"
+    fi
+    return 0
+}
+
+cli_relay_source() {
+    local name="" url="" restart=0
+    name="${1:-}"
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --url) bs_val2 url --url "$@"; shift 2 ;;
+            --restart) restart=1; shift ;;
+            *) bs_die "Unknown option: $1" ;;
+        esac
+    done
+    [ -n "$name" ] && [ -n "$url" ] || bs_die "Usage: relay source <name> --url <url> [--restart]"
+    relay_load_config "$name" || bs_die "Relay '$name' not found"
+    RELAY_URL="$url"
+    relay_config_validate || bs_die "New source failed validation"
+    relay_save_config "$name"
+    bs_ok "Source updated for relay '$name'."
+    if [ "$restart" = "1" ] || bs_unit_active "$(bs_unit relay "$name")"; then
+        relay_restart "$name"
+    fi
+    return 0
+}
+
+cli_relay_one() {
+    local action="$1" name="${2:-}"
+    bs_valid_name "$name" || bs_die "Invalid relay name: '$name'"
+    case "$action" in
+        show|status) relay_status_detail "$name" ;;
+        start)       relay_start "$name" ;;
+        stop)        relay_stop "$name" ;;
+        restart)     relay_restart "$name" ;;
+        enable)      relay_enable "$name" ;;
+        disable)     relay_disable "$name" ;;
+        probe)       relay_probe_source "$name" ;;
+        url)         relay_show_m3u8 "$name" ;;
+        player)      relay_show_player "$name" ;;
+        health)      relay_health "$name" ;;
+        logs)
+            local lines="${3:-100}"
+            case "$lines" in ''|*[!0-9]*) lines=100 ;; esac
+            relay_logs "$name" "$lines"
+            ;;
+        remove)      relay_remove "$name" ;;
+        *) bs_die "Unknown relay action: $action" ;;
+    esac
+}
+
+cli_relay_bandwidth() {
+    local name="${1:-}" viewers="${2:-}" bps mbps total
+    relay_load_config "$name" || bs_die "Relay '$name' not found"
+    bps="$(probe_pick_bitrate)"
+    if [ "$bps" = "0" ] || [ -z "$bps" ]; then
+        bs_warn "Source bitrate could not be determined from probe data."
+        bs_warn "Run 'bluestream-manager relay probe $name' or use the interactive estimator."
+        return 1
+    fi
+    mbps="$(bandwidth_mbps_from_bps "$bps")"
+    if [ -z "$viewers" ]; then
+        bs_prompt viewers "Expected simultaneous viewers" "" || return 1
+    fi
+    case "$viewers" in ''|*[!0-9]*) bs_die "Invalid viewer count" ;; esac
+    total="$(estimate_bandwidth "$mbps" "$viewers")"
+    printf 'Source bitrate %s Mbps x %s viewers = %s Mbps outbound (approx)\n' "$mbps" "$viewers" "$total"
+    bandwidth_show_explanation
+    return 0
+}
+
+cli_relay() {
+    local sub="${1:-}"
+    shift || true
+    case "$sub" in
+        list)      relay_list ;;
+        add)       cli_relay_add "$@" ;;
+        edit)      cli_relay_edit "$@" ;;
+        source)    cli_relay_source "$@" ;;
+        bandwidth) cli_relay_bandwidth "$@" ;;
+        show|status|start|stop|restart|enable|disable|probe|url|player|health|logs|remove)
+            cli_relay_one "$sub" "$@" ;;
+        *) bs_die "Unknown relay action: $sub (see 'help')" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Non-interactive CLI: playlists
+# ---------------------------------------------------------------------------
+cli_playlist_one() {
+    local action="$1" name="${2:-}" lines="${3:-100}"
+    bs_valid_name "$name" || bs_die "Invalid playlist name: '$name'"
+    case "$action" in
+        start)   playlist_start "$name" ;;
+        stop)    playlist_stop "$name" ;;
+        restart) playlist_restart "$name" ;;
+        enable)  playlist_enable "$name" ;;
+        disable) playlist_disable "$name" ;;
+        url)     playlist_show_m3u8 "$name" ;;
+        player)  playlist_show_player "$name" ;;
+        health)  playlist_health "$name" ;;
+        logs)    playlist_logs "$name" "$lines" ;;
+        remove)  playlist_remove "$name" ;;
+        *) bs_die "Unknown playlist action: $action" ;;
+    esac
+}
+
+cli_playlist() {
+    local sub="${1:-}" name=""
+    shift || true
+    case "$sub" in
+        list) playlist_list ;;
+        create)
+            name="${1:-}"
+            bs_valid_name "$name" || bs_die "Invalid playlist name"
+            playlist_exists "$name" && bs_die "Playlist '$name' already exists"
+            mkdir -p "$BLUESTREAM_PLAYLIST_CONF_DIR" 2>/dev/null
+            PLAYLIST_NAME="$name"; PLAYLIST_ENABLED="no"; PLAYLIST_FILES=()
+            playlist_save_config "$name"
+            bs_ok "Playlist '$name' created."
+            ;;
+        add)
+            name="${1:-}"
+            shift || true
+            [ -n "$name" ] || bs_die "Usage: playlist add <name> <media-file>..."
+            playlist_load_config "$name" || bs_die "Playlist '$name' not found"
+            local f
+            for f in "$@"; do
+                bs_valid_media_name "$f" || bs_die "Invalid media name: $f"
+                [ -f "$BLUESTREAM_MEDIA_DIR/$f" ] || bs_die "No such managed media: $f"
+                case " ${PLAYLIST_FILES[*]} " in
+                    *" $f "*) ;;
+                    *) PLAYLIST_FILES+=( "$f" ) ;;
+                esac
+            done
+            playlist_save_config "$name"
+            bs_ok "Playlist '$name' now has ${#PLAYLIST_FILES[@]} entries."
+            ;;
+        remove)
+            name="${1:-}"
+            shift || true
+            [ -n "$name" ] || bs_die "Usage: playlist remove <name> <media-file>..."
+            playlist_load_config "$name" || bs_die "Playlist '$name' not found"
+            local f newlist=()
+            for f in "${PLAYLIST_FILES[@]}"; do
+                case " $* " in
+                    *" $f "*) continue ;;
+                esac
+                newlist+=( "$f" )
+            done
+            PLAYLIST_FILES=( "${newlist[@]}" )
+            playlist_save_config "$name"
+            bs_ok "Playlist '$name' now has ${#PLAYLIST_FILES[@]} entries. Media files were not modified."
+            ;;
+        reorder)
+            name="${1:-}"
+            shift || true
+            [ -n "$name" ] || bs_die "Usage: playlist reorder <name> <media-file>... (full new order)"
+            playlist_load_config "$name" || bs_die "Playlist '$name' not found"
+            local newlist=() f
+            for f in "$@"; do
+                bs_valid_media_name "$f" || bs_die "Invalid media name: $f"
+                case " ${PLAYLIST_FILES[*]} " in
+                    *" $f "*) ;;
+                    *) bs_die "'$f' is not in the playlist" ;;
+                esac
+                newlist+=( "$f" )
+            done
+            [ "${#newlist[@]}" -eq "${#PLAYLIST_FILES[@]}" ] || bs_die "Reorder must list every playlist entry exactly once"
+            PLAYLIST_FILES=( "${newlist[@]}" )
+            playlist_save_config "$name"
+            bs_ok "Playlist '$name' reordered."
+            ;;
+        show) playlist_show "${1:-}" ;;
+        check)
+            name="${1:-}"
+            playlist_load_config "$name" || bs_die "Playlist '$name' not found"
+            playlist_check_compat
+            ;;
+        start|stop|restart|enable|disable|url|player|health|logs|remove)
+            cli_playlist_one "$sub" "$@" ;;
+        *) bs_die "Unknown playlist action: $sub (see 'help')" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Non-interactive CLI: media, server, ssl, firewall
+# ---------------------------------------------------------------------------
+cli_media() {
+    local sub="${1:-}"
+    shift || true
+    case "$sub" in
+        import)
+            local src="" name=""
+            src="${1:-}"
+            shift || true
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --name) bs_val2 name --name "$@"; shift 2 ;;
+                    *) bs_die "Unknown option: $1" ;;
+                esac
+            done
+            [ -n "$src" ] || bs_die "Usage: media import <path-or-url> [--name <name>]"
+            media_import "$src" "$name"
+            ;;
+        list)    media_list ;;
+        inspect) media_inspect "${1:-}" ;;
+        remove)  media_remove "${1:-}" ;;
+        *) bs_die "Unknown media action: $sub (see 'help')" ;;
+    esac
+}
+
+cli_server() {
+    case "${1:-}" in
+        test)    nginx_test ;;
+        reload)  nginx_reload ;;
+        restart) nginx_restart ;;
+        *) bs_die "Usage: nginx test|reload|restart" ;;
+    esac
+}
+
+cli_ssl() {
+    case "${1:-}" in
+        issue)  ssl_issue ;;
+        status) ssl_status ;;
+        renew)  ssl_renew ;;
+        *) bs_die "Usage: ssl issue|status|renew" ;;
+    esac
+}
+
+cli_firewall() {
+    case "${1:-}" in
+        status)    firewall_status ;;
+        configure) firewall_configure ;;
+        *) bs_die "Usage: firewall status|configure" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Top-level dispatch
+# ---------------------------------------------------------------------------
+cli_main() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        status)      cmd_server_status ;;
+        relay)       cli_relay "${@:2}" ;;
+        playlist)    cli_playlist "${@:2}" ;;
+        media)       cli_media "${@:2}" ;;
+        diagnostics) run_diagnostics ;;
+        selftest)    run_selftest ;;
+        backup)
+            case "${2:-}" in
+                --with-media) backup_configs yes ;;
+                *) backup_configs no ;;
+            esac
+            ;;
+        restore)     backup_restore "${2:-}" ;;
+        nginx)       cli_server "${2:-}" ;;
+        ssl)         cli_ssl "${2:-}" ;;
+        firewall)    cli_firewall "${2:-}" ;;
+        info)        cmd_info ;;
+        version)     printf '%s\n' "$(bs_version)" ;;
+        help|--help|-h) usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+    version|help|--help|-h|info) ;;
+    *)
+        if [ "$(id -u)" -ne 0 ]; then
+            printf 'BlueStream Relay Pro requires root. Run: sudo bluestream-manager\n' >&2
+            exit 2
+        fi
+        ;;
+esac
+
+if [ "$#" -gt 0 ]; then
+    cli_main "$@"
+else
+    menu_main
+fi
+
+
+
+
+
+
+

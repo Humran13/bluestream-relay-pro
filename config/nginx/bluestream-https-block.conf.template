@@ -1,0 +1,21 @@
+# HTTPS server block appended by nginx_gen_config when SSL is enabled.
+# Certificate paths follow the standard Let's Encrypt layout.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name __DOMAIN__;
+
+    ssl_certificate     /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:BLUESTREAM:10m;
+    ssl_session_timeout 10m;
+
+    location = / {
+        return 302 /player/;
+    }
+
+    include /etc/nginx/bluestream/hls-location.conf;
+    include /etc/nginx/bluestream/player-location.conf;
+}
