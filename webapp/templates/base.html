@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}BlueStream Relay Pro{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/console.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">BlueStream Relay Pro</span>
+    {% if session.get('authenticated') %}
+    <form method="post" action="{{ url_for('console.logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn">Sign out</button>
+    </form>
+    {% endif %}
+  </header>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

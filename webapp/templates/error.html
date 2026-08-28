@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Error - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Error {{ code }}</h1>
+  <p>{{ message }}</p>
+  <p><a href="{{ url_for('console.login') }}">Back to sign in</a></p>
+</section>
+{% endblock %}

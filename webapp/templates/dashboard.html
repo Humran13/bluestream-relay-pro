@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if engine_unavailable %}
+<p class="error">BlueStream engine information is temporarily unavailable.</p>
+{% endif %}
+
+{% set snap = data.get('snapshot') %}
+{% if snap %}
+<section class="card">
+  <h2>Server</h2>
+  <dl class="grid">
+    <dt>Version</dt><dd>{{ snap.get('version') }}</dd>
+    <dt>Hostname</dt><dd>{{ snap.get('hostname') }}</dd>
+    <dt>Uptime</dt><dd>{{ snap.get('uptime') }}</dd>
+    <dt>Domain</dt><dd>{{ snap.get('domain') or 'not set' }}</dd>
+  </dl>
+  <h2>Engine</h2>
+  <dl class="grid">
+    <dt>Nginx</dt><dd>{{ snap.get('nginx_active') }}</dd>
+    <dt>FFmpeg</dt><dd>{{ snap.get('ffmpeg_available') }}</dd>
+    <dt>ffprobe</dt><dd>{{ snap.get('ffprobe_available') }}</dd>
+    <dt>HTTPS</dt><dd>{{ snap.get('https_configured') }}</dd>
+  </dl>
+  <h2>Counts</h2>
+  <dl class="grid">
+    <dt>Relays</dt><dd>{{ snap.get('relay_count') }}</dd>
+    <dt>Playlists</dt><dd>{{ snap.get('playlist_count') }}</dd>
+  </dl>
+</section>
+{% endif %}
+
+{% set relays = data.get('relay_list') %}
+{% if relays is not none %}
+<section class="card">
+  <h2>Relays</h2>
+  {% if relays %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Type</th><th>Active</th><th>Enabled</th><th>Health</th></tr>
+    </thead>
+    <tbody>
+    {% for relay in relays %}
+      <tr>
+        <td>{{ relay.get('name') }}</td>
+        <td>{{ relay.get('type') }}</td>
+        <td>{{ relay.get('active') }}</td>
+        <td>{{ relay.get('enabled') }}</td>
+        <td>{{ relay.get('health') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No relays configured.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% set playlists = data.get('playlist_list') %}
+{% if playlists is not none %}
+<section class="card">
+  <h2>Playlists</h2>
+  {% if playlists %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Active</th><th>Enabled</th></tr>
+    </thead>
+    <tbody>
+    {% for playlist in playlists %}
+      <tr>
+        <td>{{ playlist.get('name') }}</td>
+        <td>{{ playlist.get('active') }}</td>
+        <td>{{ playlist.get('enabled') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No playlists configured.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
