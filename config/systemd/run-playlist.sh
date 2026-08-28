@@ -37,7 +37,8 @@ playlist_load_config "$NAME" || exit 1
 # Root bootstrap: prepare the HLS output directory and the run directory.
 mkdir -p "$HLS_ROOT/$NAME" || exit 1
 chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$HLS_ROOT/$NAME" || exit 1
-chmod 0750 "$HLS_ROOT/$NAME" || exit 1
+# setgid so FFmpeg-created files inherit group www-data (readable by nginx).
+chmod 2750 "$HLS_ROOT/$NAME" || exit 1
 mkdir -p "$RUN_DIR" || exit 1
 
 # Write the concat file (readable by bluestream-relay after the drop).

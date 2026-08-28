@@ -37,7 +37,8 @@ relay_config_validate || exit 1
 # bluestream-relay:www-data (readable by nginx, writable by ffmpeg).
 mkdir -p "$HLS_ROOT/$NAME" || exit 1
 chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$HLS_ROOT/$NAME" || exit 1
-chmod 0750 "$HLS_ROOT/$NAME" || exit 1
+# setgid so FFmpeg-created files inherit group www-data (readable by nginx).
+chmod 2750 "$HLS_ROOT/$NAME" || exit 1
 
 # Fail closed: privilege drop prerequisites.
 id "$BLUESTREAM_USER" >/dev/null 2>&1 || exit 1

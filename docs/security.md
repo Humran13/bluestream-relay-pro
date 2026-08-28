@@ -26,7 +26,7 @@ describes the model used by version 0.1.0.
 | imported media files | root:bluestream-relay | 0640 |
 | `/var/lib/bluestream/run/` | bluestream-relay:bluestream-relay | 0750 |
 | `/var/lib/bluestream/backups/` | root:root | 0700 |
-| `/var/www/bluestream/hls/` | bluestream-relay:www-data | 0750 |
+| `/var/www/bluestream/hls/` | bluestream-relay:www-data | 2750 (setgid) |
 | HLS segments (umask 0027) | bluestream-relay:www-data | 0640 |
 
 No `chmod 777` anywhere. Nginx reads HLS through group access.

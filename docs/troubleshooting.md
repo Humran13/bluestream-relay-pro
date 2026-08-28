@@ -53,7 +53,7 @@ Look for FFmpeg errors such as:
 - Is the site enabled? `ls -l /etc/nginx/sites-enabled/bluestream`
 - Is nginx valid? `sudo bluestream-manager nginx test`
 - Are the HLS directory permissions correct? HLS dirs must be owned by
-  `bluestream-relay:www-data` with mode 0750.
+  `bluestream-relay:www-data` with mode 2750 (setgid).
 
 ## HTTPS certificate problems
 

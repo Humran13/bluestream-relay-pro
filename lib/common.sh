@@ -389,7 +389,8 @@ bs_ensure_hls_dir() {
     dir="$(bs_hls_dir_for "$kind" "$name")"
     mkdir -p "$dir" 2>/dev/null || return 1
     chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$dir" 2>/dev/null || return 1
-    chmod 0750 "$dir" 2>/dev/null || return 1
+    # setgid so FFmpeg-created files inherit group www-data (readable by nginx).
+    chmod 2750 "$dir" 2>/dev/null || return 1
     return 0
 }
 

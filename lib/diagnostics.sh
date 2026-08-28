@@ -95,10 +95,10 @@ run_diagnostics() {
     if [ -d "$BLUESTREAM_HLS_ROOT" ]; then
         owner="$(stat -c '%U:%G' "$BLUESTREAM_HLS_ROOT" 2>/dev/null)"
         mode="$(stat -c '%a' "$BLUESTREAM_HLS_ROOT" 2>/dev/null)"
-        if [ "$owner" = "$BLUESTREAM_USER:$BLUESTREAM_NGINX_USER" ] && [ "$mode" = "750" ]; then
+        if [ "$owner" = "$BLUESTREAM_USER:$BLUESTREAM_NGINX_USER" ] && [ "$mode" = "2750" ]; then
             diag_check "HLS root ownership/mode" PASS "$owner $mode"
         else
-            diag_check "HLS root ownership/mode" WARN "found $owner $mode (want $BLUESTREAM_USER:$BLUESTREAM_NGINX_USER 0750)"
+            diag_check "HLS root ownership/mode" WARN "found $owner $mode (want $BLUESTREAM_USER:$BLUESTREAM_NGINX_USER 2750)"
         fi
     fi
 
