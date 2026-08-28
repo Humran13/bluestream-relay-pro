@@ -1,0 +1,43 @@
+# BlueStream Relay Pro - private local RTMP ingest -> HLS (nginx MAIN context).
+#
+# Loaded at nginx MAIN context via /etc/nginx/modules-enabled/60-bluestream-rtmp.conf
+# AFTER ngx_rtmp_module has been loaded (50-mod-rtmp.conf sorts first).
+#
+# Loopback only: this RTMP ingest must never be reachable from the public
+# network. Public playback uses the existing HTTP HLS URLs, not RTMP.
+
+rtmp {
+    server {
+        listen __RTMP_BIND__:__RTMP_PORT__;
+
+        application bluestream-relay {
+            live on;
+            allow publish 127.0.0.1;
+            deny publish all;
+            deny play all;
+
+            hls on;
+            hls_path __HLS_ROOT__/relay;
+            hls_nested on;
+            hls_fragment 5s;
+            hls_playlist_length 30s;
+            hls_continuous on;
+            hls_cleanup on;
+        }
+
+        application bluestream-playlist {
+            live on;
+            allow publish 127.0.0.1;
+            deny publish all;
+            deny play all;
+
+            hls on;
+            hls_path __HLS_ROOT__/playlist;
+            hls_nested on;
+            hls_fragment 5s;
+            hls_playlist_length 30s;
+            hls_continuous on;
+            hls_cleanup on;
+        }
+    }
+}

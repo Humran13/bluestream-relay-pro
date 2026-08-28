@@ -17,7 +17,6 @@ esac
 
 LIBDIR="/usr/local/lib/bluestream/lib"
 CONF_DIR="/etc/bluestream/playlists"
-HLS_ROOT="/var/www/bluestream/hls/playlist"
 RUN_DIR="/var/lib/bluestream/run"
 
 [ -f "$LIBDIR/common.sh" ] || exit 1
@@ -34,11 +33,8 @@ bs_load_server_conf
 playlist_load_config "$NAME" || exit 1
 [ "${#PLAYLIST_FILES[@]}" -gt 0 ] || exit 1
 
-# Root bootstrap: prepare the HLS output directory and the run directory.
-mkdir -p "$HLS_ROOT/$NAME" || exit 1
-chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$HLS_ROOT/$NAME" || exit 1
-# setgid so FFmpeg-created files inherit group www-data (readable by nginx).
-chmod 2750 "$HLS_ROOT/$NAME" || exit 1
+# nginx-rtmp (www-data) owns all HLS output; FFmpeg publishes over the
+# private local RTMP socket and never writes the HLS filesystem directly.
 mkdir -p "$RUN_DIR" || exit 1
 
 # Write the concat file (readable by bluestream-relay after the drop).

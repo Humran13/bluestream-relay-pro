@@ -73,13 +73,13 @@ run_selftest() {
     fi
 
     # Verify the exact argv that run-relay.sh will hand to FFmpeg: separate
-    # [-c:v][copy][-c:a][copy] elements and a final index.m3u8 output.
+    # [-c:v][copy][-c:a][copy] elements and a private loopback RTMP output.
     if relay_build_ffmpeg_args && bs_verify_ffmpeg_args; then
-        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> index.m3u8)" 0
+        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> rtmp://127.0.0.1:1935/bluestream-relay/<name>)" 0
     else
         bs_error "FFmpeg argv failed structural verification:"
         bs_dump_ffmpeg_args
-        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> index.m3u8)" 1
+        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> rtmp://127.0.0.1:1935/bluestream-relay/<name>)" 1
     fi
 
     # 3. Start through the real systemd path.
@@ -128,6 +128,20 @@ run_selftest() {
         check "relay process running" 1
     fi
 
+    # 4b. Verify FFmpeg is publishing to the private loopback RTMP application.
+    if [ -n "$settled" ]; then
+        if command -v ss >/dev/null 2>&1; then
+            if ss -tn 2>/dev/null | grep -q "127.0.0.1:${BLUESTREAM_RTMP_PORT}"; then
+                check "ffmpeg publishing to private RTMP (127.0.0.1:1935)" 0
+            else
+                bs_error "No TCP connection from FFmpeg to 127.0.0.1:1935"
+                check "ffmpeg publishing to private RTMP (127.0.0.1:1935)" 1
+            fi
+        else
+            bs_warn "ss not available; skipping RTMP connection check"
+        fi
+    fi
+
     # 5. Wait for HLS playlist and segments.
     m3u8dir="$(bs_hls_dir_for relay "$name")"
     for i in $(seq 1 45); do
@@ -148,6 +162,12 @@ run_selftest() {
         check "HLS segments present" 0
     else
         check "HLS segments present" 1
+    fi
+    # The HLS files must be created by nginx-rtmp (www-data), not FFmpeg.
+    if [ -f "$m3u8dir/index.m3u8" ] && [ "$(stat -c %U "$m3u8dir/index.m3u8" 2>/dev/null)" = "$BLUESTREAM_NGINX_USER" ]; then
+        check "HLS output created by nginx-rtmp (www-data)" 0
+    else
+        check "HLS output created by nginx-rtmp (www-data)" 1
     fi
 
     # 6. Fetch the public M3U8 URL via nginx.

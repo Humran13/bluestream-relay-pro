@@ -33,9 +33,10 @@ LockPersonality=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 
-# Narrow writable paths. The paths must exist before systemd prepares its
-# namespace: install.sh creates them and the manager creates/keeps them.
-ReadWritePaths=/var/www/bluestream/hls /var/lib/bluestream/run
+# Narrow writable paths. FFmpeg publishes over the private local RTMP socket
+# only; nginx-rtmp (www-data) owns the HLS output tree. The run directory is
+# needed for the generated concat file.
+ReadWritePaths=/var/lib/bluestream/run
 
 SyslogIdentifier=bluestream-playlist-%i
 StandardOutput=journal

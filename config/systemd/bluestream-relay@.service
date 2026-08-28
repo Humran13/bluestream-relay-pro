@@ -33,10 +33,9 @@ LockPersonality=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 
-# Narrow writable paths. The paths must exist before systemd prepares its
-# namespace: install.sh creates them and the manager creates/keeps them.
-ReadWritePaths=/var/www/bluestream/hls
-
+# Narrow writable paths. FFmpeg publishes over the private local RTMP socket
+# only; nginx-rtmp (www-data) owns the HLS output tree, so FFmpeg requires no
+# writable filesystem path.
 SyslogIdentifier=bluestream-relay-%i
 StandardOutput=journal
 StandardError=journal

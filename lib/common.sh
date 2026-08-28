@@ -39,6 +39,15 @@ BLUESTREAM_USER="bluestream-relay"
 BLUESTREAM_GROUP="bluestream-relay"
 BLUESTREAM_NGINX_USER="www-data"
 
+# Private local RTMP ingest -> nginx-rtmp HLS architecture.
+# FFmpeg publishes to a loopback-only RTMP listener; nginx-rtmp (www-data)
+# writes the HLS output. FFmpeg never writes HLS files directly.
+BLUESTREAM_RTMP_BIND="127.0.0.1"
+BLUESTREAM_RTMP_PORT="1935"
+BLUESTREAM_RTMP_BASE="rtmp://${BLUESTREAM_RTMP_BIND}:${BLUESTREAM_RTMP_PORT}"
+BLUESTREAM_RTMP_APP_RELAY="bluestream-relay"
+BLUESTREAM_RTMP_APP_PLAYLIST="bluestream-playlist"
+
 BLUESTREAM_SERVICE_RELAY_PREFIX="bluestream-relay@"
 BLUESTREAM_SERVICE_PLAYLIST_PREFIX="bluestream-playlist@"
 
@@ -388,9 +397,9 @@ bs_ensure_hls_dir() {
     local kind="$1" name="$2" dir
     dir="$(bs_hls_dir_for "$kind" "$name")"
     mkdir -p "$dir" 2>/dev/null || return 1
-    chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$dir" 2>/dev/null || return 1
-    # setgid so FFmpeg-created files inherit group www-data (readable by nginx).
-    chmod 2750 "$dir" 2>/dev/null || return 1
+    # nginx-rtmp (www-data) writes the HLS output; FFmpeg never touches this tree.
+    chown "${BLUESTREAM_NGINX_USER}:${BLUESTREAM_NGINX_USER}" "$dir" 2>/dev/null || return 1
+    chmod 0750 "$dir" 2>/dev/null || return 1
     return 0
 }
 
@@ -597,14 +606,14 @@ bs_dump_ffmpeg_args() {
 }
 
 # Fail-closed structural verification of the global FFMPEG_ARGS array before
-# exec'ing FFmpeg. Guarantees the codec options are separate elements with
-# their own 'copy' values, and that the final positional is the HLS
-# index.m3u8 output, so a stray 'copy' can never become a positional output
-# filename. Returns 1 (and dumps the sanitized argv) on any anomaly.
+# exec'ing FFmpeg. Enforces the private-local-RTMP output architecture:
+#   - codec options are separate elements with their own 'copy' values
+#   - output format is -f flv (never -f hls)
+#   - the final element is a loopback RTMP URL with a validated stream name
+# Returns 1 (and dumps the sanitized argv) on any anomaly.
 bs_verify_ffmpeg_args() {
-    local n="${#FFMPEG_ARGS[@]}" i
-    [ "$n" -gt 0 ] || { bs_error "FFmpeg argv is empty."; return 1; }
-    [ "$n" -ge 20 ] || { bs_error "FFmpeg argv implausibly short ($n elements)."; return 1; }
+    local n="${#FFMPEG_ARGS[@]}" i last tail found_flv=0
+    [ "$n" -ge 12 ] || { bs_error "FFmpeg argv implausibly short ($n elements)."; return 1; }
     for i in "${!FFMPEG_ARGS[@]}"; do
         [ -n "${FFMPEG_ARGS[$i]}" ] || { bs_error "FFmpeg argv element $i is empty."; return 1; }
     done
@@ -619,13 +628,28 @@ bs_verify_ffmpeg_args() {
                 fi
                 i=$((i + 2))
                 ;;
+            -f)
+                [ $((i + 1)) -lt "$n" ] || { bs_error "Option -f has no value."; return 1; }
+                if [ "${FFMPEG_ARGS[$((i + 1))]}" = "hls" ]; then
+                    bs_error "Direct FFmpeg HLS muxing (-f hls) is disabled; output must be private local RTMP (-f flv)."
+                    return 1
+                fi
+                if [ "${FFMPEG_ARGS[$((i + 1))]}" = "flv" ]; then
+                    found_flv=1
+                fi
+                i=$((i + 2))
+                ;;
             *) i=$((i + 1)) ;;
         esac
     done
-    case "${FFMPEG_ARGS[$((n - 1))]}" in
-        */index.m3u8) ;;
-        *) bs_error "FFmpeg output must end with 'index.m3u8', found '${FFMPEG_ARGS[$((n - 1))]}'."; return 1 ;;
+    [ "$found_flv" = "1" ] || { bs_error "FFmpeg output format must be '-f flv'."; return 1; }
+    last="${FFMPEG_ARGS[$((n - 1))]}"
+    case "$last" in
+        rtmp://127.0.0.1:1935/bluestream-relay/*|rtmp://127.0.0.1:1935/bluestream-playlist/*) ;;
+        *) bs_error "FFmpeg output must be a private loopback RTMP URL, found '$last'."; return 1 ;;
     esac
+    tail="${last##*/}"
+    bs_valid_name "$tail" || { bs_error "Invalid stream name in RTMP output URL '$last'."; return 1; }
     return 0
 }
 

@@ -144,15 +144,8 @@ relay_build_ffmpeg_args() {
         -map "0:a:0?"
         -c:v copy
         -c:a copy
-        -f hls
-        -hls_time 5
-        -hls_list_size 6
-        -hls_flags delete_segments+independent_segments+omit_endlist+temp_file
-        -hls_allow_cache 0
-        -start_number 1
-        -max_muxing_queue_size 4096
-        -hls_segment_filename "$BLUESTREAM_HLS_RELAY_DIR/$RELAY_NAME/segment_%05d.ts"
-        "$BLUESTREAM_HLS_RELAY_DIR/$RELAY_NAME/index.m3u8"
+        -f flv
+        "${BLUESTREAM_RTMP_BASE}/${BLUESTREAM_RTMP_APP_RELAY}/${RELAY_NAME}"
     )
 
     FFMPEG_ARGS=( -nostdin -y -loglevel warning "${input[@]}" "${output[@]}" )

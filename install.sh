@@ -120,7 +120,7 @@ install_packages() {
         bs_info "Updating package metadata..."
         os_apt_update
     fi
-    os_pkg_install nginx ffmpeg curl ca-certificates coreutils util-linux \
+    os_pkg_install nginx ffmpeg curl ca-certificates coreutils util-linux libnginx-mod-rtmp \
         || bs_die "Failed to install base packages."
 
     if [ "$SSL_REQUESTED" = "1" ]; then
@@ -202,19 +202,19 @@ create_user_and_dirs() {
     chmod 0755 "$BLUESTREAM_WWW_DIR"
     chown root:root "$BLUESTREAM_WEB_DIR"
     chmod 0755 "$BLUESTREAM_WEB_DIR"
-    chown "$BLUESTREAM_USER":"$BLUESTREAM_NGINX_USER" "$BLUESTREAM_HLS_ROOT" \
+    # nginx-rtmp (www-data) owns the HLS output tree. FFmpeg publishes to the
+    # private local RTMP socket and never writes HLS files directly.
+    chown "$BLUESTREAM_NGINX_USER":"$BLUESTREAM_NGINX_USER" "$BLUESTREAM_HLS_ROOT" \
         "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
-    # setgid (2xxx): files created by bluestream-relay inherit group www-data,
-    # so nginx can read generated .m3u8/.ts without per-file chmod.
-    chmod 2750 "$BLUESTREAM_HLS_ROOT" "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
+    chmod 0750 "$BLUESTREAM_HLS_ROOT" "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
 
     # Upgrade/repair: correct any existing managed HLS output directories
-    # (per-relay and per-playlist) to the setgid model. Directories only;
+    # (per-relay and per-playlist) to the nginx-worker model. Directories only;
     # generated files and customer media are left untouched.
     find "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR" -type d \
-        -exec chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" {} + 2>/dev/null || true
+        -exec chown "${BLUESTREAM_NGINX_USER}:${BLUESTREAM_NGINX_USER}" {} + 2>/dev/null || true
     find "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR" -type d \
-        -exec chmod 2750 {} + 2>/dev/null || true
+        -exec chmod 0750 {} + 2>/dev/null || true
 
     # A fresh media permissions file in case of re-run on existing data.
     find "$BLUESTREAM_MEDIA_DIR" -maxdepth 1 -type f ! -name '.*' \

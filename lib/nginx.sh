@@ -14,6 +14,9 @@ BLUESTREAM_NGINX_LOADED=1
 NGINX_SITE_FILE="/etc/nginx/sites-available/bluestream"
 NGINX_SITE_LINK="/etc/nginx/sites-enabled/bluestream"
 NGINX_SNIPPET_DIR="/etc/nginx/bluestream"
+# Main-context include that pulls the rtmp{} block AFTER ngx_rtmp_module is
+# loaded (50-mod-rtmp.conf sorts before this file in modules-enabled).
+NGINX_RTMP_INCLUDE="/etc/nginx/modules-enabled/60-bluestream-rtmp.conf"
 
 nginx_site_template() {
     printf '%s' "$BLUESTREAM_INSTALL_ROOT/config/nginx/bluestream-site.conf.template"
@@ -23,11 +26,19 @@ nginx_https_template() {
     printf '%s' "$BLUESTREAM_INSTALL_ROOT/config/nginx/bluestream-https-block.conf.template"
 }
 
+nginx_rtmp_template() {
+    printf '%s' "$BLUESTREAM_INSTALL_ROOT/config/nginx/rtmp.conf.template"
+}
+
 # Fail-closed: verify no unresolved template placeholders remain in any
 # generated BlueStream nginx file. Reports the affected file and returns 1.
 nginx_assert_no_placeholders() {
     local f bad
-    for f in "$NGINX_SITE_FILE" "$NGINX_SNIPPET_DIR/hls-location.conf" "$NGINX_SNIPPET_DIR/player-location.conf"; do
+    for f in \
+        "$NGINX_SITE_FILE" \
+        "$NGINX_SNIPPET_DIR/hls-location.conf" \
+        "$NGINX_SNIPPET_DIR/player-location.conf" \
+        "$NGINX_SNIPPET_DIR/rtmp.conf"; do
         [ -f "$f" ] || { bs_error "Generated nginx file missing: $f"; return 1; }
         bad="$(grep -oE '__[A-Z_][A-Z0-9_]*__' "$f" 2>/dev/null | sort -u | tr '\n' ' ')"
         if [ -n "$bad" ]; then
@@ -78,6 +89,23 @@ nginx_gen_config() {
         "$BLUESTREAM_INSTALL_ROOT/config/nginx/player-location.conf" > "$NGINX_SNIPPET_DIR/player-location.conf.tmp"
     mv -f "$NGINX_SNIPPET_DIR/player-location.conf.tmp" "$NGINX_SNIPPET_DIR/player-location.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/hls-location.conf" "$NGINX_SNIPPET_DIR/player-location.conf"
+
+    # Render the private local RTMP ingest (nginx MAIN context).
+    sed -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
+        -e "s|__RTMP_BIND__|$BLUESTREAM_RTMP_BIND|g" \
+        -e "s|__RTMP_PORT__|$BLUESTREAM_RTMP_PORT|g" \
+        "$(nginx_rtmp_template)" > "$NGINX_SNIPPET_DIR/rtmp.conf.tmp"
+    mv -f "$NGINX_SNIPPET_DIR/rtmp.conf.tmp" "$NGINX_SNIPPET_DIR/rtmp.conf"
+    chmod 0644 "$NGINX_SNIPPET_DIR/rtmp.conf"
+
+    # Main-context include so the rtmp{} block is parsed AFTER ngx_rtmp_module
+    # has been loaded (50-mod-rtmp.conf sorts before 60-bluestream-rtmp.conf).
+    {
+        printf '# BlueStream Relay Pro - nginx RTMP main-context include.\n'
+        printf '# Sorts after 50-mod-rtmp.conf so ngx_rtmp_module is loaded first.\n'
+        printf 'include %s/rtmp.conf;\n' "$NGINX_SNIPPET_DIR"
+    } > "$NGINX_RTMP_INCLUDE"
+    chmod 0644 "$NGINX_RTMP_INCLUDE"
 
     # Fail closed: no unresolved placeholders may remain in any generated file.
     if ! nginx_assert_no_placeholders; then

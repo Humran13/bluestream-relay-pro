@@ -177,6 +177,14 @@ probe_compat_report() {
             ;;
     esac
 
+    # The private local RTMP ingest (FLV) carries AAC or MP3 audio only.
+    case "$PA_CODEC" in
+        ''|aac|mp3) ;;
+        *)
+            bs_warn "Audio codec '${PA_CODEC}' is not natively supported in FLV/RTMP. Stream copy would be rejected by the FLV muxer; BlueStream will not transcode automatically."
+            ;;
+    esac
+
     if [ "$STREAM_COPY_RECOMMENDED" = "yes" ]; then
         bs_ok "Stream copy: YES (H.264 + AAC) - no transcoding required"
     else

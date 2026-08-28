@@ -17,7 +17,6 @@ esac
 
 LIBDIR="/usr/local/lib/bluestream/lib"
 CONF_DIR="/etc/bluestream/relays"
-HLS_ROOT="/var/www/bluestream/hls/relay"
 
 [ -f "$LIBDIR/common.sh" ] || exit 1
 # shellcheck source=lib/common.sh
@@ -33,12 +32,9 @@ bs_load_server_conf
 relay_load_config "$NAME" || exit 1
 relay_config_validate || exit 1
 
-# Root bootstrap: ensure the HLS output directory exists and is owned by
-# bluestream-relay:www-data (readable by nginx, writable by ffmpeg).
-mkdir -p "$HLS_ROOT/$NAME" || exit 1
-chown "${BLUESTREAM_USER}:${BLUESTREAM_NGINX_USER}" "$HLS_ROOT/$NAME" || exit 1
-# setgid so FFmpeg-created files inherit group www-data (readable by nginx).
-chmod 2750 "$HLS_ROOT/$NAME" || exit 1
+# nginx-rtmp (www-data) owns all HLS output; FFmpeg publishes over the
+# private local RTMP socket and never writes the HLS filesystem directly,
+# so no HLS directory bootstrap is required here.
 
 # Fail closed: privilege drop prerequisites.
 id "$BLUESTREAM_USER" >/dev/null 2>&1 || exit 1

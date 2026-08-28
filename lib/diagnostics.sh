@@ -41,6 +41,32 @@ run_diagnostics() {
     if bs_have_cmd nginx; then diag_check "Nginx installed" PASS; else diag_check "Nginx installed" FAIL; fi
     if nginx_running; then diag_check "Nginx running" PASS; else diag_check "Nginx running" FAIL; fi
     if nginx -t >/dev/null 2>&1; then diag_check "Nginx config valid" PASS; else diag_check "Nginx config valid" FAIL; fi
+
+    # --- nginx RTMP module (private local ingest -> HLS) ---
+    if [ -f /etc/nginx/modules-enabled/50-mod-rtmp.conf ] && [ -f /usr/lib/nginx/modules/ngx_rtmp_module.so ]; then
+        diag_check "nginx RTMP module loaded" PASS
+    else
+        diag_check "nginx RTMP module loaded" FAIL "libnginx-mod-rtmp not enabled"
+    fi
+    if [ -f "$NGINX_SNIPPET_DIR/rtmp.conf" ] && [ -f "$NGINX_RTMP_INCLUDE" ]; then
+        diag_check "BlueStream RTMP configuration present" PASS
+    else
+        diag_check "BlueStream RTMP configuration present" FAIL
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "sport = :${BLUESTREAM_RTMP_PORT}" 2>/dev/null | grep -q "127.0.0.1:${BLUESTREAM_RTMP_PORT}"; then
+            diag_check "local RTMP listener exists (loopback)" PASS
+        else
+            diag_check "local RTMP listener exists (loopback)" FAIL "nothing listening on 127.0.0.1:1935"
+        fi
+        if ! ss -ltn "sport = :${BLUESTREAM_RTMP_PORT}" 2>/dev/null | grep -qE '0\.0\.0\.0:1935|\[::\]:1935'; then
+            diag_check "RTMP listener loopback only" PASS
+        else
+            diag_check "RTMP listener loopback only" FAIL "RTMP listener must not be public"
+        fi
+    else
+        diag_check "RTMP listener check" WARN "ss not available"
+    fi
     if bs_have_cmd ffmpeg; then
         diag_check "FFmpeg available" PASS "$(ffmpeg -version 2>/dev/null | head -n1 | cut -c1-70)"
     else
@@ -91,14 +117,14 @@ run_diagnostics() {
         fi
     fi
 
-    # HLS root ownership (writable by bluestream-relay, readable by nginx group)
+    # HLS tree owned by the nginx worker (nginx-rtmp writes it).
     if [ -d "$BLUESTREAM_HLS_ROOT" ]; then
         owner="$(stat -c '%U:%G' "$BLUESTREAM_HLS_ROOT" 2>/dev/null)"
         mode="$(stat -c '%a' "$BLUESTREAM_HLS_ROOT" 2>/dev/null)"
-        if [ "$owner" = "$BLUESTREAM_USER:$BLUESTREAM_NGINX_USER" ] && [ "$mode" = "2750" ]; then
-            diag_check "HLS root ownership/mode" PASS "$owner $mode"
+        if [ "$owner" = "$BLUESTREAM_NGINX_USER:$BLUESTREAM_NGINX_USER" ] && [ "$mode" = "750" ]; then
+            diag_check "HLS root ownership/mode (nginx worker)" PASS "$owner $mode"
         else
-            diag_check "HLS root ownership/mode" WARN "found $owner $mode (want $BLUESTREAM_USER:$BLUESTREAM_NGINX_USER 2750)"
+            diag_check "HLS root ownership/mode (nginx worker)" WARN "found $owner $mode (want $BLUESTREAM_NGINX_USER:$BLUESTREAM_NGINX_USER 0750)"
         fi
     fi
 

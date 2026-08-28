@@ -86,9 +86,10 @@ rm -f /usr/local/sbin/bluestream-manager
 rm -f /usr/local/bin/bluestream-status
 rm -rf /usr/local/lib/bluestream
 
-# --- remove nginx site config (keep nginx itself) ---
+# --- remove nginx site config and RTMP include (keep nginx itself) ---
 rm -f /etc/nginx/sites-available/bluestream
 rm -f /etc/nginx/sites-enabled/bluestream
+rm -f /etc/nginx/modules-enabled/60-bluestream-rtmp.conf
 rm -rf /etc/nginx/bluestream
 if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
     systemctl reload nginx 2>/dev/null || true
@@ -112,9 +113,9 @@ printf '%s\n' \
     "" \
     "BlueStream Relay Pro has been uninstalled." \
     "" \
-    "System packages (nginx, ffmpeg, certbot) were NOT removed." \
+    "System packages (nginx, ffmpeg, certbot, libnginx-mod-rtmp) were NOT removed." \
     "Remove them yourself if no longer needed, for example:" \
-    "  sudo apt-get purge nginx ffmpeg certbot" \
+    "  sudo apt-get purge nginx ffmpeg certbot libnginx-mod-rtmp" \
     ""
 
 exit 0
