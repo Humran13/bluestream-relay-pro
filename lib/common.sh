@@ -399,6 +399,9 @@ bs_ensure_hls_dir() {
     mkdir -p "$dir" 2>/dev/null || return 1
     # nginx-rtmp (www-data) writes the HLS output; FFmpeg never touches this tree.
     chown "${BLUESTREAM_NGINX_USER}:${BLUESTREAM_NGINX_USER}" "$dir" 2>/dev/null || return 1
+    # GNU chmod preserves setgid on directories for numeric modes; clear it
+    # explicitly so a migrated (or newly inherited) 2750 ends at exactly 0750.
+    chmod g-s "$dir" 2>/dev/null || return 1
     chmod 0750 "$dir" 2>/dev/null || return 1
     return 0
 }

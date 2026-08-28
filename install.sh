@@ -206,13 +206,20 @@ create_user_and_dirs() {
     # private local RTMP socket and never writes HLS files directly.
     chown "$BLUESTREAM_NGINX_USER":"$BLUESTREAM_NGINX_USER" "$BLUESTREAM_HLS_ROOT" \
         "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
+    # GNU chmod preserves setgid on directories for numeric modes, so clear it
+    # explicitly before pinning the exact 0750 mode.
+    chmod g-s "$BLUESTREAM_HLS_ROOT" "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
     chmod 0750 "$BLUESTREAM_HLS_ROOT" "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR"
 
     # Upgrade/repair: correct any existing managed HLS output directories
     # (per-relay and per-playlist) to the nginx-worker model. Directories only;
-    # generated files and customer media are left untouched.
+    # generated files and customer media are left untouched. GNU chmod preserves
+    # setgid on directories for numeric modes, so clear it explicitly before
+    # pinning each directory to exactly 0750.
     find "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR" -type d \
         -exec chown "${BLUESTREAM_NGINX_USER}:${BLUESTREAM_NGINX_USER}" {} + 2>/dev/null || true
+    find "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR" -type d \
+        -exec chmod g-s {} + 2>/dev/null || true
     find "$BLUESTREAM_HLS_RELAY_DIR" "$BLUESTREAM_HLS_PLAYLIST_DIR" -type d \
         -exec chmod 0750 {} + 2>/dev/null || true
 
