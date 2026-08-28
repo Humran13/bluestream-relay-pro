@@ -490,21 +490,24 @@ bs_prompt() {
 }
 
 bs_select() {
-    local title="$1" var="$2"
+    # Internal locals use a clearly private _bs_select_* prefix so that no
+    # realistic caller output-variable name (e.g. `choice`) can shadow the
+    # printf -v target under Bash dynamic scoping.
+    local _bs_select_title="$1" _bs_select_var="$2"
     shift 2
-    local items=("$@")
-    local i choice
-    printf '\n%s\n' "$title"
-    for i in "${!items[@]}"; do
-        printf '  %2d) %s\n' "$((i + 1))" "${items[$i]}"
+    local _bs_select_items=("$@")
+    local _bs_select_i _bs_select_index
+    printf '\n%s\n' "$_bs_select_title"
+    for _bs_select_i in "${!_bs_select_items[@]}"; do
+        printf '  %2d) %s\n' "$((_bs_select_i + 1))" "${_bs_select_items[$_bs_select_i]}"
     done
-    printf 'Selection [1-%d, 0 to cancel]: ' "${#items[@]}"
-    read -r choice || return 1
-    case "$choice" in
+    printf 'Selection [1-%d, 0 to cancel]: ' "${#_bs_select_items[@]}"
+    read -r _bs_select_index || return 1
+    case "$_bs_select_index" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    if [ "$choice" -ge 1 ] && [ "$choice" -le "${#items[@]}" ] 2>/dev/null; then
-        printf -v "$var" '%s' "${items[$((choice - 1))]}"
+    if [ "$_bs_select_index" -ge 1 ] && [ "$_bs_select_index" -le "${#_bs_select_items[@]}" ] 2>/dev/null; then
+        printf -v "$_bs_select_var" '%s' "${_bs_select_items[$((_bs_select_index - 1))]}"
         return 0
     fi
     return 1
