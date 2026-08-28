@@ -1,0 +1,28 @@
+# BlueStream Relay Pro - sudo policy for the web console (GUI-1A.3A template).
+#
+# Installed by GUI-1A.3B as:  /etc/sudoers.d/bluestream-web
+# Validate before use on Ubuntu:  sudo visudo -cf /etc/sudoers.d/bluestream-web
+#
+# The unprivileged bluestream-web process may run ONE command as root: the
+# read-only web-ctl bridge. web-ctl itself is the hard-coded operation
+# allowlist (version|snapshot|relay_list|playlist_list only) and is the sole
+# trusted execution path to the root-owned engine libraries.
+#
+# Nothing else is granted: no bash, sh, systemctl, journalctl, python,
+# bluestream-manager, editors, directories or wildcard executable paths.
+
+# --- Environment security (first privilege boundary) ------------------------
+# env_reset is REQUIRED: BASH_ENV (and similar variables) would otherwise be
+# sourced by bash BEFORE web-ctl's own script body runs, executing attacker
+# code as root. web-ctl also unsets several variables internally, but sudoers
+# must not rely on in-script sanitization alone.
+#
+# env_reset already strips BASH_ENV, ENV, PYTHONPATH, PYTHONHOME, CDPATH and
+# GLOBIGNORE (none are in the default env_keep set), so no explicit env_delete
+# entries are required. secure_path additionally pins PATH for every command.
+Defaults:bluestream-web env_reset
+Defaults:bluestream-web secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Never allow SETENV on this rule (no "SETENV:" tag is granted anywhere).
+
+# --- The single granted command ---------------------------------------------
+bluestream-web ALL=(root) NOPASSWD: /usr/local/lib/bluestream/web-ctl

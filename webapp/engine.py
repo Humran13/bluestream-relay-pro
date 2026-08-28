@@ -18,6 +18,12 @@ ALLOWED_OPERATIONS = frozenset({"version", "snapshot", "relay_list", "playlist_l
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Production (privileged) execution paths. These are fixed, absolute, trusted
+# paths - never resolved through PATH or from caller input. The installer
+# (GUI-1A.3B) will place web-ctl at INSTALLED_WEB_CTL as root-owned 0700.
+SUDO_PATH = "/usr/bin/sudo"
+INSTALLED_WEB_CTL = "/usr/local/lib/bluestream/web-ctl"
+
 
 class EngineError(Exception):
     """Controlled, user-safe error when the engine bridge is unavailable."""
@@ -50,11 +56,24 @@ def default_bash_path() -> str:
 
 
 class EngineClient:
-    """Thin, fail-closed client over the web-ctl bridge."""
+    """Thin, fail-closed client over the web-ctl bridge.
 
-    def __init__(self, web_ctl=None, bash=None, timeout: float = 10.0):
-        self._web_ctl = Path(web_ctl) if web_ctl is not None else default_web_ctl_path()
-        self._bash = bash if bash is not None else default_bash_path()
+    Local (development) mode runs the project's web-ctl through a trusted
+    bash. Production mode runs the installed web-ctl exactly through
+    ``/usr/bin/sudo -n /usr/local/lib/bluestream/web-ctl <operation>`` with an
+    argv list and ``shell=False``; sudo and web-ctl paths are fixed module
+    constants (no PATH lookup, no caller-controlled executable path).
+    """
+
+    def __init__(self, web_ctl=None, bash=None, timeout: float = 10.0, production: bool = False):
+        self._production = bool(production)
+        if self._production:
+            # Fixed trusted paths; resolved at call time from module constants.
+            self._web_ctl = None
+            self._bash = None
+        else:
+            self._web_ctl = Path(web_ctl) if web_ctl is not None else default_web_ctl_path()
+            self._bash = bash if bash is not None else default_bash_path()
         self.timeout = float(timeout)
 
     @property
@@ -65,6 +84,10 @@ class EngineClient:
     def bash_path(self) -> str:
         return self._bash
 
+    @property
+    def is_production(self) -> bool:
+        return self._production
+
     def call(self, operation: str, timeout: float | None = None):
         """Run one read-only web-ctl operation and return its ``data`` payload.
 
@@ -74,9 +97,12 @@ class EngineClient:
         """
         if operation not in ALLOWED_OPERATIONS:
             raise EngineError("unsupported operation: %r" % operation)
-        if not self._web_ctl.is_file():
-            raise EngineError("engine bridge not found")
-        cmd = [self._bash, str(self._web_ctl), operation]
+        if self._production:
+            cmd = [SUDO_PATH, "-n", INSTALLED_WEB_CTL, operation]
+        else:
+            if not self._web_ctl.is_file():
+                raise EngineError("engine bridge not found")
+            cmd = [self._bash, str(self._web_ctl), operation]
         try:
             proc = subprocess.run(
                 cmd,

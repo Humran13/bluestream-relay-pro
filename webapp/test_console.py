@@ -25,7 +25,8 @@ if str(REPO_ROOT) not in sys.path:
 from webapp import app as app_module
 from webapp import security
 from webapp.engine import ALLOWED_OPERATIONS, EngineClient, EngineError
-from flask import url_for
+from flask import request, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
 import webapp.engine as engine_module
 
 ADMIN_PASSWORD = "correct-horse-battery-staple"
@@ -545,6 +546,300 @@ class SecurityTests(unittest.TestCase):
         raw = (state / "admin.json").read_text(encoding="utf-8")
         self.assertNotIn("cli-secret-password", raw)
         self.assertTrue(security.verify_password("cli-secret-password", record))
+
+
+class ProductionModeTests(unittest.TestCase):
+    """GUI-1A.3A production runtime and privilege-separation plumbing."""
+
+    FORBIDDEN = (
+        "start", "stop", "restart", "enable", "disable",
+        "create", "edit", "delete", "upload", "restore",
+        "nginx", "ssl", "firewall",
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = make_state(self._tmp.name)
+        self.repo_root = Path(__file__).resolve().parent.parent
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _prod_app(self, **kwargs):
+        kwargs.setdefault("engine", FakeEngine(DEFAULT_PAYLOADS))
+        return app_module.create_app(
+            state_dir=self.state, production=True, **kwargs
+        )
+
+    def test_production_requires_explicit_state_dir(self):
+        with self.assertRaises(ValueError):
+            app_module.create_app(production=True)
+
+    def test_proxyfix_enabled_only_in_production(self):
+        local_app = app_module.create_app(state_dir=self.state)
+        self.assertNotIsInstance(local_app.wsgi_app, ProxyFix)
+        prod_app = self._prod_app()
+        self.assertIsInstance(prod_app.wsgi_app, ProxyFix)
+
+    def test_local_mode_ignores_spoofed_x_forwarded_for(self):
+        local_app = app_module.create_app(state_dir=self.state)
+        with local_app.test_request_context(
+            "/console/login",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            headers={"X-Forwarded-For": "203.0.113.7"},
+        ):
+            self.assertEqual(request.remote_addr, "127.0.0.1")
+        # end-to-end: failed logins with different spoofed XFF still hit the
+        # same real client key (no rate-limit bypass).
+        client = local_app.test_client()
+        for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+            token = get_csrf(client)
+            client.post(
+                "/console/login",
+                data={"username": "admin", "password": "wrong", "csrf_token": token},
+                headers={"X-Forwarded-For": ip},
+            )
+        limiter = local_app.extensions["bluestream_limiter"]
+        self.assertEqual(limiter.failure_count("127.0.0.1"), 3)
+
+    def test_production_rate_limiter_uses_corrected_client_ip(self):
+        # Requirement #8: with one trusted hop the rate limiter keys on the
+        # proxy-corrected client IP (observed through the real WSGI stack).
+        prod_app = self._prod_app()
+        client = prod_app.test_client()
+        token = get_csrf(client)
+        client.post(
+            "/console/login",
+            data={"username": "admin", "password": "wrong", "csrf_token": token},
+            headers={"X-Forwarded-For": "203.0.113.7"},
+        )
+        limiter = prod_app.extensions["bluestream_limiter"]
+        self.assertEqual(limiter.failure_count("203.0.113.7"), 1)
+        self.assertEqual(limiter.failure_count("127.0.0.1"), 0)
+
+    def test_production_does_not_trust_more_than_one_hop(self):
+        prod_app = self._prod_app()
+        client = prod_app.test_client()
+        token = get_csrf(client)
+        client.post(
+            "/console/login",
+            data={"username": "admin", "password": "wrong", "csrf_token": token},
+            headers={"X-Forwarded-For": "198.51.100.9, 203.0.113.7, 10.0.0.1"},
+        )
+        limiter = prod_app.extensions["bluestream_limiter"]
+        # x_for=1 trusts exactly one hop: the LAST XFF entry (the value nginx
+        # appended). Earlier client-spoofed values are ignored entirely.
+        self.assertEqual(limiter.failure_count("10.0.0.1"), 1)
+        self.assertEqual(limiter.failure_count("203.0.113.7"), 0)
+        self.assertEqual(limiter.failure_count("198.51.100.9"), 0)
+
+    def test_production_nginx_appended_xff_yields_real_client(self):
+        # Mirrors nginx `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+        # plus ProxyFix(x_for=1): the client sends a spoofed leading value and
+        # nginx appends the real peer. The last (nginx-appended) value wins.
+        prod_app = self._prod_app()
+        client = prod_app.test_client()
+        token = get_csrf(client)
+        client.post(
+            "/console/login",
+            data={"username": "admin", "password": "wrong", "csrf_token": token},
+            headers={"X-Forwarded-For": "203.0.113.99, 198.51.100.7"},
+        )
+        limiter = prod_app.extensions["bluestream_limiter"]
+        self.assertEqual(limiter.failure_count("198.51.100.7"), 1)
+        self.assertEqual(limiter.failure_count("203.0.113.99"), 0)
+
+    def test_local_cookie_secure_false_and_path_console(self):
+        local_app = app_module.create_app(
+            state_dir=self.state, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        client = local_app.test_client()
+        login(client)
+        cookie = client.get_cookie("session", path="/console")
+        self.assertIsNotNone(cookie)
+        self.assertFalse(cookie.secure)
+        self.assertEqual(cookie.path, "/console")
+
+    def test_production_secure_cookie_defaults_on_and_can_be_overridden(self):
+        prod_app = self._prod_app()
+        client = prod_app.test_client()
+        login(client)
+        cookie = client.get_cookie("session", path="/console")
+        self.assertIsNotNone(cookie)
+        self.assertTrue(cookie.secure)
+        self.assertEqual(cookie.path, "/console")
+        # explicit HTTP-only override must be supported for local deployment tests
+        http_app = self._prod_app(config={"SESSION_COOKIE_SECURE": False})
+        client2 = http_app.test_client()
+        login(client2)
+        self.assertFalse(client2.get_cookie("session", path="/console").secure)
+
+    def test_production_dashboard_renders(self):
+        prod_app = self._prod_app()
+        client = prod_app.test_client()
+        login(client)
+        rv = client.get("/console/")
+        self.assertEqual(rv.status_code, 200)
+        self.assertIn("Dashboard", rv.get_data(as_text=True))
+
+    def test_production_has_no_mutation_routes(self):
+        prod_app = self._prod_app()
+        for rule in prod_app.url_map.iter_rules():
+            lower = rule.endpoint.lower()
+            for word in self.FORBIDDEN:
+                self.assertNotIn(word, lower)
+
+    def test_production_engine_argv_and_shell_false(self):
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["kwargs"] = kwargs
+
+            class Result:
+                returncode = 0
+                stdout = b'{"ok": true, "data": {"version": "0.1.0"}}'
+                stderr = b""
+
+            return Result()
+
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(production=True)
+            data = client.call("version")
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(data, {"version": "0.1.0"})
+        self.assertEqual(
+            calls["cmd"],
+            ["/usr/bin/sudo", "-n", "/usr/local/lib/bluestream/web-ctl", "version"],
+        )
+        self.assertIs(calls["kwargs"]["shell"], False)
+
+    def test_production_unsupported_ops_rejected_before_subprocess(self):
+        called = []
+
+        def fake_run(cmd, **kwargs):
+            called.append(cmd)
+            raise AssertionError("subprocess must not be executed")
+
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(production=True)
+            for op in ("relay_start", "relay_stop", "delete", "nginx reload"):
+                with self.assertRaises(EngineError):
+                    client.call(op)
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(called, [])
+
+    @unittest.skipUnless(
+        os.name == "posix", "fake-sudo subprocess execution needs POSIX"
+    )
+    def test_production_real_subprocess_via_fake_sudo(self):
+        fake_webctl = write_fake_webctl(
+            self._tmp.name,
+            "web-ctl",
+            "printf '%s\\n' '{\"ok\": true, \"data\": {\"version\": \"0.1.0\"}}'\n",
+        )
+        fake_sudo = Path(self._tmp.name) / "sudo"
+        fake_sudo.write_text("#!/usr/bin/env bash\nexec \"$@\"\n", encoding="utf-8")
+        fake_sudo.chmod(0o700)
+        orig_sudo = engine_module.SUDO_PATH
+        orig_wctl = engine_module.INSTALLED_WEB_CTL
+        try:
+            engine_module.SUDO_PATH = str(fake_sudo)
+            engine_module.INSTALLED_WEB_CTL = str(fake_webctl)
+            client = EngineClient(production=True, timeout=5)
+            data = client.call("version")
+        finally:
+            engine_module.SUDO_PATH = orig_sudo
+            engine_module.INSTALLED_WEB_CTL = orig_wctl
+        self.assertEqual(data, {"version": "0.1.0"})
+
+    def test_gunicorn_template_binds_loopback_only(self):
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("127.0.0.1:8080", text)
+        self.assertNotIn("0.0.0.0", text)
+        self.assertIn("--workers 1", text)
+
+    def test_gunicorn_template_runs_as_bluestream_web(self):
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("User=bluestream-web", text)
+        self.assertIn("Group=bluestream-web", text)
+
+    def test_service_template_does_not_break_sudo(self):
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+            encoding="utf-8"
+        )
+        # Inspect active directives only (comments may legitimately discuss
+        # the directives that are deliberately NOT set).
+        active = "\n".join(
+            ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        )
+        # NoNewPrivileges=true would block sudo from gaining root.
+        self.assertNotIn("NoNewPrivileges=true", active)
+        # These can also break the sudo privilege transition; verify on Ubuntu
+        # before ever adding them (GUI-1A.3B).
+        self.assertNotIn("CapabilityBoundingSet=", active)
+        self.assertNotIn("RestrictSUIDSGID=", active)
+        # The compatible hardening directives remain present.
+        for directive in (
+            "ProtectSystem=strict",
+            "ReadWritePaths=/var/lib/bluestream/web /run/sudo",
+            "ProtectHome=true",
+            "PrivateTmp=true",
+            "PrivateDevices=true",
+            "ProtectKernelTunables=true",
+            "ProtectKernelModules=true",
+            "ProtectControlGroups=true",
+            "RestrictRealtime=true",
+            "LockPersonality=true",
+            "Environment=PYTHONUNBUFFERED=1",
+            "Environment=PYTHONNOUSERSITE=1",
+        ):
+            self.assertIn(directive, active)
+
+    def test_sudoers_grants_only_web_ctl(self):
+        text = (self.repo_root / "config" / "sudoers" / "bluestream-web").read_text(
+            encoding="utf-8"
+        )
+        grant_lines = [
+            ln.strip() for ln in text.splitlines() if "NOPASSWD:" in ln and ln.strip()
+        ]
+        self.assertTrue(grant_lines, "no NOPASSWD grant found")
+        for line in grant_lines:
+            self.assertIn("/usr/local/lib/bluestream/web-ctl", line)
+            for dangerous in (
+                "systemctl", "journalctl", "python", "bluestream-manager",
+                "bash", "sh ", "vim", "nano", "/usr/bin/", "/bin/",
+            ):
+                self.assertNotIn(dangerous, line)
+
+    def test_sudoers_enforces_env_reset_and_secure_path(self):
+        text = (self.repo_root / "config" / "sudoers" / "bluestream-web").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("env_reset", text)
+        self.assertIn("secure_path", text)
+
+    def test_sudoers_does_not_allow_setenv(self):
+        text = (self.repo_root / "config" / "sudoers" / "bluestream-web").read_text(
+            encoding="utf-8"
+        )
+        # Comments may mention SETENV; only active policy lines matter.
+        active = "\n".join(
+            ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        )
+        self.assertNotIn("SETENV", active)
 
 
 class IntegrationTest(unittest.TestCase):

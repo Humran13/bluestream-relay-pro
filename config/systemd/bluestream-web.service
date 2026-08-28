@@ -1,0 +1,67 @@
+# BlueStream Relay Pro - web console systemd unit template (GUI-1A.3A).
+#
+# Installed by GUI-1A.3B as:  /etc/systemd/system/bluestream-web.service
+#
+# The web console runs unprivileged as bluestream-web, listens ONLY on
+# 127.0.0.1:8080, and reaches the root-owned BlueStream engine through the
+# narrowly scoped sudoers entry (config/sudoers/bluestream-web). nginx is the
+# only front-end; Gunicorn is never exposed publicly.
+#
+# PATH/VERIFICATION NOTES (GUI-1A.3B must verify on the real Ubuntu host):
+#   - /usr/bin/gunicorn is the Debian/Ubuntu python3-gunicorn path; if
+#     installed into a venv, replace with the absolute venv gunicorn path.
+#   - WorkingDirectory=/usr/local/lib/bluestream matches where the installer
+#     places the webapp package (so `webapp.wsgi:application` imports).
+#   - /var/lib/bluestream/web must be created by the installer and readable by
+#     bluestream-web (admin.json, secret_key). ProtectSystem=strict keeps the
+#     rest read-only; ReadWritePaths permits only that state directory.
+
+[Unit]
+Description=BlueStream Relay Pro - web console (Gunicorn)
+Documentation=file:/usr/local/lib/bluestream/docs/installation.md
+Wants=network-online.target
+After=network-online.target nginx.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=bluestream-web
+Group=bluestream-web
+WorkingDirectory=/usr/local/lib/bluestream
+# PYTHONNOUSERSITE: never import from ~/.local user site-packages (import
+# hardening for an unprivileged web user). PYTHONUNBUFFERED keeps logs flowing.
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+ExecStart=/usr/bin/gunicorn --workers 1 --bind 127.0.0.1:8080 webapp.wsgi:application
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening ----------------------------------------------------------------
+# NOTE: NoNewPrivileges=true is deliberately NOT set. The service must run
+# `sudo -n /usr/local/lib/bluestream/web-ctl`, which requires gaining root;
+# NoNewPrivileges would break that. CapabilityBoundingSet / RestrictSUIDSGID
+# are also omitted for the same reason and MUST be verified on Ubuntu before
+# adding. All directives below are compatible with the sudo path.
+ProtectSystem=strict
+# The web state dir (writable) and sudo's timestamp directory. sudo runs inside
+# the same mount namespace as this service; with ProtectSystem=strict /run is
+# read-only, and sudo may write a per-user timestamp under /run/sudo for
+# NOPASSWD rules. /run/sudo stays root-owned on disk, so only the sudo'd root
+# process can write there - no privilege is granted to bluestream-web.
+ReadWritePaths=/var/lib/bluestream/web /run/sudo
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+
+SyslogIdentifier=bluestream-web
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

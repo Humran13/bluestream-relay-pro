@@ -32,6 +32,7 @@ from flask import (
     session,
     url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from webapp.engine import EngineClient, EngineError
 from webapp.security import (
@@ -45,15 +46,34 @@ from webapp.security import (
     verify_password,
 )
 
+# Production web state lives here (created by the installer in GUI-1A.3B).
+# It holds only web-console state (admin.json, secret_key); engine configs stay
+# root-only in /etc/bluestream behind web-ctl.
+PRODUCTION_STATE_DIR = "/var/lib/bluestream/web"
 
-def create_app(state_dir=None, engine=None, config=None) -> Flask:
+
+def create_app(state_dir=None, engine=None, config=None, production: bool = False) -> Flask:
     """Application factory.
 
-    ``state_dir`` - local runtime state (admin record + secret key).
+    ``state_dir`` - runtime state (admin record + secret key). Local mode
+        defaults to a temp dir; production mode REQUIRES an explicit path
+        (e.g. ``/var/lib/bluestream/web``) and fails closed otherwise.
     ``engine``    - optional EngineClient/FakeEngine override (tests).
     ``config``    - optional dict merged over default Flask config.
+    ``production``- enables production-only plumbing: fixed sudo-based
+        EngineClient, Werkzeug ProxyFix trusting exactly one nginx hop, and
+        Secure session cookies by default (fail-safe; override for HTTP-only).
+        Local GUI-1A.2 behavior is unchanged when False.
     """
-    state_dir = Path(state_dir) if state_dir else default_state_dir()
+    if production:
+        if state_dir is None:
+            raise ValueError(
+                "production mode requires an explicit state directory (e.g. %s)"
+                % PRODUCTION_STATE_DIR
+            )
+        state_dir = Path(state_dir)
+    else:
+        state_dir = Path(state_dir) if state_dir else default_state_dir()
     # Static assets are served under /console/static so the whole app lives
     # inside the /console prefix (nginx reverse proxy friendly in a later phase).
     app = Flask(__name__, static_url_path="/console/static")
@@ -62,17 +82,26 @@ def create_app(state_dir=None, engine=None, config=None) -> Flask:
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_PATH="/console",
-        # GUI-1A.2 is local HTTP only; set Secure=True when HTTPS is active.
-        SESSION_COOKIE_SECURE=False,
+        # Local GUI-1A.2 is HTTP only. Production defaults to Secure (fail-safe);
+        # an explicit config override enables HTTP-only testing/deployments.
+        SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
         MAX_CONTENT_LENGTH=16 * 1024,
     )
     if config:
         app.config.update(config)
 
-    engine_client = engine if engine is not None else EngineClient(
-        timeout=app.config.get("ENGINE_TIMEOUT", 10.0)
-    )
+    if engine is not None:
+        engine_client = engine
+    elif production:
+        engine_client = EngineClient(
+            production=True,
+            timeout=app.config.get("ENGINE_TIMEOUT", 10.0),
+        )
+    else:
+        engine_client = EngineClient(
+            timeout=app.config.get("ENGINE_TIMEOUT", 10.0)
+        )
     rate_limiter = LoginRateLimiter(
         max_attempts=app.config.get("RATE_LIMIT_MAX_ATTEMPTS", 5),
         window_seconds=app.config.get("RATE_LIMIT_WINDOW_SECONDS", 300.0),
@@ -82,6 +111,18 @@ def create_app(state_dir=None, engine=None, config=None) -> Flask:
     app.extensions["bluestream_engine"] = engine_client
     app.extensions["bluestream_limiter"] = rate_limiter
     app.extensions["bluestream_state_dir"] = state_dir
+
+    if production:
+        # Trust exactly ONE nginx proxy hop (Gunicorn listens on loopback only,
+        # nginx is the sole proxy). Never trust additional hops or client input.
+        app.wsgi_app = ProxyFix(
+            app.wsgi_app,
+            x_for=1,
+            x_proto=1,
+            x_host=1,
+            x_port=0,
+            x_prefix=0,
+        )
 
     _register_csrf_protection(app)
     _register_security_headers(app)
