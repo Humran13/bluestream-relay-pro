@@ -23,7 +23,7 @@ run_selftest() {
     local sample="$BLUESTREAM_MEDIA_DIR/.selftest-$ts.mp4"
     local name="selftest-$ts"
     local m3u8dir pid user code base i passed=0 failed=0
-    local unit comm settled
+    local unit comm settled rtmp_ok rtmp_pidnote rtmp_lines
 
     check() {
         local label="$1" result="$2"
@@ -129,12 +129,32 @@ run_selftest() {
     fi
 
     # 4b. Verify FFmpeg is publishing to the private loopback RTMP application.
+    #     Settle-aware: poll up to 15s for an ESTABLISHED client connection to
+    #     127.0.0.1:1935. A LISTEN socket alone is never sufficient (nginx is
+    #     always listening); we require an actual client connection. ss output
+    #     is captured first and matched with `case`, avoiding `grep -q` inside
+    #     a pipeline (grep -q exits early and is not pipefail-safe).
     if [ -n "$settled" ]; then
+        rtmp_ok=""
+        rtmp_pidnote=""
         if command -v ss >/dev/null 2>&1; then
-            if ss -tn 2>/dev/null | grep -q "127.0.0.1:${BLUESTREAM_RTMP_PORT}"; then
-                check "ffmpeg publishing to private RTMP (127.0.0.1:1935)" 0
+            for i in $(seq 1 15); do
+                rtmp_lines="$(ss -tnp 2>/dev/null | grep "127.0.0.1:${BLUESTREAM_RTMP_PORT}" || true)"
+                case "$rtmp_lines" in
+                    *ESTAB*)
+                        rtmp_ok=1
+                        case "$rtmp_lines" in
+                            *"pid=$pid"*) rtmp_pidnote=" (ffmpeg pid $pid)" ;;
+                        esac
+                        break
+                        ;;
+                esac
+                sleep 1
+            done
+            if [ -n "$rtmp_ok" ]; then
+                check "ffmpeg publishing to private RTMP (127.0.0.1:1935)$rtmp_pidnote" 0
             else
-                bs_error "No TCP connection from FFmpeg to 127.0.0.1:1935"
+                bs_error "No ESTABLISHED client connection from FFmpeg to 127.0.0.1:1935 within 15s"
                 check "ffmpeg publishing to private RTMP (127.0.0.1:1935)" 1
             fi
         else
