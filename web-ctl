@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# BlueStream Relay Pro - read-only web control bridge (GUI-1A.1).
+#
+# Machine-readable JSON front-end over the existing BlueStream Bash libraries,
+# designed to be called by a future Flask console application.
+#
+# This phase implements READ-ONLY operations only:
+#
+#   web-ctl version
+#   web-ctl snapshot
+#   web-ctl relay_list
+#   web-ctl playlist_list
+#
+# Output contract:
+#   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
+#   failure -> {"ok": false, "error": ..., "code": ...}      on stdout, exit nonzero
+#
+# JSON is produced by webapp/json_helper.py (Python stdlib json) from a
+# NUL-delimited stream.  No value is ever interpolated into a JSON literal by
+# the shell, so arbitrary strings (quotes, newlines, tabs, Unicode, ...) stay
+# valid JSON.  Debug output, if any, goes to stderr only.
+#
+# Security: hard-coded operation allowlist, no eval, no dynamic dispatch, no
+# arbitrary command execution, no environment-based code execution, no
+# credential leakage (source URLs are never emitted), fail closed.
+#
+# BlueStream Relay Pro 0.1.0 (foundation). See LICENSE for terms.
+set -u
+
+# Environment hardening for privileged use (defense-in-depth on top of the
+# sudoers env_reset configured in a later phase): never let caller-controlled
+# variables make this script or the Python helper load attacker code.
+#   PYTHONPATH/PYTHONHOME - would let an attacker shadow stdlib modules
+#   BASH_ENV/ENV          - would make child shells source attacker files
+#   CDPATH                - would make `cd` resolve through attacker dirs
+#   GLOBIGNORE            - would alter glob expansion semantics
+unset BASH_ENV ENV PYTHONPATH PYTHONHOME CDPATH GLOBIGNORE 2>/dev/null || true
+
+# Predictable command search: standard system directories first.  Existing
+# environment directories remain appended so non-standard installs (and local
+# development trees) can still resolve python3/python.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# ---------------------------------------------------------------------------
+# Locate install root and the Python JSON helper.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/lib/common.sh" ]; then
+    BS_ROOT="$SCRIPT_DIR"
+elif [ -d /usr/local/lib/bluestream ] && [ -f /usr/local/lib/bluestream/lib/common.sh ]; then
+    BS_ROOT="/usr/local/lib/bluestream"
+else
+    printf '%s\n' '{"ok": false, "error": "cannot locate BlueStream libraries", "code": "NO_LIBRARIES"}'
+    exit 1
+fi
+
+BS_JSON_HELPER="$BS_ROOT/webapp/json_helper.py"
+
+# Prefer the absolute trusted interpreter on installed/privileged systems;
+# fall back to PATH lookup so local development trees (e.g. Git Bash on
+# Windows) still resolve python3/python.
+if [ -x /usr/bin/python3 ]; then
+    BS_PYTHON="/usr/bin/python3"
+else
+    BS_PYTHON="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+fi
+if [ -z "$BS_PYTHON" ]; then
+    printf '%s\n' '{"ok": false, "error": "python3 is required for JSON output", "code": "NO_PYTHON"}'
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Load the existing engine libraries (read-only helpers only).  All BlueStream
+# business logic (version, config parsing, discovery, service state, health)
+# stays in these libraries; Python is used only for JSON serialization.
+# ---------------------------------------------------------------------------
+for _bs_lib in common health relay playlist; do
+    # shellcheck source=lib/common.sh
+    . "$BS_ROOT/lib/$_bs_lib.sh" || {
+        printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
+        exit 1
+    }
+done
+unset _bs_lib
+bs_setup
+
+# ---------------------------------------------------------------------------
+# JSON emission helpers (all serialization goes through the Python helper).
+# ---------------------------------------------------------------------------
+
+# wc_json <mode>: run the helper with stdin carrying NUL-delimited records.
+wc_json() {
+    local mode="$1"
+    if [ ! -f "$BS_JSON_HELPER" ]; then
+        printf '%s\n' '{"ok": false, "error": "JSON helper not found", "code": "NO_JSON_HELPER"}'
+        return 1
+    fi
+    "$BS_PYTHON" "$BS_JSON_HELPER" "$mode"
+    return $?
+}
+
+# wc_fail <message> <code>: emit a failure envelope to stdout and exit nonzero.
+wc_fail() {
+    local msg="$1" code="$2"
+    if [ ! -f "$BS_JSON_HELPER" ]; then
+        printf '%s\n' '{"ok": false, "error": "JSON helper not found", "code": "NO_JSON_HELPER"}'
+    else
+        printf 'error\0%s\0code\0%s\0' "$msg" "$code" | "$BS_PYTHON" "$BS_JSON_HELPER" error
+    fi
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Read-only operations
+# ---------------------------------------------------------------------------
+
+wc_op_version() {
+    local ver
+    ver="$(bs_version)"
+    printf 'version\0%s\0' "$ver" | wc_json object
+}
+
+wc_op_snapshot() {
+    local ver hostname_str uptime_str domain https_conf nginx_active
+    local ffmpeg_ok ffprobe_ok relay_count playlist_count
+    ver="$(bs_version)"
+    hostname_str="$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'unknown')"
+    uptime_str="$(uptime -p 2>/dev/null || uptime 2>/dev/null || printf 'unknown')"
+    domain="${BLUESTREAM_DOMAIN:-}"
+    if [ "${BLUESTREAM_SSL_ENABLED:-no}" = "yes" ]; then https_conf="yes"; else https_conf="no"; fi
+    nginx_active="no"
+    if [ "$(systemctl is-active nginx 2>/dev/null)" = "active" ]; then nginx_active="yes"; fi
+    ffmpeg_ok="no";  command -v ffmpeg  >/dev/null 2>&1 && ffmpeg_ok="yes"
+    ffprobe_ok="no"; command -v ffprobe >/dev/null 2>&1 && ffprobe_ok="yes"
+    relay_count="$(relay_list_names 2>/dev/null | grep -c . || true)"
+    playlist_count="$(playlist_list_names 2>/dev/null | grep -c . || true)"
+    [ -n "$relay_count" ] || relay_count="0"
+    [ -n "$playlist_count" ] || playlist_count="0"
+    {
+        printf 'version\0%s\0'           "$ver"
+        printf 'hostname\0%s\0'          "$hostname_str"
+        printf 'uptime\0%s\0'            "$uptime_str"
+        printf 'domain\0%s\0'            "$domain"
+        printf 'https_configured\0%s\0'  "$https_conf"
+        printf 'nginx_active\0%s\0'      "$nginx_active"
+        printf 'ffmpeg_available\0%s\0'  "$ffmpeg_ok"
+        printf 'ffprobe_available\0%s\0' "$ffprobe_ok"
+        printf 'relay_count\0%s\0'       "$relay_count"
+        printf 'playlist_count\0%s\0'    "$playlist_count"
+    } | wc_json object
+}
+
+wc_op_relay_list() {
+    local name unit active enabled type health
+    for name in $(relay_list_names 2>/dev/null); do
+        # Names come from validated relay config discovery ([a-z0-9_-]{1,48});
+        # the for-loop word split is therefore safe.
+        unit="$(bs_unit relay "$name")"
+        active="no"
+        if [ "$(systemctl is-active "$unit" 2>/dev/null)" = "active" ]; then active="yes"; fi
+        enabled="no"
+        if [ "$(systemctl is-enabled "$unit" 2>/dev/null)" = "enabled" ]; then enabled="yes"; fi
+        type="unknown"
+        health="UNKNOWN"
+        if relay_load_config "$name" 2>/dev/null; then
+            type="$RELAY_TYPE"
+            if health_state relay "$name" 2>/dev/null; then
+                health="$HEALTH_STATE"
+            fi
+        fi
+        {
+            printf '\0'
+            printf 'name\0%s\0'    "$name"
+            printf 'type\0%s\0'    "$type"
+            printf 'active\0%s\0'  "$active"
+            printf 'enabled\0%s\0' "$enabled"
+            printf 'health\0%s\0'  "$health"
+        }
+    done | wc_json array
+}
+
+wc_op_playlist_list() {
+    local name unit active enabled
+    for name in $(playlist_list_names 2>/dev/null); do
+        # Names come from validated playlist config discovery ([a-z0-9_-]{1,48}).
+        unit="$(bs_unit playlist "$name")"
+        active="no"
+        if [ "$(systemctl is-active "$unit" 2>/dev/null)" = "active" ]; then active="yes"; fi
+        enabled="no"
+        if [ "$(systemctl is-enabled "$unit" 2>/dev/null)" = "enabled" ]; then enabled="yes"; fi
+        {
+            printf '\0'
+            printf 'name\0%s\0'    "$name"
+            printf 'active\0%s\0'  "$active"
+            printf 'enabled\0%s\0' "$enabled"
+        }
+    done | wc_json array
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch: hard-coded allowlist, fail closed.  No dynamic execution.
+# ---------------------------------------------------------------------------
+wc_dispatch() {
+    local operation="${1:-}"
+    case "$operation" in
+        version)       wc_op_version ;;
+        snapshot)      wc_op_snapshot ;;
+        relay_list)    wc_op_relay_list ;;
+        playlist_list) wc_op_playlist_list ;;
+        '')
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list)" "MISSING_OPERATION"
+            ;;
+        *)
+            wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"
+            ;;
+    esac
+}
+
+wc_dispatch "${1:-}"
