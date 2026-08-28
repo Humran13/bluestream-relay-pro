@@ -11,14 +11,14 @@ Description=BlueStream Relay Pro - Relay %i
 Documentation=file:/usr/local/lib/bluestream/docs/installation.md
 Wants=network-online.target
 After=network-online.target nginx.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
 ExecStart=/usr/local/lib/bluestream/run-relay.sh %i
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 # --- Hardening (directives available since systemd 231; OK on Ubuntu 20.04+) ---
 NoNewPrivileges=true

@@ -46,6 +46,18 @@ command -v ffmpeg >/dev/null 2>&1 || exit 1
 
 relay_build_ffmpeg_args || exit 1
 
+# Fail closed if the argv is structurally invalid (e.g. codec args collapsed
+# so that 'copy' could be parsed as a positional output filename).
+if ! bs_verify_ffmpeg_args; then
+    bs_error "Refusing to exec FFmpeg: malformed argument array for relay '$NAME'."
+    bs_dump_ffmpeg_args
+    exit 1
+fi
+if [ "${BS_DEBUG_ARGS:-0}" = "1" ]; then
+    bs_info "Sanitized FFmpeg argv for relay '$NAME':"
+    bs_dump_ffmpeg_args
+fi
+
 # Final umask so HLS segments are 0640 (group-readable by nginx).
 umask 0027
 

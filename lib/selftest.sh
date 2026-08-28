@@ -23,6 +23,7 @@ run_selftest() {
     local sample="$BLUESTREAM_MEDIA_DIR/.selftest-$ts.mp4"
     local name="selftest-$ts"
     local m3u8dir pid user code base i passed=0 failed=0
+    local unit comm settled
 
     check() {
         local label="$1" result="$2"
@@ -71,27 +72,59 @@ run_selftest() {
         check "create temporary relay config" 1
     fi
 
+    # Verify the exact argv that run-relay.sh will hand to FFmpeg: separate
+    # [-c:v][copy][-c:a][copy] elements and a final index.m3u8 output.
+    if relay_build_ffmpeg_args && bs_verify_ffmpeg_args; then
+        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> index.m3u8)" 0
+    else
+        bs_error "FFmpeg argv failed structural verification:"
+        bs_dump_ffmpeg_args
+        check "ffmpeg argv valid ([-c:v][copy][-c:a][copy] -> index.m3u8)" 1
+    fi
+
     # 3. Start through the real systemd path.
     bs_ensure_hls_dir relay "$name" || true
     systemctl start "$(bs_unit relay "$name")" 2>/dev/null
     check "start relay via systemd" "$?"
 
-    # 4. Verify FFmpeg runs as bluestream-relay.
-    pid=""
+    # 4. Verify the stable production FFmpeg process runs as bluestream-relay.
+    #    Wait for the service to settle on an actual FFmpeg process (MainPID
+    #    comm == 'ffmpeg'). The temporary root bootstrap wrapper (bash/setpriv)
+    #    must never satisfy this check, and a crash/restart loop must be
+    #    reported explicitly rather than misread as "FFmpeg runs as root".
+    unit="$(bs_unit relay "$name")"
+    settled=""
     for i in $(seq 1 30); do
-        pid="$(systemctl show -p MainPID --value "$(bs_unit relay "$name")" 2>/dev/null)"
-        [ -n "$pid" ] && [ "$pid" != "0" ] && break
+        case "$(systemctl is-active "$unit" 2>/dev/null)" in
+            active)
+                pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+                comm="$(ps -o comm= -p "${pid:-0}" 2>/dev/null | tr -d ' ')"
+                if [ "$comm" = "ffmpeg" ]; then
+                    settled=1
+                    break
+                fi
+                ;;
+            failed)
+                bs_error "Relay service entered failed state (crashed / restart-limited); cannot verify FFmpeg user."
+                check "ffmpeg runs as $BLUESTREAM_USER (service stable)" 1
+                check "relay process running" 1
+                break
+                ;;
+        esac
         sleep 1
     done
-    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+    if [ -n "$settled" ]; then
         user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
         if [ "$user" = "$BLUESTREAM_USER" ]; then
-            check "ffmpeg runs as $BLUESTREAM_USER" 0
+            check "ffmpeg runs as $BLUESTREAM_USER (service stable)" 0
         else
-            bs_error "ffmpeg user is '$user' (want $BLUESTREAM_USER)"
-            check "ffmpeg runs as $BLUESTREAM_USER" 1
+            bs_error "ffmpeg (pid $pid) runs as '$user', want '$BLUESTREAM_USER'"
+            check "ffmpeg runs as $BLUESTREAM_USER (service stable)" 1
         fi
-    else
+        check "relay process running" 0
+    elif [ "$(systemctl is-active "$unit" 2>/dev/null)" != "failed" ]; then
+        bs_error "Relay service did not settle to a running FFmpeg process within 30s (may be crash-looping)."
+        check "ffmpeg runs as $BLUESTREAM_USER (service stable)" 1
         check "relay process running" 1
     fi
 

@@ -141,7 +141,7 @@ relay_build_ffmpeg_args() {
 
     output=(
         -map 0:v:0
-        -map 0:a:0?
+        -map "0:a:0?"
         -c:v copy
         -c:a copy
         -f hls

@@ -573,6 +573,61 @@ bs_strip_quotes() {
     printf '%s' "$s"
 }
 
+# ---------------------------------------------------------------------------
+# FFmpeg argv integrity helpers
+# ---------------------------------------------------------------------------
+# Redact one argv element for safe display: URL-like values (which may carry
+# credentials) pass through bs_redact_url; everything else is shown as-is
+# (local paths contain no secrets by construction).
+bs_redact_arg() {
+    local a="$1"
+    case "$a" in
+        http://*|https://*|rtmp://*|rtmps://*|rtsp://*) bs_redact_url "$a" ;;
+        *) printf '%s' "$a" ;;
+    esac
+}
+
+# Print a sanitized copy of the global FFMPEG_ARGS array (one element/line).
+bs_dump_ffmpeg_args() {
+    local i
+    for i in "${!FFMPEG_ARGS[@]}"; do
+        printf '  argv[%d] <%s>\n' "$i" "$(bs_redact_arg "${FFMPEG_ARGS[$i]}")"
+    done
+}
+
+# Fail-closed structural verification of the global FFMPEG_ARGS array before
+# exec'ing FFmpeg. Guarantees the codec options are separate elements with
+# their own 'copy' values, and that the final positional is the HLS
+# index.m3u8 output, so a stray 'copy' can never become a positional output
+# filename. Returns 1 (and dumps the sanitized argv) on any anomaly.
+bs_verify_ffmpeg_args() {
+    local n="${#FFMPEG_ARGS[@]}" i
+    [ "$n" -gt 0 ] || { bs_error "FFmpeg argv is empty."; return 1; }
+    [ "$n" -ge 20 ] || { bs_error "FFmpeg argv implausibly short ($n elements)."; return 1; }
+    for i in "${!FFMPEG_ARGS[@]}"; do
+        [ -n "${FFMPEG_ARGS[$i]}" ] || { bs_error "FFmpeg argv element $i is empty."; return 1; }
+    done
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        case "${FFMPEG_ARGS[$i]}" in
+            -c:v|-c:a)
+                [ $((i + 1)) -lt "$n" ] || { bs_error "Option ${FFMPEG_ARGS[$i]} has no value."; return 1; }
+                if [ "${FFMPEG_ARGS[$((i + 1))]}" != "copy" ]; then
+                    bs_error "Option ${FFMPEG_ARGS[$i]} must be followed by 'copy', found '${FFMPEG_ARGS[$((i + 1))]}'."
+                    return 1
+                fi
+                i=$((i + 2))
+                ;;
+            *) i=$((i + 1)) ;;
+        esac
+    done
+    case "${FFMPEG_ARGS[$((n - 1))]}" in
+        */index.m3u8) ;;
+        *) bs_error "FFmpeg output must end with 'index.m3u8', found '${FFMPEG_ARGS[$((n - 1))]}'."; return 1 ;;
+    esac
+    return 0
+}
+
 # end of common.sh
 
 

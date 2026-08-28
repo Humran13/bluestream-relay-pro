@@ -210,7 +210,7 @@ playlist_build_ffmpeg_args() {
     FFMPEG_ARGS=(
         -nostdin -y -loglevel warning
         -re -stream_loop -1 -f concat -safe 0 -i "$concat_file"
-        -map 0:v:0 -map 0:a:0?
+        -map 0:v:0 -map "0:a:0?"
         -c:v copy -c:a copy
         -f hls
         -hls_time 5
