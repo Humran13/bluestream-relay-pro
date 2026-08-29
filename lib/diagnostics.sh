@@ -203,6 +203,100 @@ run_diagnostics() {
         diag_check "HTTPS configured" WARN "no domain set"
     fi
 
+    # --- web console (GUI-1A.3B) ---
+    local web_user="bluestream-web" web_state="/var/lib/bluestream/web" wco wcm wso wsm wcode wact
+    if id "$web_user" >/dev/null 2>&1; then
+        diag_check "bluestream-web user exists" PASS
+    else
+        diag_check "bluestream-web user exists" FAIL
+    fi
+    if [ -x /usr/bin/gunicorn ]; then
+        diag_check "Gunicorn binary (/usr/bin/gunicorn)" PASS
+    else
+        diag_check "Gunicorn binary (/usr/bin/gunicorn)" FAIL
+    fi
+    if [ -f /etc/systemd/system/bluestream-web.service ]; then
+        diag_check "bluestream-web.service installed" PASS
+    else
+        diag_check "bluestream-web.service installed" FAIL
+    fi
+    wact="$(systemctl is-active bluestream-web.service 2>/dev/null)"
+    if [ "$wact" = "active" ]; then
+        diag_check "bluestream-web.service active" PASS
+    else
+        diag_check "bluestream-web.service active" WARN "${wact:-inactive}"
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "sport = :8080" 2>/dev/null | grep -q "127.0.0.1:8080"; then
+            diag_check "Gunicorn listener (127.0.0.1:8080)" PASS
+        else
+            diag_check "Gunicorn listener (127.0.0.1:8080)" FAIL "nothing listening on loopback 8080"
+        fi
+        if ! ss -ltn "sport = :8080" 2>/dev/null | grep -qE '0\.0\.0\.0:8080|\[::\]:8080'; then
+            diag_check "Gunicorn listener loopback only" PASS
+        else
+            diag_check "Gunicorn listener loopback only" FAIL "port 8080 must not be public"
+        fi
+    else
+        diag_check "Gunicorn listener check" WARN "ss not available"
+    fi
+    if [ -f /usr/local/lib/bluestream/web-ctl ]; then
+        wco="$(stat -c '%U:%G' /usr/local/lib/bluestream/web-ctl 2>/dev/null)"
+        wcm="$(stat -c '%a' /usr/local/lib/bluestream/web-ctl 2>/dev/null)"
+        if [ "$wco" = "root:root" ] && [ "$wcm" = "700" ]; then
+            diag_check "web-ctl ownership/mode" PASS "root:root 0700"
+        else
+            diag_check "web-ctl ownership/mode" FAIL "found $wco $wcm (want root:root 0700)"
+        fi
+    else
+        diag_check "web-ctl installed" FAIL
+    fi
+    if [ -f /etc/sudoers.d/bluestream-web ]; then
+        diag_check "web console sudoers present" PASS
+        if command -v visudo >/dev/null 2>&1; then
+            if visudo -cf /etc/sudoers.d/bluestream-web >/dev/null 2>&1; then
+                diag_check "web console sudoers validation (visudo -cf)" PASS
+            else
+                diag_check "web console sudoers validation (visudo -cf)" FAIL
+            fi
+        else
+            diag_check "web console sudoers validation" WARN "visudo not available"
+        fi
+    else
+        diag_check "web console sudoers present" FAIL
+    fi
+    if [ -d "$web_state" ]; then
+        wso="$(stat -c '%U:%G' "$web_state" 2>/dev/null)"
+        wsm="$(stat -c '%a' "$web_state" 2>/dev/null)"
+        if [ "$wso" = "root:bluestream-web" ] && [ "$wsm" = "750" ]; then
+            diag_check "web state dir ownership/mode" PASS "root:bluestream-web 0750"
+        else
+            diag_check "web state dir ownership/mode" WARN "found $wso $wsm (want root:bluestream-web 0750)"
+        fi
+    else
+        diag_check "web state dir exists" FAIL
+    fi
+    if [ -f /etc/nginx/bluestream/console-location.conf ]; then
+        diag_check "nginx console snippet present" PASS
+    else
+        diag_check "nginx console snippet present" FAIL
+    fi
+    if bs_have_cmd curl && nginx_running; then
+        wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1/console/login" 2>/dev/null)"
+        if [ "$wcode" = "200" ]; then
+            diag_check "web console login reachable" PASS "HTTP $wcode"
+        else
+            diag_check "web console login reachable" WARN "HTTP ${wcode:-unreachable}"
+        fi
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+        if ufw status 2>/dev/null | grep -Eq '^8080|8080/tcp|8080 '; then
+            diag_check "UFW does not expose 8080" FAIL "port 8080 must stay loopback-only"
+        else
+            diag_check "UFW does not expose 8080" PASS
+        fi
+    fi
+
     # --- disk ---
     for p in "$BLUESTREAM_VAR_DIR" "$BLUESTREAM_WWW_DIR" /; do
         if [ -d "$p" ]; then

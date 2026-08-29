@@ -44,12 +44,13 @@ RestartSec=5
 # are also omitted for the same reason and MUST be verified on Ubuntu before
 # adding. All directives below are compatible with the sudo path.
 ProtectSystem=strict
-# The web state dir (writable) and sudo's timestamp directory. sudo runs inside
-# the same mount namespace as this service; with ProtectSystem=strict /run is
-# read-only, and sudo may write a per-user timestamp under /run/sudo for
-# NOPASSWD rules. /run/sudo stays root-owned on disk, so only the sudo'd root
-# process can write there - no privilege is granted to bluestream-web.
-ReadWritePaths=/var/lib/bluestream/web /run/sudo
+# The web console state is READ-ONLY for bluestream-web (root:bluestream-web
+# 0640/0750; the installer pre-creates admin.json/secret_key/web.conf). Only
+# sudo's timestamp directory needs to be writable inside the service namespace:
+# sudo runs in the same mount namespace and may write a per-user timestamp under
+# /run/sudo for NOPASSWD rules. /run/sudo stays root-owned on disk, so only the
+# sudo'd root process can write there.
+ReadWritePaths=/run/sudo
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

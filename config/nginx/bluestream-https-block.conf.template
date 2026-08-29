@@ -18,4 +18,5 @@ server {
 
     include /etc/nginx/bluestream/hls-location.conf;
     include /etc/nginx/bluestream/player-location.conf;
+    include /etc/nginx/bluestream/console-location.conf;
 }

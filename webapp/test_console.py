@@ -649,6 +649,31 @@ class ProductionModeTests(unittest.TestCase):
         self.assertEqual(limiter.failure_count("198.51.100.7"), 1)
         self.assertEqual(limiter.failure_count("203.0.113.99"), 0)
 
+    def test_production_secure_cookie_reads_web_conf(self):
+        # Installer-written web.conf (derived from BlueStream SSL state) must
+        # be honored; a missing/absent file stays fail-safe (Secure on).
+        state = Path(self._tmp.name) / "webconf-state"
+        security.init_admin(state, "pw")
+        (state / "web.conf").write_text("secure_cookie=no\n", encoding="utf-8")
+        prod_app = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertFalse(prod_app.config["SESSION_COOKIE_SECURE"])
+        # garbage config stays fail-safe
+        (state / "web.conf").write_text("secure_cookie=maybe\n", encoding="utf-8")
+        prod_app2 = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertTrue(prod_app2.config["SESSION_COOKIE_SECURE"])
+        # explicit call-site config still wins
+        prod_app3 = app_module.create_app(
+            state_dir=state,
+            production=True,
+            engine=FakeEngine(DEFAULT_PAYLOADS),
+            config={"SESSION_COOKIE_SECURE": True},
+        )
+        self.assertTrue(prod_app3.config["SESSION_COOKIE_SECURE"])
+
     def test_local_cookie_secure_false_and_path_console(self):
         local_app = app_module.create_app(
             state_dir=self.state, engine=FakeEngine(DEFAULT_PAYLOADS)
@@ -793,7 +818,7 @@ class ProductionModeTests(unittest.TestCase):
         # The compatible hardening directives remain present.
         for directive in (
             "ProtectSystem=strict",
-            "ReadWritePaths=/var/lib/bluestream/web /run/sudo",
+            "ReadWritePaths=/run/sudo",
             "ProtectHome=true",
             "PrivateTmp=true",
             "PrivateDevices=true",

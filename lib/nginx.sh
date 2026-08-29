@@ -38,6 +38,8 @@ nginx_assert_no_placeholders() {
         "$NGINX_SITE_FILE" \
         "$NGINX_SNIPPET_DIR/hls-location.conf" \
         "$NGINX_SNIPPET_DIR/player-location.conf" \
+        "$NGINX_SNIPPET_DIR/console-location.conf" \
+        "$NGINX_SNIPPET_DIR/console-http.conf" \
         "$NGINX_SNIPPET_DIR/rtmp.conf"; do
         [ -f "$f" ] || { bs_error "Generated nginx file missing: $f"; return 1; }
         bad="$(grep -oE '__[A-Z_][A-Z0-9_]*__' "$f" 2>/dev/null | sort -u | tr '\n' ' ')"
@@ -90,6 +92,21 @@ nginx_gen_config() {
     mv -f "$NGINX_SNIPPET_DIR/player-location.conf.tmp" "$NGINX_SNIPPET_DIR/player-location.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/hls-location.conf" "$NGINX_SNIPPET_DIR/player-location.conf"
 
+    # Web console reverse-proxy snippet (fixed loopback upstream; no placeholders).
+    cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" "$NGINX_SNIPPET_DIR/console-location.conf.tmp"
+    mv -f "$NGINX_SNIPPET_DIR/console-location.conf.tmp" "$NGINX_SNIPPET_DIR/console-location.conf"
+    chmod 0644 "$NGINX_SNIPPET_DIR/console-location.conf"
+
+    # HTTP-block console snippet: proxy when HTTP-only, HTTPS redirect when SSL
+    # is enabled (Secure cookies must never be issued over plain HTTP).
+    if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then
+        cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-redirect-http.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
+    else
+        cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
+    fi
+    mv -f "$NGINX_SNIPPET_DIR/console-http.conf.tmp" "$NGINX_SNIPPET_DIR/console-http.conf"
+    chmod 0644 "$NGINX_SNIPPET_DIR/console-http.conf"
+
     # Render the private local RTMP ingest (nginx MAIN context).
     sed -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
         -e "s|__RTMP_BIND__|$BLUESTREAM_RTMP_BIND|g" \
@@ -113,7 +130,34 @@ nginx_gen_config() {
         return 1
     fi
 
+    # Keep the web console's non-secret deployment setting in sync with the
+    # current SSL state (install AND `bluestream-manager ssl issue`, both of
+    # which run nginx_gen_config). The web process never reads server.conf.
+    nginx_sync_web_conf
+
     bs_ok "Nginx site configuration written: $dest"
+}
+
+# Write /var/lib/bluestream/web/web.conf (secure_cookie=yes|no) from the
+# current SSL state. Root-only write; the web user gets read-only access.
+nginx_sync_web_conf() {
+    local web_state="/var/lib/bluestream/web" sc="no"
+    id bluestream-web >/dev/null 2>&1 || return 0  # web console not installed
+    if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then
+        sc="yes"
+    fi
+    mkdir -p "$web_state"
+    {
+        printf '# BlueStream Relay Pro web console deployment settings (non-secret).\n'
+        printf '# Regenerated from the current BlueStream SSL state.\n'
+        printf 'secure_cookie=%s\n' "$sc"
+    } > "$web_state/web.conf.tmp"
+    chown root:bluestream-web "$web_state/web.conf.tmp"
+    chmod 0640 "$web_state/web.conf.tmp"
+    mv -f "$web_state/web.conf.tmp" "$web_state/web.conf"
+    chown root:bluestream-web "$web_state/web.conf"
+    chmod 0640 "$web_state/web.conf"
+    return 0
 }
 
 nginx_site_enable() {

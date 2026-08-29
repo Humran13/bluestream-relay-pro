@@ -47,9 +47,32 @@ from webapp.security import (
 )
 
 # Production web state lives here (created by the installer in GUI-1A.3B).
-# It holds only web-console state (admin.json, secret_key); engine configs stay
-# root-only in /etc/bluestream behind web-ctl.
+# It holds only web-console state (admin.json, secret_key, web.conf); engine
+# configs stay root-only in /etc/bluestream behind web-ctl.
 PRODUCTION_STATE_DIR = "/var/lib/bluestream/web"
+
+
+def _read_secure_cookie_setting(state_dir) -> bool:
+    """Read the installer-written secure_cookie deployment setting.
+
+    The installer derives it from BlueStream's own SSL state and writes it to
+    the web-side state dir as a non-secret flag. Never trusted from request
+    headers. Missing/unreadable config fails SAFE (Secure cookies on).
+    """
+    try:
+        text = (Path(state_dir) / "web.conf").read_text(encoding="utf-8")
+    except OSError:
+        return True  # fail-safe
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "secure_cookie":
+            # Fail-safe: only an explicit "no" disables Secure cookies;
+            # anything unrecognized keeps them ON.
+            return value.strip().lower() not in ("no", "false", "0", "off")
+    return True  # fail-safe
 
 
 def create_app(state_dir=None, engine=None, config=None, production: bool = False) -> Flask:
@@ -82,13 +105,17 @@ def create_app(state_dir=None, engine=None, config=None, production: bool = Fals
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_PATH="/console",
-        # Local GUI-1A.2 is HTTP only. Production defaults to Secure (fail-safe);
-        # an explicit config override enables HTTP-only testing/deployments.
+        # Local GUI-1A.2 is HTTP only. Production defaults to Secure (fail-safe)
+        # and then honors the installer-written web.conf deployment setting
+        # (derived from BlueStream's own SSL state, never from request headers).
         SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
         MAX_CONTENT_LENGTH=16 * 1024,
     )
+    if production:
+        app.config["SESSION_COOKIE_SECURE"] = _read_secure_cookie_setting(state_dir)
     if config:
+        # Explicit call-site config wins over web.conf (tests, HTTP-only mode).
         app.config.update(config)
 
     if engine is not None:

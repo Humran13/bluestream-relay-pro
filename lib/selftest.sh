@@ -219,6 +219,50 @@ run_selftest() {
     rm -f "$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
     rm -f "$BLUESTREAM_RUN_DIR/$name.concat.txt"
 
+    # --- web console (GUI-1A.3B) ---
+    # Only exercised when the production web console is actually installed;
+    # never requires authentication and never creates credentials.
+    if [ -x /usr/bin/gunicorn ] && id bluestream-web >/dev/null 2>&1 \
+        && [ -f /etc/sudoers.d/bluestream-web ] && command -v python3 >/dev/null 2>&1; then
+        local webctl="/usr/local/lib/bluestream/web-ctl" wout wrc wcode sslines
+        # Real privilege boundary: run as bluestream-web, sudo -n elevates to
+        # root web-ctl, output must be valid JSON with the expected version.
+        wout="$(runuser -u bluestream-web -- /usr/bin/sudo -n "$webctl" version 2>/dev/null)"
+        wrc=$?
+        if [ "$wrc" -eq 0 ] && printf '%s' "$wout" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True and d.get("data", {}).get("version") == "0.1.0"' >/dev/null 2>&1; then
+            check "web-ctl via sudo boundary (bluestream-web -> root) returns valid JSON" 0
+        else
+            check "web-ctl via sudo boundary (bluestream-web -> root) returns valid JSON" 1
+        fi
+        if command -v ss >/dev/null 2>&1; then
+            sslines="$(ss -ltn 2>/dev/null | grep ':8080 ' || true)"
+            case "$sslines" in
+                *127.0.0.1:8080*)
+                    check "Gunicorn listener on 127.0.0.1:8080" 0
+                    case "$sslines" in
+                        *'0.0.0.0:8080'*|*'[::]:8080'*) check "Gunicorn listener loopback only" 1 ;;
+                        *) check "Gunicorn listener loopback only" 0 ;;
+                    esac
+                    ;;
+                *) check "Gunicorn listener on 127.0.0.1:8080" 1 ;;
+            esac
+        else
+            bs_warn "ss not available; skipping web console listener checks"
+        fi
+        if bs_have_cmd curl && nginx_running; then
+            wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1/console/login" 2>/dev/null)"
+            if [ "$wcode" = "200" ]; then
+                check "web console login page reachable via nginx (HTTP 200)" 0
+            else
+                check "web console login page reachable via nginx (HTTP 200)" 1 "HTTP ${wcode:-unreachable}"
+            fi
+        else
+            bs_warn "curl/nginx unavailable; skipping web console HTTP check"
+        fi
+    else
+        bs_warn "Web console prerequisites not present; skipping web console self-test"
+    fi
+
     bs_step "Self-test complete: $passed passed, $failed failed"
     [ "$failed" -eq 0 ]
 }

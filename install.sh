@@ -68,7 +68,7 @@ if [ ! -f "$BS_ROOT/lib/common.sh" ]; then
     printf 'install.sh must run from the BlueStream Relay Pro project directory.\n' >&2
     exit 1
 fi
-for _bs_lib in common osdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest; do
+for _bs_lib in common osdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest webconsole; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done
@@ -120,8 +120,11 @@ install_packages() {
         bs_info "Updating package metadata..."
         os_apt_update
     fi
+    # shellcheck disable=SC2046
     os_pkg_install nginx ffmpeg curl ca-certificates coreutils util-linux libnginx-mod-rtmp \
+        $(web_packages) \
         || bs_die "Failed to install base packages."
+    web_verify_packages
 
     if [ "$SSL_REQUESTED" = "1" ]; then
         bs_step "Installing certbot for Let's Encrypt SSL"
@@ -229,6 +232,10 @@ create_user_and_dirs() {
     find "$BLUESTREAM_MEDIA_DIR" -maxdepth 1 -type f ! -name '.*' \
         -exec chmod 0640 {} + 2>/dev/null || true
 
+    # Web console account and production state (GUI-1A.3B).
+    web_create_user
+    web_create_state
+
     bs_ok "User, directories and permissions ready"
     return 0
 }
@@ -267,6 +274,11 @@ install_files() {
     # systemd unit templates.
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-relay@.service" /etc/systemd/system/bluestream-relay@.service
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-playlist@.service" /etc/systemd/system/bluestream-playlist@.service
+
+    # Web console application + web-ctl (GUI-1A.3B). web_install_files also
+    # installs the systemd unit and the sudoers source; sudoers itself is
+    # staged/validated/installed later by web_install_sudoers.
+    web_install_files
 
     # Verify the production runners: present, root:root owned, executable.
     local _runner _runner_owner
@@ -355,6 +367,23 @@ configure_nginx() {
 }
 
 # ---------------------------------------------------------------------------
+# Web console configuration (runs AFTER ssl_issue so the final SSL state is
+# known when writing the secure_cookie deployment setting).
+# ---------------------------------------------------------------------------
+configure_web_console() {
+    bs_step "Configuring the BlueStream web console"
+    web_ensure_secret_key
+    web_configure_state
+    web_init_admin
+    web_install_sudoers
+    # Fix ownership of freshly-created admin.json/secret_key (security.py runs
+    # as root) to root:bluestream-web 0640, and ensure /run/sudo exists.
+    web_create_state
+    web_manage_service
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Post-install information
 # ---------------------------------------------------------------------------
 post_install_info() {
@@ -372,6 +401,7 @@ post_install_info() {
     printf '          %s\n' "$(bs_public_base)/hls/playlist/<name>/index.m3u8"
     printf '  Player : %s\n' "$(bs_public_base)/player/?relay=<name>"
     printf '          %s\n' "$(bs_public_base)/player/?playlist=<name>"
+    printf '  Console: %s\n' "$(bs_public_base)/console/"
     printf '%s\n' \
         "" \
         "Next steps:" \
@@ -406,6 +436,10 @@ main() {
     if [ "$SSL_REQUESTED" = "1" ]; then
         ssl_issue
     fi
+
+    # Web console deployment integration (after final SSL state is known).
+    configure_web_console
+
     if [ "$UFW_REQUESTED" = "1" ]; then
         firewall_configure
     fi

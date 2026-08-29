@@ -16,6 +16,10 @@ server {
 
     # Bundled hls.js player.
     include __NGINX_SNIPPET_DIR__/player-location.conf;
+
+    # Web console (HTTP block: proxy when HTTP-only, HTTPS redirect when SSL
+    # is enabled; rendered by nginx_gen_config).
+    include __NGINX_SNIPPET_DIR__/console-http.conf;
 }
 
 __HTTPS_BLOCK__

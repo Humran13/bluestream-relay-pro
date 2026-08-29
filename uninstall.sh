@@ -39,7 +39,7 @@ else
     exit 1
 fi
 
-for _bs_lib in common osdetect backup; do
+for _bs_lib in common osdetect backup webconsole; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done
@@ -80,6 +80,9 @@ rm -f /etc/systemd/system/bluestream-playlist@.service
 rm -rf /etc/systemd/system/bluestream-relay@*.service.d
 rm -rf /etc/systemd/system/bluestream-playlist@*.service.d
 systemctl daemon-reload 2>/dev/null || true
+
+# --- remove the web console service, sudoers policy and nginx snippet ---
+web_uninstall
 
 # --- remove installed project files ---
 rm -f /usr/local/sbin/bluestream-manager
