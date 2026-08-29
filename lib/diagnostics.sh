@@ -204,7 +204,7 @@ run_diagnostics() {
     fi
 
     # --- web console (GUI-1A.3B) ---
-    local web_user="bluestream-web" web_state="/var/lib/bluestream/web" wco wcm wso wsm wcode wact
+    local web_user="bluestream-web" web_state="/var/lib/bluestream/web" wco wcm wso wsm wout wloc wcode wact
     if id "$web_user" >/dev/null 2>&1; then
         diag_check "bluestream-web user exists" PASS
     else
@@ -282,18 +282,30 @@ run_diagnostics() {
         diag_check "nginx console snippet present" FAIL
     fi
     if bs_have_cmd curl && nginx_running; then
-        # Send the configured BlueStream domain as the Host header so the local
-        # 127.0.0.1 request reaches the correct nginx server block (without it,
-        # a default/other vhost may answer with 404). The domain comes from the
-        # validated server.conf value; nothing is interpolated unvalidated.
+        # Local loopback check against the configured BlueStream domain. When
+        # HTTPS is enabled, nginx intentionally redirects HTTP /console/ to
+        # HTTPS (301); otherwise the console serves directly (200). The domain
+        # comes from the validated server.conf value; nothing is interpolated
+        # unvalidated. No public DNS is used.
         if [ -n "${BLUESTREAM_DOMAIN:-}" ] && bs_valid_domain "$BLUESTREAM_DOMAIN"; then
-            wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            wout="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 \
                 -H "Host: $BLUESTREAM_DOMAIN" \
                 "http://127.0.0.1/console/login" 2>/dev/null)"
-            if [ "$wcode" = "200" ]; then
-                diag_check "web console login reachable" PASS "HTTP $wcode"
+            wcode="${wout%% *}"
+            wloc="${wout#* }"
+            if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then
+                # Exact redirect target: any other 301/Location is NOT accepted.
+                if [ "$wcode" = "301" ] && [ "$wloc" = "https://$BLUESTREAM_DOMAIN/console/login" ]; then
+                    diag_check "web console HTTP->HTTPS redirect valid" PASS "HTTP 301 -> $wloc"
+                else
+                    diag_check "web console HTTP->HTTPS redirect valid" WARN "HTTP ${wcode:-unreachable} Location=${wloc:-none}"
+                fi
             else
-                diag_check "web console login reachable" WARN "HTTP ${wcode:-unreachable}"
+                if [ "$wcode" = "200" ]; then
+                    diag_check "web console login reachable" PASS "HTTP $wcode"
+                else
+                    diag_check "web console login reachable" WARN "HTTP ${wcode:-unreachable}"
+                fi
             fi
         else
             diag_check "web console login reachable" WARN "no valid BlueStream domain configured; check skipped"

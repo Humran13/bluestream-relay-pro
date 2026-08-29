@@ -36,10 +36,33 @@ ssl_issue() {
     nginx_site_enable
     if nginx_test; then
         systemctl reload nginx 2>/dev/null || true
+        # Apply the new secure_cookie state to a running web console.
+        ssl_restart_web_console
         bs_ok "HTTPS enabled for $BLUESTREAM_DOMAIN"
     else
         bs_warn "Nginx failed validation after SSL setup; review /etc/nginx/sites-available/bluestream"
         return 1
+    fi
+    return 0
+}
+
+# Restart an ACTIVE bluestream-web.service after HTTPS is enabled so the
+# running Flask process reloads /var/lib/bluestream/web/web.conf
+# (secure_cookie=yes) and starts issuing Secure cookies. Absent/inactive
+# services are never started; a real restart failure is reported visibly
+# because cookie security depends on the new state being applied.
+ssl_restart_web_console() {
+    local unit="bluestream-web.service"
+    [ -f "/etc/systemd/system/$unit" ] || return 0  # web console not installed
+    if [ "$(systemctl is-active "$unit" 2>/dev/null)" != "active" ]; then
+        bs_info "Web console service is not active; leaving it as-is."
+        return 0
+    fi
+    if systemctl restart "$unit" 2>/dev/null; then
+        bs_ok "Web console service restarted to apply Secure cookie state."
+    else
+        bs_warn "Web console service restart FAILED; HTTPS is enabled but the running console may still issue non-Secure cookies."
+        bs_warn "Run manually: systemctl restart $unit"
     fi
     return 0
 }

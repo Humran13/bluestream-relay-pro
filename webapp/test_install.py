@@ -253,6 +253,119 @@ class VpsFixTests(unittest.TestCase):
         self.assertNotIn("https://", s.split("console/login")[0][-80:])
 
 
+class HttpsFollowupTests(unittest.TestCase):
+    """HTTPS follow-up bugs: SSL-aware checks + web console restart on SSL."""
+
+    def test_01_http_only_diagnostics_expects_200(self):
+        d = repo_text("lib/diagnostics.sh")
+        self.assertIn('if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]', d)
+        self.assertIn('= "200"', d)
+
+    def test_02_http_only_selftest_expects_200(self):
+        s = repo_text("lib/selftest.sh")
+        self.assertIn('if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]', s)
+        self.assertIn('= "200"', s)
+
+    def test_03_ssl_enabled_diagnostics_expects_301(self):
+        self.assertIn('= "301"', repo_text("lib/diagnostics.sh"))
+
+    def test_04_ssl_enabled_selftest_expects_301(self):
+        self.assertIn('= "301"', repo_text("lib/selftest.sh"))
+
+    def test_05_exact_redirect_location_validated(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            t = repo_text(rel)
+            self.assertIn('"$wloc" = "https://$BLUESTREAM_DOMAIN/console/login"', t)
+
+    def test_06_arbitrary_301_not_accepted(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            t = repo_text(rel)
+            # strict equality on BOTH code and Location; no 3xx wildcard
+            self.assertIn('[ "$wcode" = "301" ]', t)
+            self.assertNotIn("-ge 300", t)
+            self.assertNotIn("3[0-9][0-9]", t)
+
+    def test_07_local_loopback_retained(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            self.assertIn("http://127.0.0.1/console/login", repo_text(rel))
+
+    def test_08_host_header_validated_domain(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            t = repo_text(rel)
+            self.assertIn('-H "Host: $BLUESTREAM_DOMAIN"', t)
+            self.assertIn('bs_valid_domain "$BLUESTREAM_DOMAIN"', t)
+
+    def test_09_no_hardcoded_customer_domain(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            self.assertNotIn("stream.therealworldboosts.com", repo_text(rel))
+
+    def test_10_no_eval_or_sh_c(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            t = repo_text(rel)
+            self.assertNotIn("eval", t)
+            self.assertNotIn("sh -c", t)
+
+    def test_11_ssl_updates_secure_cookie_via_nginx_gen(self):
+        s = repo_text("lib/ssl.sh")
+        self.assertIn("nginx_gen_config", s)
+        # the nginx pipeline itself must call nginx_sync_web_conf: its call site
+        # appears before its definition, i.e. inside nginx_gen_config
+        n = repo_text("lib/nginx.sh")
+        self.assertLess(n.index("nginx_sync_web_conf"),
+                        n.index("nginx_sync_web_conf()"))
+
+    def test_12_ssl_restarts_active_web_service(self):
+        s = repo_text("lib/ssl.sh")
+        self.assertIn("ssl_restart_web_console", s)
+        self.assertIn('systemctl restart "$unit"', s)
+        # the restart call must sit inside the successful nginx-validation block
+        # (after `if nginx_test; then`, before the success message) so a broken
+        # config or failed reload can never trigger a restart.
+        self.assertLess(s.index("if nginx_test; then"),
+                        s.index("ssl_restart_web_console"))
+        self.assertLess(s.index("ssl_restart_web_console"),
+                        s.index('bs_ok "HTTPS enabled for $BLUESTREAM_DOMAIN"'))
+        # it must also come AFTER nginx_gen_config regenerated web.conf
+        self.assertLess(s.index("nginx_gen_config"),
+                        s.index("ssl_restart_web_console"))
+
+    def test_13_inactive_service_not_started(self):
+        s = repo_text("lib/ssl.sh")
+        self.assertIn('[ "$(systemctl is-active "$unit" 2>/dev/null)" != "active" ]', s)
+        self.assertNotIn('systemctl start "$unit"', s)
+
+    def test_14_missing_service_no_break(self):
+        s = repo_text("lib/ssl.sh")
+        self.assertIn('[ -f "/etc/systemd/system/$unit" ] || return 0', s)
+
+    def test_15_restart_failure_reported(self):
+        s = repo_text("lib/ssl.sh")
+        self.assertIn("restart FAILED", s)
+        self.assertIn("bs_warn", s)
+        # the failure warning must be in the restart's failure branch: it is
+        # placed after the restart attempt and before the manual-remediation
+        # message, so a real failure is never silently swallowed.
+        self.assertLess(s.index('systemctl restart "$unit"'),
+                        s.index("restart FAILED"))
+        self.assertLess(s.index("restart FAILED"),
+                        s.index('bs_warn "Run manually: systemctl restart $unit"'))
+
+    def test_16_no_webconsole_dependency_in_manager(self):
+        self.assertNotIn("webconsole", repo_text("bluestream-manager"))
+
+    def test_17_nginx_redirect_template_unchanged(self):
+        redir = repo_text("config/nginx/console-redirect-http.conf")
+        self.assertIn("return 301 https://$host$request_uri;", redir)
+        self.assertIn("return 301 https://$host/console/;", redir)
+
+    def test_18_no_curl_follow_or_tls_disable_in_console_check(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            t = repo_text(rel)
+            self.assertNotIn(" -L", t)
+            self.assertNotIn(" --location", t)
+            self.assertNotIn(" --insecure", t)
+
+
 class ReadOnlyGuaranteeTests(unittest.TestCase):
     """Flask/EngineClient remain read-only after integration."""
 
