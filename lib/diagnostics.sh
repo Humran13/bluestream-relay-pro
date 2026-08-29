@@ -282,11 +282,21 @@ run_diagnostics() {
         diag_check "nginx console snippet present" FAIL
     fi
     if bs_have_cmd curl && nginx_running; then
-        wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1/console/login" 2>/dev/null)"
-        if [ "$wcode" = "200" ]; then
-            diag_check "web console login reachable" PASS "HTTP $wcode"
+        # Send the configured BlueStream domain as the Host header so the local
+        # 127.0.0.1 request reaches the correct nginx server block (without it,
+        # a default/other vhost may answer with 404). The domain comes from the
+        # validated server.conf value; nothing is interpolated unvalidated.
+        if [ -n "${BLUESTREAM_DOMAIN:-}" ] && bs_valid_domain "$BLUESTREAM_DOMAIN"; then
+            wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                -H "Host: $BLUESTREAM_DOMAIN" \
+                "http://127.0.0.1/console/login" 2>/dev/null)"
+            if [ "$wcode" = "200" ]; then
+                diag_check "web console login reachable" PASS "HTTP $wcode"
+            else
+                diag_check "web console login reachable" WARN "HTTP ${wcode:-unreachable}"
+            fi
         else
-            diag_check "web console login reachable" WARN "HTTP ${wcode:-unreachable}"
+            diag_check "web console login reachable" WARN "no valid BlueStream domain configured; check skipped"
         fi
     fi
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then

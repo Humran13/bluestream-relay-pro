@@ -190,7 +190,11 @@ create_user_and_dirs() {
     # Managed data tree.
     mkdir -p "$BLUESTREAM_VAR_DIR" "$BLUESTREAM_MEDIA_DIR" "$BLUESTREAM_RUN_DIR" "$BLUESTREAM_BACKUP_DIR"
     chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_VAR_DIR"
-    chmod 0750 "$BLUESTREAM_VAR_DIR"
+    # 0751: bluestream-relay group keeps read/traverse; other users (e.g.
+    # bluestream-web reaching /var/lib/bluestream/web) get execute/traverse ONLY,
+    # so the parent cannot be listed and each child dir remains independently
+    # protected. Enforced on every re-run (idempotent).
+    chmod 0751 "$BLUESTREAM_VAR_DIR"
     chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_MEDIA_DIR"
     chmod 0750 "$BLUESTREAM_MEDIA_DIR"
     chown "$BLUESTREAM_USER":"$BLUESTREAM_GROUP" "$BLUESTREAM_RUN_DIR"

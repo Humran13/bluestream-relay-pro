@@ -250,11 +250,19 @@ run_selftest() {
             bs_warn "ss not available; skipping web console listener checks"
         fi
         if bs_have_cmd curl && nginx_running; then
-            wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1/console/login" 2>/dev/null)"
-            if [ "$wcode" = "200" ]; then
-                check "web console login page reachable via nginx (HTTP 200)" 0
+            # Send the configured BlueStream domain as the Host header so the
+            # local 127.0.0.1 request reaches the correct nginx server block.
+            if [ -n "${BLUESTREAM_DOMAIN:-}" ] && bs_valid_domain "$BLUESTREAM_DOMAIN"; then
+                wcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                    -H "Host: $BLUESTREAM_DOMAIN" \
+                    "http://127.0.0.1/console/login" 2>/dev/null)"
+                if [ "$wcode" = "200" ]; then
+                    check "web console login page reachable via nginx (HTTP 200)" 0
+                else
+                    check "web console login page reachable via nginx (HTTP 200)" 1 "HTTP ${wcode:-unreachable}"
+                fi
             else
-                check "web console login page reachable via nginx (HTTP 200)" 1 "HTTP ${wcode:-unreachable}"
+                bs_warn "No valid BlueStream domain configured; skipping web console HTTP check"
             fi
         else
             bs_warn "curl/nginx unavailable; skipping web console HTTP check"

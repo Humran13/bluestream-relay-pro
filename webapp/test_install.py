@@ -199,6 +199,60 @@ class UninstallTests(unittest.TestCase):
         self.assertIn("/var/lib/bluestream", text)
 
 
+class VpsFixTests(unittest.TestCase):
+    """GUI deployment VPS bug fixes: parent traversal + Host-header check."""
+
+    def test_01_parent_var_dir_mode_is_0751(self):
+        inst = repo_text("install.sh")
+        self.assertIn('chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_VAR_DIR"', inst)
+        self.assertIn('chmod 0751 "$BLUESTREAM_VAR_DIR"', inst)
+        self.assertNotIn('chmod 0750 "$BLUESTREAM_VAR_DIR"', inst)
+
+    def test_02_parent_owner_group_unchanged(self):
+        inst = repo_text("install.sh")
+        self.assertIn('chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_VAR_DIR"', inst)
+
+    def test_03_media_run_backups_modes_unchanged(self):
+        inst = repo_text("install.sh")
+        self.assertIn('chmod 0750 "$BLUESTREAM_MEDIA_DIR"', inst)
+        self.assertIn('chmod 0750 "$BLUESTREAM_RUN_DIR"', inst)
+        self.assertIn('chmod 0700 "$BLUESTREAM_BACKUP_DIR"', inst)
+
+    def test_04_web_state_dir_remains_0750(self):
+        wc = repo_text("lib/webconsole.sh")
+        self.assertIn('chmod 0750 "$BLUESTREAM_WEB_STATE_DIR"', wc)
+
+    def test_05_no_web_user_membership_in_relay_group(self):
+        wc = repo_text("lib/webconsole.sh")
+        self.assertNotIn("bluestream-relay", wc)
+
+    def test_06_diagnostics_sends_domain_host_header(self):
+        d = repo_text("lib/diagnostics.sh")
+        self.assertIn('-H "Host: $BLUESTREAM_DOMAIN"', d)
+        self.assertIn('bs_valid_domain "$BLUESTREAM_DOMAIN"', d)
+        self.assertIn("http://127.0.0.1/console/login", d)
+        self.assertIn('= "200"', d)
+
+    def test_07_selftest_sends_domain_host_header(self):
+        s = repo_text("lib/selftest.sh")
+        self.assertIn('-H "Host: $BLUESTREAM_DOMAIN"', s)
+        self.assertIn('bs_valid_domain "$BLUESTREAM_DOMAIN"', s)
+        self.assertIn("http://127.0.0.1/console/login", s)
+        self.assertIn('= "200"', s)
+
+    def test_08_no_hardcoded_customer_domain(self):
+        for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
+            self.assertNotIn("stream.therealworldboosts.com", repo_text(rel))
+
+    def test_09_both_continue_using_loopback(self):
+        d = repo_text("lib/diagnostics.sh")
+        s = repo_text("lib/selftest.sh")
+        self.assertIn("http://127.0.0.1/console/login", d)
+        self.assertIn("http://127.0.0.1/console/login", s)
+        self.assertNotIn("https://", d.split("console/login")[0][-80:])
+        self.assertNotIn("https://", s.split("console/login")[0][-80:])
+
+
 class ReadOnlyGuaranteeTests(unittest.TestCase):
     """Flask/EngineClient remain read-only after integration."""
 
