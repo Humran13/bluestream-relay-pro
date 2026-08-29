@@ -257,6 +257,19 @@ web_init_admin() {
 web_manage_service() {
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable "$BLUESTREAM_WEB_SERVICE" 2>/dev/null || bs_warn "Could not enable $BLUESTREAM_WEB_SERVICE"
+    # An upgrade over an already-active service must load the just-installed
+    # application code/templates: systemctl start is a no-op on an active unit,
+    # so restart instead (daemon-reload above already covered any unit changes).
+    # Fresh installs are unaffected - nothing is active yet, so start normally.
+    if systemctl is-active "$BLUESTREAM_WEB_SERVICE" >/dev/null 2>&1; then
+        if ! systemctl restart "$BLUESTREAM_WEB_SERVICE" 2>/dev/null; then
+            bs_error "Failed to restart $BLUESTREAM_WEB_SERVICE; recent journal:"
+            journalctl -u "$BLUESTREAM_WEB_SERVICE" -n 20 --no-pager 2>/dev/null >&2 || true
+            bs_die "bluestream-web service failed to restart. Fix the issue and re-run install.sh."
+        fi
+        bs_ok "$BLUESTREAM_WEB_SERVICE restarted with updated application files"
+        return 0
+    fi
     if ! systemctl start "$BLUESTREAM_WEB_SERVICE" 2>/dev/null; then
         bs_error "Failed to start $BLUESTREAM_WEB_SERVICE; recent journal:"
         journalctl -u "$BLUESTREAM_WEB_SERVICE" -n 20 --no-pager 2>/dev/null >&2 || true

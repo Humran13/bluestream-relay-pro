@@ -184,10 +184,17 @@ relay_start() {
 }
 
 relay_stop() {
-    local name="$1"
+    local name="$1" unit
     bs_require_root
     relay_load_config "$name" || bs_die "Relay '$name' not found"
-    systemctl stop "$(bs_unit relay "$name")" 2>/dev/null
+    unit="$(bs_unit relay "$name")"
+    systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop relay '$name'"
+    # An intentional stop of an FFmpeg relay leaves the unit in a 'failed'
+    # state (FFmpeg exits non-zero on termination). Normalize the explicit stop
+    # so the unit ends up 'inactive', not 'failed'. This touches ONLY this
+    # exact validated unit; genuine runtime failures outside an explicit
+    # BlueStream Stop are untouched, and restart behavior is unchanged.
+    systemctl reset-failed "$unit" 2>/dev/null || true
     bs_ok "Relay '$name' stopped"
 }
 

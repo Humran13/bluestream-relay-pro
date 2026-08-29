@@ -499,5 +499,102 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
         self.assertEqual(repo_text("VERSION").strip(), "0.1.0")
 
 
+class LifecycleDeploymentFixesTests(unittest.TestCase):
+    """GUI-1B.1 deployment fixes: sandbox write paths, intentional-stop
+    normalization, and installer service restart on upgrade."""
+
+    def test_01_service_keeps_strict_systemd_hardening(self):
+        s = repo_text("config/systemd/bluestream-web.service")
+        self.assertIn("ProtectSystem=strict", s)
+        self.assertNotIn("ProtectSystem=off", s)
+        for directive in (
+            "ProtectHome=true",
+            "PrivateTmp=true",
+            "PrivateDevices=true",
+            "ProtectKernelTunables=true",
+            "ProtectKernelModules=true",
+            "ProtectControlGroups=true",
+            "LockPersonality=true",
+            "RestrictRealtime=true",
+        ):
+            self.assertIn(directive, s)
+
+    def test_02_service_readwrite_paths_are_narrow_and_complete(self):
+        s = repo_text("config/systemd/bluestream-web.service")
+        rw_lines = [
+            ln.strip() for ln in s.splitlines() if ln.strip().startswith("ReadWritePaths=")
+        ]
+        self.assertTrue(rw_lines, "no ReadWritePaths directive found")
+        rw = " ".join(rw_lines)
+        for path in (
+            "/run/sudo",
+            "/etc/systemd/system",
+            "/var/www/bluestream/hls",
+            "/var/lib/bluestream/run",
+        ):
+            self.assertIn(path, rw, path)
+        # no broad/loosening writes
+        self.assertNotIn("ReadWritePaths=/ ", rw)
+        self.assertNotIn("ReadWritePaths=/var ", rw)
+        self.assertNotIn("ReadWritePaths=/\n", rw)
+
+    def test_03_service_web_state_stays_read_only(self):
+        # the web state dir must never be in the ReadWritePaths directive
+        # (comments legitimately mention it); it stays read-only for the
+        # unprivileged bluestream-web user.
+        s = repo_text("config/systemd/bluestream-web.service")
+        rw_lines = [
+            ln.strip() for ln in s.splitlines() if ln.strip().startswith("ReadWritePaths=")
+        ]
+        rw = " ".join(rw_lines)
+        self.assertNotIn("/var/lib/bluestream/web", rw)
+
+    def test_04_relay_stop_normalizes_intentional_stop(self):
+        r = repo_text("lib/relay.sh")
+        self.assertIn('unit="$(bs_unit relay "$name")"', r)
+        self.assertIn('systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop relay', r)
+        self.assertIn('systemctl reset-failed "$unit" 2>/dev/null || true', r)
+        # the normalization targets the exact fixed unit, never a raw name
+        self.assertNotIn('systemctl reset-failed "$name"', r)
+
+    def test_05_playlist_stop_normalizes_intentional_stop(self):
+        p = repo_text("lib/playlist.sh")
+        self.assertIn('unit="$(bs_unit playlist "$name")"', p)
+        self.assertIn('systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop playlist', p)
+        self.assertIn('systemctl reset-failed "$unit" 2>/dev/null || true', p)
+        self.assertNotIn('systemctl reset-failed "$name"', p)
+
+    def test_06_stop_failure_is_not_converted_to_success(self):
+        # both stop paths fail loudly via bs_die when systemctl stop fails;
+        # there is no unconditional success after an unverified stop.
+        for rel in ("lib/relay.sh", "lib/playlist.sh"):
+            t = repo_text(rel)
+            self.assertIn('|| bs_die "Failed to stop', t)
+            self.assertNotIn('systemctl stop "$unit" 2>/dev/null\n    bs_ok', t)
+
+    def test_07_installer_restarts_active_web_service_on_upgrade(self):
+        wc = repo_text("lib/webconsole.sh")
+        # upgrade path: active service is restarted so new code/templates load
+        self.assertIn('if systemctl is-active "$BLUESTREAM_WEB_SERVICE" >/dev/null 2>&1; then', wc)
+        self.assertIn('systemctl restart "$BLUESTREAM_WEB_SERVICE"', wc)
+        # fresh-install path retained
+        self.assertIn('systemctl start "$BLUESTREAM_WEB_SERVICE"', wc)
+        # daemon-reload precedes the start/restart decision
+        self.assertLess(wc.index("systemctl daemon-reload"), wc.index("systemctl is-active"))
+
+    def test_08_fresh_install_start_behavior_remains(self):
+        wc = repo_text("lib/webconsole.sh")
+        self.assertIn('if ! systemctl start "$BLUESTREAM_WEB_SERVICE" 2>/dev/null; then', wc)
+        self.assertIn("bs_die \"bluestream-web service failed to start. Fix the issue and re-run install.sh.\"", wc)
+
+    def test_09_webctl_fixed_operation_model_unchanged(self):
+        # the existing allowlist/argv/target model is untouched by these fixes
+        w = repo_text("web-ctl")
+        self.assertIn('relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart', w)
+        self.assertIn('bs_valid_name "$name"', w)
+        self.assertNotIn("eval ", w)
+        self.assertNotIn("sh -c", w)
+
+
 if __name__ == "__main__":
     unittest.main()

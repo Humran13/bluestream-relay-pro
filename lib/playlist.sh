@@ -234,10 +234,16 @@ playlist_start() {
 }
 
 playlist_stop() {
-    local name="$1"
+    local name="$1" unit
     bs_require_root
     playlist_load_config "$name" || bs_die "Playlist '$name' not found"
-    systemctl stop "$(bs_unit playlist "$name")" 2>/dev/null
+    unit="$(bs_unit playlist "$name")"
+    systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop playlist '$name'"
+    # Same intentional-stop normalization as relay_stop: an explicit stop of a
+    # playlist's FFmpeg process can leave the unit 'failed'; clear the stale
+    # state for this exact validated unit so it ends up 'inactive'. Genuine
+    # runtime failures outside an explicit BlueStream Stop are untouched.
+    systemctl reset-failed "$unit" 2>/dev/null || true
     bs_ok "Playlist '$name' stopped"
 }
 
