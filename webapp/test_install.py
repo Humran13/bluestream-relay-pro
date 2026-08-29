@@ -596,5 +596,127 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         self.assertNotIn("sh -c", w)
 
 
+class HealthStateBehaviorTests(unittest.TestCase):
+    """Behavioral tests for lib/health.sh classification with a mocked systemctl.
+
+    Runs the real bash health_state() against a fake ``systemctl`` on PATH so
+    the ActiveState / enabled / Result combination logic is exercised rather
+    than only text-checked. Scenario values are injected into the fake binary.
+    """
+
+    _FAKE_SYSTEMCTL = """#!/usr/bin/env bash
+# Fake systemctl for health classification tests (values injected per case).
+case "$1" in
+    is-active)  printf '%s\\n' '__IS_ACTIVE__' ;;
+    is-enabled) printf '%s\\n' '__IS_ENABLED__' ;;
+    show)
+        if [ "$2" = "-p" ] && [ "$3" = "Result" ]; then
+            printf '%s\\n' '__RESULT__'
+        fi
+        ;;
+    *) exit 0 ;;
+esac
+"""
+
+    _HARNESS = """#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+bin="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+name="$3"
+kind="$4"
+export PATH="$bin:$PATH"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+confdir="$tmp/conf"
+hlsroot="$tmp/hls"
+mkdir -p "$confdir" "$hlsroot"
+if [ "$kind" = "relay" ]; then
+    : > "$confdir/$name.conf"
+else
+    : > "$confdir/$name.playlist"
+fi
+# shellcheck source=lib/common.sh
+. "$repo/lib/common.sh"
+# shellcheck source=lib/health.sh
+. "$repo/lib/health.sh"
+BLUESTREAM_RELAY_CONF_DIR="$confdir"
+BLUESTREAM_PLAYLIST_CONF_DIR="$confdir"
+BLUESTREAM_HLS_ROOT="$hlsroot"
+# Deterministic active-branch classification: pretend HLS is always fresh.
+bs_hls_is_fresh() { return 0; }
+health_state "$kind" "$name"
+printf '%s\\n' "$HEALTH_STATE"
+"""
+
+    def _run(self, kind, name, is_active, is_enabled, result):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            bindir = tmpdir / "bin"
+            bindir.mkdir()
+            fake = bindir / "systemctl"
+            fake.write_text(
+                self._FAKE_SYSTEMCTL.replace("__IS_ACTIVE__", is_active)
+                .replace("__IS_ENABLED__", is_enabled)
+                .replace("__RESULT__", result),
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(bindir), name, kind],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            return proc.stdout.decode("utf-8").strip()
+
+    def test_01_inactive_enabled_result_success_is_stopped(self):
+        self.assertEqual(self._run("relay", "test1080", "inactive", "enabled", "success"), "STOPPED")
+
+    def test_02_inactive_disabled_result_success_is_stopped(self):
+        self.assertEqual(self._run("playlist", "pl1", "inactive", "disabled", "success"), "STOPPED")
+
+    def test_03_failed_active_state_is_failed(self):
+        self.assertEqual(self._run("relay", "test1080", "failed", "enabled", "exit-code"), "FAILED")
+
+    def test_04_inactive_enabled_non_success_result_is_failed(self):
+        self.assertEqual(self._run("relay", "test1080", "inactive", "enabled", "exit-code"), "FAILED")
+
+    def test_05_active_remains_healthy(self):
+        self.assertEqual(self._run("relay", "test1080", "active", "enabled", "success"), "HEALTHY")
+
+    def test_06_activating_is_starting(self):
+        self.assertEqual(self._run("playlist", "pl1", "activating", "enabled", "success"), "STARTING")
+
+    def test_07_inactive_enabled_empty_result_is_failed(self):
+        # unknown/empty Result is NOT treated as success - failures stay visible
+        self.assertEqual(self._run("relay", "test1080", "inactive", "enabled", ""), "FAILED")
+
+    def test_08_inactive_disabled_non_success_result_is_stopped(self):
+        self.assertEqual(self._run("playlist", "pl1", "inactive", "disabled", "exit-code"), "STOPPED")
+
+    def test_09_playlist_shares_relay_classification(self):
+        self.assertEqual(self._run("playlist", "pl1", "inactive", "enabled", "success"), "STOPPED")
+        self.assertEqual(self._run("playlist", "pl1", "inactive", "enabled", "exit-code"), "FAILED")
+
+    def test_10_no_exec_main_status_255_special_case_in_health(self):
+        h = repo_text("lib/health.sh")
+        self.assertNotIn("ExecMainStatus", h)
+        self.assertNotIn("255", h)
+
+    def test_11_health_uses_systemd_result(self):
+        h = repo_text("lib/health.sh")
+        self.assertIn('systemctl show -p Result --value "$unit"', h)
+        self.assertIn('[ "$result" = "success" ]', h)
+
+
 if __name__ == "__main__":
     unittest.main()

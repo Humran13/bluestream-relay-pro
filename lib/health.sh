@@ -6,9 +6,11 @@
 #   HEALTHY  - service active and HLS fresh
 #   STARTING - service active but HLS not yet produced (recent start)
 #   STALE    - service active but HLS is not fresh
-#   STOPPED  - stopped and not enabled at boot
+#   STOPPED  - stopped (including a clean intentional stop of a still-enabled
+#              unit, detected via ActiveState=inactive + Result=success)
 #   DISABLED - alias of STOPPED used when config ENABLED=no
-#   FAILED   - enabled at boot but not running, or unit in failed state
+#   FAILED   - enabled at boot but not running with a non-success Result, or
+#              the unit is in the failed state
 #   UNKNOWN  - not configured / cannot be determined
 #
 # BlueStream Relay Pro 0.1.0 (foundation). See LICENSE for terms.
@@ -23,7 +25,7 @@ HEALTH_DETAILS=""
 
 health_state() {
     local kind="$1" name="$2"
-    local unit conf hlsdir active_state enable_state
+    local unit conf hlsdir active_state enable_state result
     HEALTH_STATE="UNKNOWN"
     HEALTH_DETAILS=""
 
@@ -79,6 +81,23 @@ health_state() {
         HEALTH_STATE="STARTING"
         HEALTH_DETAILS="unit is activating"
     else
+        # An intentional clean stop (relay_stop/playlist_stop) runs
+        # `systemctl reset-failed`, so it is visible as ActiveState=inactive +
+        # Result=success even when the unit stays enabled at boot. Only an
+        # inactive unit whose systemd Result is anything OTHER than success is
+        # a genuine failure when still enabled; empty/unknown Result values are
+        # NOT treated as success so real failures are never masked. Do NOT use
+        # the process exit status as the success signal here: FFmpeg exits
+        # non-zero on every intentional stop, so Result=success is the only
+        # trusted intentional-stop signal.
+        if [ "$active_state" = "inactive" ]; then
+            result="$(systemctl show -p Result --value "$unit" 2>/dev/null)"
+            if [ "$result" = "success" ]; then
+                HEALTH_STATE="STOPPED"
+                HEALTH_DETAILS="stopped cleanly (intentional stop; Result=success)"
+                return 0
+            fi
+        fi
         if [ "$enable_state" = "enabled" ] || [ "$enable_state" = "enabled-runtime" ]; then
             HEALTH_STATE="FAILED"
             HEALTH_DETAILS="enabled at boot but not running"
