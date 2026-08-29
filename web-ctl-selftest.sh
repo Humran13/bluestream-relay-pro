@@ -234,7 +234,81 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. no existing engine files changed unexpectedly
+# 10. GUI-1B.1 lifecycle bridge validation (fail-closed only: these inputs
+#     never reach a real relay/playlist or systemd)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    for _op in relay_start relay_stop relay_restart playlist_start playlist_stop playlist_restart; do
+        _out="$(bash web-ctl "$_op" 2>/dev/null)"; _rc=$?
+        if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_TARGET"'; then :; else _ok=0; fi
+        unset _out _rc
+    done
+    if [ "$_ok" -eq 1 ]; then
+        check "lifecycle bridge: missing target rejected for all six ops" 0
+    else
+        check "lifecycle bridge: missing target rejected for all six ops" 1
+    fi
+    unset _ok
+else
+    skip "lifecycle bridge: missing target (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    for _bad in '--help' '../evil' 'x;rm -rf /' 'a b'; do
+        _out="$(bash web-ctl relay_start "$_bad" 2>/dev/null)"; _rc=$?
+        if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+        unset _out _rc
+    done
+    if [ "$_ok" -eq 1 ]; then
+        check "lifecycle bridge: invalid target rejected (option/traversal/meta/space)" 0
+    else
+        check "lifecycle bridge: invalid target rejected (option/traversal/meta/space)" 1
+    fi
+    unset _ok
+else
+    skip "lifecycle bridge: invalid names (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_start goodname extra 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_start goodname "" 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_start goodname "" extra4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_start goodname a b c 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "lifecycle bridge: exact argv count enforced (extra/empty/4th/many)" 0
+    else
+        check "lifecycle bridge: exact argv count enforced (extra/empty/4th/many)" 1
+    fi
+    unset _ok
+else
+    skip "lifecycle bridge: exact argv count (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _out="$(bash web-ctl playlist_bogus 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "UNKNOWN_OPERATION"'; then
+        check "lifecycle bridge: unknown operation rejected" 0
+    else
+        check "lifecycle bridge: unknown operation rejected" 1
+    fi
+    unset _out _rc
+else
+    skip "lifecycle bridge: unknown operation (no python)"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. no existing engine files changed unexpectedly
 # ---------------------------------------------------------------------------
 if [ -d .git ]; then
     _modified="$(git diff --name-only 2>/dev/null || true)"

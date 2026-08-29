@@ -13,6 +13,11 @@ Routes (all under ``/console``):
     POST /console/logout  - logout (CSRF)
     GET  /console/        - authenticated read-only dashboard
     GET  /console         - redirect to /console/
+
+GUI-1B.1 lifecycle actions (POST only, CSRF + auth required, operation fixed
+by the route, target validated server-side, Post/Redirect/Get):
+    POST /console/relays/<name>/start|stop|restart
+    POST /console/playlists/<name>/start|stop|restart
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from flask import (
     abort,
     Blueprint,
     current_app,
+    flash,
     redirect,
     render_template,
     request,
@@ -34,7 +40,7 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from webapp.engine import EngineClient, EngineError
+from webapp.engine import EngineClient, EngineError, valid_target_name
 from webapp.security import (
     ADMIN_USERNAME,
     LoginRateLimiter,
@@ -217,7 +223,64 @@ def _register_error_handlers(app: Flask) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Console routes (read-only, under /console/)
+# GUI-1B.1: controlled lifecycle actions.  Operation is fixed by the route
+# (via LIFECYCLE_OPERATIONS); form data can never select an operation.
+# ---------------------------------------------------------------------------
+LIFECYCLE_OPERATIONS = {
+    ("relay", "start"): "relay_start",
+    ("relay", "stop"): "relay_stop",
+    ("relay", "restart"): "relay_restart",
+    ("playlist", "start"): "playlist_start",
+    ("playlist", "stop"): "playlist_stop",
+    ("playlist", "restart"): "playlist_restart",
+}
+
+_PAST_TENSE = {"start": "started", "stop": "stopped", "restart": "restarted"}
+
+
+def _lifecycle_action(kind: str, action: str, name: str):
+    """Run one authenticated lifecycle action and Post/Redirect/Get back.
+
+    * ``kind``/``action`` are compile-time constants from the calling route.
+    * The target name is validated here (and again in the engine client)
+      before any bridge call.
+    * Only the fixed corresponding EngineClient method is invoked; bridge
+      details stay server-side in the logs.
+    * Every outcome is a redirect to the dashboard (never a mutation response).
+    """
+    if not session.get("authenticated"):
+        return redirect(url_for("console.login"))
+    if not valid_target_name(name):
+        current_app.logger.warning("lifecycle %s rejected invalid name", kind)
+        flash("%s action rejected: invalid name" % kind.title(), "error")
+        return redirect(url_for("console.dashboard"))
+    engine = current_app.extensions["bluestream_engine"]
+    method_name = LIFECYCLE_OPERATIONS.get((kind, action))
+    method = getattr(engine, method_name, None) if method_name else None
+    if method is None:
+        current_app.logger.error(
+            "lifecycle %s %s: engine has no %s", kind, action, method_name
+        )
+        flash("%s '%s' %s failed." % (kind.title(), name, action), "error")
+        return redirect(url_for("console.dashboard"))
+    try:
+        method(name)
+    except EngineError as exc:
+        current_app.logger.warning(
+            "lifecycle %s %s '%s' failed: %s", kind, action, name, exc
+        )
+        flash("%s '%s' %s failed." % (kind.title(), name, action), "error")
+    else:
+        flash(
+            "%s '%s' %s successfully."
+            % (kind.title(), name, _PAST_TENSE.get(action, action)),
+            "success",
+        )
+    return redirect(url_for("console.dashboard"))
+
+
+# ---------------------------------------------------------------------------
+# Console routes (read-only + GUI-1B.1 lifecycle, under /console/)
 # ---------------------------------------------------------------------------
 def _register_console_routes(app: Flask) -> None:
     console = Blueprint("console", __name__, url_prefix="/console")
@@ -286,6 +349,34 @@ def _register_console_routes(app: Flask) -> None:
             data=data,
             engine_unavailable=bool(errors),
         )
+
+    # ------------------------------------------------------------------
+    # GUI-1B.1 lifecycle actions: POST only, operation fixed by the route,
+    # target validated server-side, CSRF enforced by the global before_request.
+    # ------------------------------------------------------------------
+    @console.route("/relays/<name>/start", methods=["POST"])
+    def relay_start(name):
+        return _lifecycle_action("relay", "start", name)
+
+    @console.route("/relays/<name>/stop", methods=["POST"])
+    def relay_stop(name):
+        return _lifecycle_action("relay", "stop", name)
+
+    @console.route("/relays/<name>/restart", methods=["POST"])
+    def relay_restart(name):
+        return _lifecycle_action("relay", "restart", name)
+
+    @console.route("/playlists/<name>/start", methods=["POST"])
+    def playlist_start(name):
+        return _lifecycle_action("playlist", "start", name)
+
+    @console.route("/playlists/<name>/stop", methods=["POST"])
+    def playlist_stop(name):
+        return _lifecycle_action("playlist", "stop", name)
+
+    @console.route("/playlists/<name>/restart", methods=["POST"])
+    def playlist_restart(name):
+        return _lifecycle_action("playlist", "restart", name)
 
     app.register_blueprint(console)
 

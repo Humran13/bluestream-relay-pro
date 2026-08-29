@@ -255,6 +255,11 @@ install_files() {
 
     # Libraries and scripts.
     cp -f "$BS_ROOT"/lib/*.sh "$libdir/lib/"
+    # Root trust chain: root web-ctl sources these libraries, so the installed
+    # copies must be root-owned and not writable by any unprivileged user
+    # regardless of the source checkout's ownership or mode bits.
+    chown root:root "$libdir"/lib/*.sh
+    chmod 0644 "$libdir"/lib/*.sh
     cp -f "$BS_ROOT"/config/nginx/*.template "$libdir/config/nginx/"
     cp -f "$BS_ROOT"/config/nginx/*.conf "$libdir/config/nginx/"
     cp -f "$BS_ROOT"/config/systemd/*.service "$libdir/config/systemd/"

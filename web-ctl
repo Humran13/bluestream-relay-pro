@@ -3,14 +3,28 @@
 # BlueStream Relay Pro - read-only web control bridge (GUI-1A.1).
 #
 # Machine-readable JSON front-end over the existing BlueStream Bash libraries,
-# designed to be called by a future Flask console application.
+# designed to be called by the Flask console application.
 #
-# This phase implements READ-ONLY operations only:
+# Read-only operations:
 #
 #   web-ctl version
 #   web-ctl snapshot
 #   web-ctl relay_list
 #   web-ctl playlist_list
+#
+# Controlled lifecycle operations (GUI-1B.1).  Each accepts exactly ONE target
+# name, validated with the engine's own bs_valid_name rule before any engine
+# function runs, and must reference an existing relay/playlist.  The operation
+# itself is fixed by the hard-coded dispatch allowlist:
+#
+#   web-ctl relay_start <name>
+#   web-ctl relay_stop <name>
+#   web-ctl relay_restart <name>
+#   web-ctl playlist_start <name>
+#   web-ctl playlist_stop <name>
+#   web-ctl playlist_restart <name>
+#
+# The six lifecycle actions above are the ONLY write operations at any layer.
 #
 # Output contract:
 #   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
@@ -199,17 +213,75 @@ wc_op_playlist_list() {
 }
 
 # ---------------------------------------------------------------------------
+# Controlled lifecycle operations (GUI-1B.1): exactly one validated target.
+# ---------------------------------------------------------------------------
+wc_op_lifecycle() {
+    local op="$1" name="${2:-}" kind="" action="" rc
+    case "$op" in
+        relay_start|relay_stop|relay_restart) kind="relay" ;;
+        playlist_start|playlist_stop|playlist_restart) kind="playlist" ;;
+    esac
+    [ -n "$kind" ] || wc_fail "unsupported lifecycle operation: $op" "UNKNOWN_OPERATION"
+    case "$op" in
+        relay_start|playlist_start)             action="start" ;;
+        relay_stop|playlist_stop)               action="stop" ;;
+        relay_restart|playlist_restart)         action="restart" ;;
+    esac
+    [ -n "$name" ] || wc_fail "missing ${kind} name" "MISSING_TARGET"
+    # Reuse the engine's own name rule.  The target can only reach an engine
+    # function or a filesystem path after matching [a-z0-9_-] with an
+    # alphanumeric first character (rejects option-like, traversal, spaces and
+    # shell metacharacters), so no path or unit name is ever derived from
+    # unvalidated browser data.
+    bs_valid_name "$name" || wc_fail "invalid ${kind} name" "INVALID_NAME"
+    if [ "$kind" = "relay" ]; then
+        relay_exists "$name" || wc_fail "relay not found: $name" "NOT_FOUND"
+    else
+        playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    fi
+    # Run the existing engine lifecycle function in a subshell so its internal
+    # bs_die()/exit cannot terminate the bridge.  Operator output is discarded
+    # and only the exit status drives the JSON result.
+    case "$op" in
+        relay_start)      ( relay_start "$name" ) ;;
+        relay_stop)       ( relay_stop "$name" ) ;;
+        relay_restart)    ( relay_restart "$name" ) ;;
+        playlist_start)   ( playlist_start "$name" ) ;;
+        playlist_stop)    ( playlist_stop "$name" ) ;;
+        playlist_restart) ( playlist_restart "$name" ) ;;
+    esac >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        wc_fail "${kind} $action failed" "OPERATION_FAILED"
+    fi
+    printf 'operation\0%s\0name\0%s\0' "$op" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch: hard-coded allowlist, fail closed.  No dynamic execution.
 # ---------------------------------------------------------------------------
 wc_dispatch() {
-    local operation="${1:-}"
+    local operation="${1:-}" name="${2:-}" argcount="${3:-0}"
     case "$operation" in
         version)       wc_op_version ;;
         snapshot)      wc_op_snapshot ;;
         relay_list)    wc_op_relay_list ;;
         playlist_list) wc_op_playlist_list ;;
+        relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart)
+            # Lifecycle operations accept EXACTLY operation + one target
+            # (shell argv count == 2).  An explicitly empty third argument
+            # still counts as an extra argument, and a fourth+ argument can
+            # never hide behind an empty third.
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing target name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            wc_op_lifecycle "$operation" "$name"
+            ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"
@@ -217,4 +289,4 @@ wc_dispatch() {
     esac
 }
 
-wc_dispatch "${1:-}"
+wc_dispatch "${1:-}" "${2:-}" "$#"

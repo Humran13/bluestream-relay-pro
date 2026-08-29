@@ -17,6 +17,15 @@
     {% endif %}
   </header>
   <main class="content">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash">
+      {% for category, message in messages %}
+      <p class="{{ category }}">{{ message }}</p>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
     {% block content %}{% endblock %}
   </main>
 </body>

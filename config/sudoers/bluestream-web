@@ -4,9 +4,12 @@
 # Validate before use on Ubuntu:  sudo visudo -cf /etc/sudoers.d/bluestream-web
 #
 # The unprivileged bluestream-web process may run ONE command as root: the
-# read-only web-ctl bridge. web-ctl itself is the hard-coded operation
-# allowlist (version|snapshot|relay_list|playlist_list only) and is the sole
-# trusted execution path to the root-owned engine libraries.
+# web-ctl bridge. web-ctl itself is the hard-coded operation allowlist
+# (version|snapshot|relay_list|playlist_list plus the six controlled lifecycle
+# operations relay_*/playlist_* start|stop|restart) and is the sole trusted
+# execution path to the root-owned engine libraries. The policy below is
+# argument-agnostic on purpose: every operation and every target name is
+# validated inside web-ctl against the fixed engine rules.
 #
 # Nothing else is granted: no bash, sh, systemctl, journalctl, python,
 # bluestream-manager, editors, directories or wildcard executable paths.

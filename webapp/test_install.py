@@ -85,6 +85,14 @@ class InstallerStaticTests(unittest.TestCase):
         self.assertIn('BLUESTREAM_WEB_UNIT="/etc/systemd/system/bluestream-web.service"', wc)
         self.assertIn('"$BS_ROOT/config/systemd/bluestream-web.service" "$BLUESTREAM_WEB_UNIT"', wc)
 
+    def test_11_installed_libraries_root_owned_and_not_writable(self):
+        # Root web-ctl sources lib/*.sh, so the deployed copies must be pinned
+        # root-owned/non-writable independent of the source checkout's modes.
+        inst = repo_text("install.sh")
+        self.assertIn('cp -f "$BS_ROOT"/lib/*.sh "$libdir/lib/"', inst)
+        self.assertIn('chown root:root "$libdir"/lib/*.sh', inst)
+        self.assertIn('chmod 0644 "$libdir"/lib/*.sh', inst)
+
     def test_18_no_ufw_8080_opening(self):
         for rel in ("install.sh", "lib/webconsole.sh", "lib/firewall.sh"):
             text = repo_text(rel)
@@ -367,9 +375,9 @@ class HttpsFollowupTests(unittest.TestCase):
 
 
 class ReadOnlyGuaranteeTests(unittest.TestCase):
-    """Flask/EngineClient remain read-only after integration."""
+    """Mutation surface is exactly GUI-1B.1's six lifecycle operations."""
 
-    def test_22_flask_routes_read_only(self):
+    def test_22_flask_routes_read_only_beyond_lifecycle(self):
         import sys
         import tempfile
 
@@ -382,7 +390,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             security.init_admin(state, "pw")
             app = create_app(state_dir=state)
             forbidden = (
-                "start", "stop", "restart", "enable", "disable",
+                "enable", "disable",
                 "create", "edit", "delete", "upload", "restore",
                 "nginx", "ssl", "firewall",
             )
@@ -401,6 +409,91 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             ALLOWED_OPERATIONS,
             frozenset({"version", "snapshot", "relay_list", "playlist_list"}),
         )
+
+    def test_24_engineclient_mutation_operations_exactly_six(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.engine import ALLOWED_MUTATION_OPERATIONS, EngineClient
+
+        self.assertEqual(
+            ALLOWED_MUTATION_OPERATIONS,
+            frozenset(
+                {
+                    "relay_start", "relay_stop", "relay_restart",
+                    "playlist_start", "playlist_stop", "playlist_restart",
+                }
+            ),
+        )
+        client = EngineClient(production=True)
+        for name in (
+            "relay_start", "relay_stop", "relay_restart",
+            "playlist_start", "playlist_stop", "playlist_restart",
+        ):
+            self.assertTrue(callable(getattr(client, name, None)), name)
+        for name in (
+            "relay_create", "relay_edit", "relay_delete",
+            "playlist_create", "playlist_edit", "playlist_delete",
+        ):
+            self.assertFalse(hasattr(client, name), name)
+
+    def test_25_webctl_dispatch_exact_operation_allowlist(self):
+        w = repo_text("web-ctl")
+        for op in (
+            "version", "snapshot", "relay_list", "playlist_list",
+            "relay_start", "relay_stop", "relay_restart",
+            "playlist_start", "playlist_stop", "playlist_restart",
+        ):
+            self.assertIn(op, w)
+        # no shell code-execution constructs in the bridge
+        self.assertNotIn("eval ", w)
+        self.assertNotIn("eval(", w)
+        self.assertNotIn("sh -c", w)
+        # no create/edit/delete dispatch words anywhere in web-ctl
+        for word in ("create", "delete", "upload", "restore"):
+            self.assertNotIn(word, w)
+
+    def test_26_webctl_reuses_engine_name_rule_and_lifecycle_functions(self):
+        w = repo_text("web-ctl")
+        self.assertIn('bs_valid_name "$name"', w)
+        for fn in (
+            "relay_start", "relay_stop", "relay_restart",
+            "playlist_start", "playlist_stop", "playlist_restart",
+        ):
+            self.assertIn("( %s \"$name\" )" % fn, w)
+        self.assertIn("relay_exists \"$name\"", w)
+        self.assertIn("playlist_exists \"$name\"", w)
+
+    def test_27_webctl_rejects_extra_args_and_missing_target(self):
+        w = repo_text("web-ctl")
+        self.assertIn("TOO_MANY_ARGUMENTS", w)
+        self.assertIn("MISSING_TARGET", w)
+        self.assertIn("INVALID_NAME", w)
+        self.assertIn("NOT_FOUND", w)
+
+    def test_28_sudoers_no_new_executable_no_setenv(self):
+        s = repo_text("config/sudoers/bluestream-web")
+        # active policy lines = non-comment, non-Defaults entries
+        grant_lines = [
+            ln.strip() for ln in s.splitlines()
+            if ln.strip()
+            and not ln.lstrip().startswith("#")
+            and not ln.lstrip().startswith("Defaults")
+        ]
+        # the ONLY executable grant is the fixed web-ctl command
+        self.assertEqual(
+            grant_lines,
+            ["bluestream-web ALL=(root) NOPASSWD: /usr/local/lib/bluestream/web-ctl"],
+        )
+        # no SETENV anywhere in the active policy
+        for ln in grant_lines:
+            self.assertNotIn("SETENV", ln)
+            for exe in ("systemctl", "bluestream-manager", "bash", "python",
+                        "env", "tee", "cp", "mv", "rm"):
+                self.assertNotIn(exe, ln)
+        # env hardening remains
+        self.assertIn("env_reset", s)
+        self.assertIn("secure_path", s)
 
     def test_21_version_unchanged(self):
         self.assertEqual(repo_text("VERSION").strip(), "0.1.0")
