@@ -100,6 +100,9 @@ class FakeEngine:
     def media_import_staged(self, staging):
         return self._mutation("media_import_staged", staging)
 
+    def playlist_create(self, name, items):
+        return self._mutation("playlist_create", name, *items)
+
 
 def make_state(tmpdir, password=ADMIN_PASSWORD):
     state = Path(tmpdir) / "state"
@@ -431,6 +434,8 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.media_create_stream",
                 "console.media_create_stream_post",
                 "console.playlists",
+                "console.playlists_create",
+                "console.playlists_create_post",
             },
         )
         # only the expected HTTP methods
@@ -707,7 +712,7 @@ class EngineClientTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # GUI-1B.1: lifecycle mutations
     # ------------------------------------------------------------------
-    def test_20_mutation_methods_are_exactly_nine_and_fixed(self):
+    def test_20_mutation_methods_are_exactly_fixed(self):
         client = EngineClient(
             web_ctl=Path(self._tmp.name) / "web-ctl", bash="/bin/bash"
         )
@@ -721,6 +726,8 @@ class EngineClientTests(unittest.TestCase):
             "relay_create_url",
             "relay_create_media",
             "media_import_staged",
+            # GUI-1D.1: fixed-argv playlist creation
+            "playlist_create",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for forbidden in (
@@ -742,6 +749,7 @@ class EngineClientTests(unittest.TestCase):
                     "relay_create_url",
                     "relay_create_media",
                     "media_import_staged",
+                    "playlist_create",
                 }
             ),
         )
@@ -896,6 +904,117 @@ class EngineClientTests(unittest.TestCase):
         ):
             self.assertFalse(valid_target_name(bad), bad)
 
+    # ------------------------------------------------------------------
+    # GUI-1D.1: playlist_create fixed argv + validation.
+    # ------------------------------------------------------------------
+    def test_28_playlist_create_uses_shell_false_argv_preserving_order(self):
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["kwargs"] = kwargs
+
+            class Result:
+                returncode = 0
+                stdout = (
+                    b'{"ok": true, "data": {"operation": "playlist_create",'
+                    b' "name": "evening-promo-loop", "items": "3"}}'
+                )
+                stderr = b""
+
+            return Result()
+
+        fake = Path(self._tmp.name) / "web-ctl"
+        fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(web_ctl=fake, bash="/bin/bash")
+            data = client.playlist_create(
+                "evening-promo-loop", ["intro.mp4", "advert-01.mp4", "closing.mp4"]
+            )
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(data["operation"], "playlist_create")
+        # each media basename is its own argv element (no shell string), order kept
+        self.assertEqual(
+            calls["cmd"],
+            [
+                "/bin/bash",
+                str(fake),
+                "playlist_create",
+                "evening-promo-loop",
+                "intro.mp4",
+                "advert-01.mp4",
+                "closing.mp4",
+            ],
+        )
+        self.assertIs(calls["kwargs"]["shell"], False)
+
+    def test_29_playlist_create_invalid_inputs_rejected_before_subprocess(self):
+        called = []
+
+        def fake_run(cmd, **kwargs):
+            called.append(cmd)
+            raise AssertionError("subprocess must not be executed")
+
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(
+                web_ctl=Path(self._tmp.name) / "web-ctl", bash="/bin/bash"
+            )
+            with self.assertRaises(EngineError):
+                client.playlist_create("--help", ["a.mp4", "b.mp4"])
+            with self.assertRaises(EngineError):
+                client.playlist_create("ok", ["../evil.mp4", "b.mp4"])
+            with self.assertRaises(EngineError):
+                client.playlist_create("ok", ["a.mp4", "a.mp4"])
+            with self.assertRaises(EngineError):
+                client.playlist_create("ok", ["a.mp4"])
+            with self.assertRaises(EngineError):
+                client.playlist_create("ok", ["C:\\x.mp4", "b.mp4"])
+            with self.assertRaises(EngineError):
+                client.playlist_create("ok", ["x.mp4"] * 65)
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(called, [])
+
+    def test_30_production_playlist_create_argv_fixed_sudo_webctl(self):
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["kwargs"] = kwargs
+
+            class Result:
+                returncode = 0
+                stdout = b'{"ok": true, "data": {"operation": "playlist_create"}}'
+                stderr = b""
+
+            return Result()
+
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(production=True)
+            client.playlist_create("evening-promo-loop", ["intro.mp4", "closing.mp4"])
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(
+            calls["cmd"],
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/local/lib/bluestream/web-ctl",
+                "playlist_create",
+                "evening-promo-loop",
+                "intro.mp4",
+                "closing.mp4",
+            ],
+        )
+        self.assertIs(calls["kwargs"]["shell"], False)
+
 
 class WebCtlArgvBoundaryTests(unittest.TestCase):
     """GUI-1B.1: lifecycle operations accept EXACTLY two argv items.
@@ -1034,6 +1153,55 @@ class WebCtlArgvBoundaryTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIs(doc["ok"], True)
         self.assertIsInstance(doc.get("data"), list)
+
+    # ------------------------------------------------------------------
+    # GUI-1D.1: playlist_create fixed argv + fail-closed validation.  Every
+    # case below stops at dispatch/name/media validation - nothing is ever
+    # written in a dev checkout.
+    # ------------------------------------------------------------------
+    def test_30_playlist_create_missing_arguments_fail(self):
+        rc, doc = self._run("playlist_create")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_ARGUMENT")
+        rc, doc = self._run("playlist_create", "mypl")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_ARGUMENT")
+
+    def test_31_playlist_create_too_few_items_fails(self):
+        rc, doc = self._run("playlist_create", "mypl", "a.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_FEW_ITEMS")
+
+    def test_32_playlist_create_too_many_args_rejected(self):
+        items = ["item%02d.mp4" % i for i in range(65)]
+        rc, doc = self._run("playlist_create", "mypl", *items)
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+
+    def test_33_playlist_create_unsafe_name_rejected(self):
+        for bad in ("--help", "../x", "UPPER", "x;rm", "a b"):
+            rc, doc = self._run("playlist_create", bad, "a.mp4", "b.mp4")
+            self.assertEqual(rc, 1, bad)
+            self.assertEqual(doc["code"], "INVALID_NAME", bad)
+
+    def test_34_playlist_create_unsafe_media_rejected(self):
+        for item in ("../evil.mp4", "/etc/passwd", "C:\\x.mp4", "a;b.mp4", "a b.mp4"):
+            rc, doc = self._run("playlist_create", "mypl", item, "b.mp4")
+            self.assertEqual(rc, 1, item)
+            self.assertEqual(doc["code"], "INVALID_MEDIA", item)
+
+    def test_35_playlist_create_duplicate_media_rejected(self):
+        rc, doc = self._run("playlist_create", "mypl", "a.mp4", "a.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "DUPLICATE_ITEM")
+
+    def test_36_playlist_create_valid_names_reach_media_check(self):
+        # Valid name + valid media basenames progress past dispatch/validation
+        # to the engine's authoritative media existence check (fails closed in
+        # a dev checkout because the managed media directory does not exist).
+        rc, doc = self._run("playlist_create", "zz-playlist-probe", "a.mp4", "b.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MEDIA_NOT_FOUND")
 
 
 class SecurityTests(unittest.TestCase):
@@ -1784,6 +1952,439 @@ class Gui1cWorkflowTests(unittest.TestCase):
             self.engine.mutation_calls,
             [("relay_create_media", "my-timer-stream", "promo.mp4")],
         )
+
+
+class Gui1dPlaylistWorkflowTests(unittest.TestCase):
+    """GUI-1D.1 playlist builder: friendly names, ordered media selection,
+    fail-closed media validation, stopped-start state, HLS URL display, and
+    the playlist lifecycle actions.  Uses a FakeEngine so no privileged bridge
+    call is ever made; auth, CSRF, GET-vs-POST and PRG are exercised end to end.
+    """
+
+    PLAYLISTS_PAYLOADS = {
+        "snapshot": {
+            "version": "0.1.0",
+            "hostname": "testhost",
+            "uptime": "up 1 day",
+            "domain": "example.com",
+            "https_configured": "yes",
+            "nginx_active": "no",
+            "ffmpeg_available": "yes",
+            "ffprobe_available": "yes",
+            "relay_count": "0",
+            "playlist_count": "1",
+        },
+        "relay_list": [],
+        "playlist_list": [
+            {
+                "name": "evening-promo-loop",
+                "active": "no",
+                "enabled": "no",
+                "items": "2",
+                "health": "STOPPED",
+            }
+        ],
+        "media_list": [
+            {"name": "intro.mp4", "size": "1000", "extension": "mp4"},
+            {"name": "advert-01.mp4", "size": "2000", "extension": "mp4"},
+            {"name": "advert-02.mp4", "size": "3000", "extension": "mp4"},
+            {"name": "closing.mp4", "size": "4000", "extension": "mp4"},
+        ],
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.engine = FakeEngine(self.PLAYLISTS_PAYLOADS)
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+        )
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _login(self):
+        login(self.client)
+
+    def _csrf(self, path="/console/playlists/create"):
+        return get_csrf(self.client, path=path)
+
+    def _post_create(self, data):
+        return self.client.post(
+            "/console/playlists/create",
+            data=dict(data, csrf_token=self._csrf()),
+        )
+
+    # ------------------------------------------------------------------
+    # Playlist name normalization (friendly -> strict internal ID).
+    # ------------------------------------------------------------------
+    def test_01_friendly_name_normalized_to_internal_id(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "Evening Promo Loop",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/playlists", rv.headers["Location"])
+        # only the normalized safe internal ID crosses the privileged boundary
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("playlist_create", "evening-promo-loop", "intro.mp4", "closing.mp4")],
+        )
+
+    def test_02_repeated_spaces_and_punctuation_normalize_safely(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "Evening!!!  Promo Loop!!",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("playlist_create", "evening-promo-loop", "intro.mp4", "closing.mp4")],
+        )
+
+    def test_03_empty_or_invalid_name_rejected(self):
+        self._login()
+        for bad in ("", "   ", "!!!", "..", "x" * 60):
+            rv = self._post_create(
+                {
+                    "name": bad,
+                    "items": ["intro.mp4", "closing.mp4"],
+                    "order_intro.mp4": "1",
+                    "order_closing.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302, repr(bad))
+            self.assertEqual(self.engine.mutation_calls, [], repr(bad))
+        html = self.client.get("/console/playlists/create").get_data(as_text=True)
+        self.assertIn("We could not create a safe playlist name", html)
+        self.assertNotIn("Traceback", html)
+
+    # ------------------------------------------------------------------
+    # Playlist creation (ordered items, stopped start state).
+    # ------------------------------------------------------------------
+    def test_05_valid_two_item_creation_prg(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "Evening Promo Loop",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/playlists", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("playlist_create", "evening-promo-loop", "intro.mp4", "closing.mp4")],
+        )
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("evening-promo-loop", html)
+        self.assertIn("It is stopped", html)
+
+    def test_06_playback_order_preserved_exactly(self):
+        self._login()
+        # order numbers deliberately differ from the checkbox submission order
+        rv = self._post_create(
+            {
+                "name": "Reversed",
+                "items": ["intro.mp4", "advert-01.mp4", "closing.mp4"],
+                "order_intro.mp4": "3",
+                "order_advert-01.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [
+                (
+                    "playlist_create",
+                    "reversed",
+                    "advert-01.mp4",
+                    "closing.mp4",
+                    "intro.mp4",
+                )
+            ],
+        )
+
+    def test_07_created_playlist_starts_stopped(self):
+        self._login()
+        self._post_create(
+            {
+                "name": "Loop",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("It is stopped", html)
+        self.assertIn("STOPPED", html)
+
+    def test_08_duplicate_playlist_rejected_without_overwrite(self):
+        self._login()
+        self.engine.mutation_payloads[
+            ("playlist_create", "evening-promo-loop", "intro.mp4", "closing.mp4")
+        ] = EngineError(
+            "a playlist named 'evening-promo-loop' already exists",
+            code="ALREADY_EXISTS",
+        )
+        rv = self._post_create(
+            {
+                "name": "Evening Promo Loop",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/playlists/create").get_data(as_text=True)
+        self.assertIn(
+            "A playlist named &#39;evening-promo-loop&#39; already exists.", html
+        )
+        self.assertNotIn("Traceback", html)
+
+    def test_09_too_few_items_rejected(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "Solo",
+                "items": ["intro.mp4"],
+                "order_intro.mp4": "1",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/playlists/create").get_data(as_text=True)
+        self.assertIn("Select at least two media files.", html)
+
+    # ------------------------------------------------------------------
+    # Media selection security (never trust the browser).
+    # ------------------------------------------------------------------
+    def test_11_unsafe_media_identifier_rejected(self):
+        self._login()
+        for item in ("evil;rm -rf /tmp/x.mp4", "a b.mp4", "&x=1.mp4"):
+            rv = self._post_create(
+                {
+                    "name": "bad",
+                    "items": [item, "intro.mp4"],
+                    "order_" + item: "1",
+                    "order_intro.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302, item)
+            self.assertEqual(self.engine.mutation_calls, [], item)
+
+    def test_12_traversal_attempt_rejected(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "bad",
+                "items": ["../evil.mp4", "intro.mp4"],
+                "order_../evil.mp4": "1",
+                "order_intro.mp4": "2",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_13_absolute_path_rejected(self):
+        self._login()
+        for item in ("/etc/passwd", "/var/lib/bluestream/media/x.mp4"):
+            rv = self._post_create(
+                {
+                    "name": "bad",
+                    "items": [item, "intro.mp4"],
+                    "order_" + item: "1",
+                    "order_intro.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302, item)
+            self.assertEqual(self.engine.mutation_calls, [], item)
+
+    def test_14_windows_style_path_rejected(self):
+        self._login()
+        for item in ("C:\\evil\\x.mp4", "..\\evil.mp4", ".\\evil.mp4"):
+            rv = self._post_create(
+                {
+                    "name": "bad",
+                    "items": [item, "intro.mp4"],
+                    "order_" + item: "1",
+                    "order_intro.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302, item)
+            self.assertEqual(self.engine.mutation_calls, [], item)
+
+    def test_15_no_arbitrary_privileged_path_reaches_engine(self):
+        self._login()
+        for item in ("../evil.mp4", "/etc/passwd", "C:\\x.mp4", "a;b.mp4"):
+            rv = self._post_create(
+                {
+                    "name": "bad",
+                    "items": [item, "intro.mp4"],
+                    "order_" + item: "1",
+                    "order_intro.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302)
+        # duplicate order numbers are also rejected before any engine call
+        rv = self._post_create(
+            {
+                "name": "dup-order",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "1",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    # ------------------------------------------------------------------
+    # Order validation.
+    # ------------------------------------------------------------------
+    def test_16_non_sequential_order_rejected(self):
+        self._login()
+        rv = self._post_create(
+            {
+                "name": "gap",
+                "items": ["intro.mp4", "closing.mp4"],
+                "order_intro.mp4": "1",
+                "order_closing.mp4": "3",
+            }
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/playlists/create").get_data(as_text=True)
+        self.assertIn("Play order numbers must be 1 to 2 in sequence.", html)
+
+    def test_17_non_numeric_or_zero_order_rejected(self):
+        self._login()
+        for order in ("", "abc", "0", "-1"):
+            rv = self._post_create(
+                {
+                    "name": "badorder",
+                    "items": ["intro.mp4", "closing.mp4"],
+                    "order_intro.mp4": order,
+                    "order_closing.mp4": "2",
+                }
+            )
+            self.assertEqual(rv.status_code, 302, repr(order))
+            self.assertEqual(self.engine.mutation_calls, [], repr(order))
+
+    # ------------------------------------------------------------------
+    # Playlist list page: columns, HLS URL, health, lifecycle actions.
+    # ------------------------------------------------------------------
+    def test_19_playlists_page_shows_columns_and_hls_url(self):
+        self._login()
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("evening-promo-loop", html)
+        self.assertIn(">2<", html)
+        self.assertIn("STOPPED", html)
+        self.assertIn(
+            "https://example.com/hls/playlist/evening-promo-loop/index.m3u8", html
+        )
+        # lifecycle actions are the only actions (no edit/delete yet)
+        self.assertIn("/console/playlists/evening-promo-loop/start", html)
+        self.assertIn("/console/playlists/evening-promo-loop/stop", html)
+        self.assertIn("/console/playlists/evening-promo-loop/restart", html)
+        self.assertNotIn("Delete", html)
+        self.assertNotIn("Edit", html)
+
+    def test_20_create_page_lists_media_with_order_fields(self):
+        self._login()
+        html = self.client.get("/console/playlists/create").get_data(as_text=True)
+        self.assertIn("Playlist Name", html)
+        self.assertIn("name=\"items\"", html)
+        self.assertIn("order_intro.mp4", html)
+        self.assertIn("order_closing.mp4", html)
+        self.assertIn('name="csrf_token"', html)
+
+    def test_21_hls_url_helper_matches_expected_structure(self):
+        url = app_module.playlist_hls_url(
+            {"domain": "example.com", "https_configured": "yes"},
+            "evening-promo-loop",
+        )
+        self.assertEqual(
+            url, "https://example.com/hls/playlist/evening-promo-loop/index.m3u8"
+        )
+        # no authoritative domain -> no URL (never fabricated from Host header)
+        self.assertIsNone(app_module.playlist_hls_url({}, "evening-promo-loop"))
+        self.assertIsNone(app_module.playlist_hls_url(None, "evening-promo-loop"))
+
+    def test_22_item_order_validator_unit(self):
+        from werkzeug.datastructures import ImmutableMultiDict
+
+        ok, ordered, error = app_module._validate_playlist_items(
+            ImmutableMultiDict(
+                [
+                    ("items", "intro.mp4"),
+                    ("items", "closing.mp4"),
+                    ("order_intro.mp4", "2"),
+                    ("order_closing.mp4", "1"),
+                ]
+            )
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ordered, ["closing.mp4", "intro.mp4"])
+        ok, ordered, error = app_module._validate_playlist_items(
+            ImmutableMultiDict(
+                [("items", "intro.mp4"), ("order_intro.mp4", "1")]
+            )
+        )
+        self.assertFalse(ok)
+        self.assertIn("at least two", error)
+
+    def test_23_lifecycle_actions_call_only_expected_operations(self):
+        self._login()
+        token = get_csrf(self.client, path="/console/playlists")
+        for action in ("start", "stop", "restart"):
+            rv = self.client.post(
+                "/console/playlists/evening-promo-loop/%s" % action,
+                data={"csrf_token": token},
+            )
+            self.assertEqual(rv.status_code, 302, action)
+        self.assertEqual(
+            sorted(self.engine.mutation_calls),
+            [
+                ("playlist_restart", "evening-promo-loop"),
+                ("playlist_start", "evening-promo-loop"),
+                ("playlist_stop", "evening-promo-loop"),
+            ],
+        )
+
+    def test_24_intentional_stop_displays_stopped_not_failed(self):
+        self._login()
+        payloads = dict(self.PLAYLISTS_PAYLOADS)
+        payloads["playlist_list"] = [
+            {
+                "name": "evening-promo-loop",
+                "active": "no",
+                "enabled": "yes",
+                "items": "2",
+                "health": "STOPPED",
+            }
+        ]
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=FakeEngine(payloads)
+        )
+        client = app.test_client()
+        login(client)
+        html = client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("STOPPED", html)
+        self.assertNotIn("FAILED", html)
 
 
 if __name__ == "__main__":

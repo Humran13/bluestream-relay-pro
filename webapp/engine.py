@@ -38,8 +38,16 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "relay_create_url",
         "relay_create_media",
         "media_import_staged",
+        # GUI-1D.1: fixed-argv playlist creation (validated in
+        # _validate_mutation_values before any subprocess is started).
+        "playlist_create",
     }
 )
+
+# GUI-1D.1: shared ceiling for playlist entries (mirrors
+# BLUESTREAM_PLAYLIST_MAX_ITEMS in lib/playlist.sh). Bounds privileged argv and
+# config writes; the web form validates the same limit before submission.
+MAX_PLAYLIST_ITEMS = 64
 
 # Mirrors bs_valid_name in lib/common.sh: lowercase letters, digits, '-' and
 # '_', first character alphanumeric, at most 48 characters.  This is the ONLY
@@ -289,6 +297,36 @@ class EngineClient:
             if not valid_media_name(media):
                 raise EngineError("invalid media name", code="INVALID_MEDIA")
             return [name, media]
+        if operation == "playlist_create":
+            # Fixed argv: name + 2..MAX_PLAYLIST_ITEMS unique, strictly-valid
+            # media basenames.  Anything malformed raises BEFORE a subprocess
+            # starts, so an arbitrary path/traversal/shell fragment can never
+            # reach web-ctl.  Order is preserved exactly (argv order is the
+            # playback order).
+            if len(values) < 3:
+                raise EngineError(
+                    "a playlist needs a name and at least two media files",
+                    code="TOO_FEW_ITEMS",
+                )
+            if len(values) > 1 + MAX_PLAYLIST_ITEMS:
+                raise EngineError(
+                    "too many media files (maximum is %d)" % MAX_PLAYLIST_ITEMS,
+                    code="TOO_MANY_ITEMS",
+                )
+            name = values[0]
+            if not valid_target_name(name):
+                raise EngineError("invalid playlist name", code="INVALID_NAME")
+            seen = set()
+            for media in values[1:]:
+                if not valid_media_name(media):
+                    raise EngineError("invalid media name", code="INVALID_MEDIA")
+                if media in seen:
+                    raise EngineError(
+                        "the same media file cannot be used more than once",
+                        code="DUPLICATE_ITEM",
+                    )
+                seen.add(media)
+            return list(values)
         raise EngineError("unsupported operation: %r" % operation)
 
     # ------------------------------------------------------------------
@@ -326,3 +364,11 @@ class EngineClient:
 
     def media_import_staged(self, staging: str):
         return self._mutation("media_import_staged", staging)
+
+    def playlist_create(self, name: str, items: list):
+        """Create a stopped playlist from an ordered list of media basenames.
+
+        ``items`` must be an ordered sequence of 2..MAX_PLAYLIST_ITEMS media
+        basenames; the order is preserved exactly as the playback order.
+        """
+        return self._mutation("playlist_create", name, *items)

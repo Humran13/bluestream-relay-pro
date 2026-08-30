@@ -18,6 +18,13 @@ PLAYLIST_ENABLED="no"
 PLAYLIST_FILES=()
 PLAYLIST_CONF_FILE=""
 
+# Conservative maximum entries per playlist (GUI-1D.1).  There was no engine
+# limit before; this bounds privileged argv/config writes so the bridge and
+# the Flask form share one safe ceiling (playlist_create fails closed above
+# it).  64 is generous for ordinary sequential promo/looping channels while
+# keeping every bridge argv line and config file small.
+BLUESTREAM_PLAYLIST_MAX_ITEMS=64
+
 # ---------------------------------------------------------------------------
 # Config load / save / validation
 # ---------------------------------------------------------------------------
@@ -62,7 +69,12 @@ playlist_load_config() {
 playlist_save_config() {
     local name="$1"
     local tmp="$BLUESTREAM_PLAYLIST_CONF_DIR/.$name.playlist.tmp.$$"
-    {
+    local dest="$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist"
+    # Fail closed (GUI-1D.1): any critical write step (temp creation, chmod,
+    # rename into place, final mode) must succeed or the function returns
+    # non-zero and cleans up its temp file, so a partial config is never
+    # presented as saved.  Playlist creation/editing callers check this return.
+    if ! {
         printf '# BlueStream Relay Pro playlist (root-only)\n'
         printf 'NAME=%s\n' "$PLAYLIST_NAME"
         printf 'ENABLED=%s\n' "$PLAYLIST_ENABLED"
@@ -71,11 +83,15 @@ playlist_save_config() {
         for f in "${PLAYLIST_FILES[@]}"; do
             printf '%s\n' "$f"
         done
-    } > "$tmp"
-    chmod 0600 "$tmp"
+    } > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
     chown root:root "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist"
-    chmod 0600 "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist"
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+    chmod 0600 "$dest" || { rm -f "$dest"; return 1; }
+    return 0
 }
 
 playlist_exists() {
@@ -363,6 +379,48 @@ playlist_health() {
 # ---------------------------------------------------------------------------
 # Create / add / remove / reorder
 # ---------------------------------------------------------------------------
+# Authoritative playlist creation (GUI-1D.1).  Validates the internal playlist
+# ID and EVERY media entry, rejects duplicates, then writes ONE new playlist
+# config atomically.  The playlist starts STOPPED (ENABLED=no) so the operator
+# explicitly starts it from the console.  Shares the exact config model/save
+# path as the CLI.  Returns 0 on success.  (Named *_items to avoid shadowing
+# the interactive menu's playlist_create.)
+#
+# Exit status contract (mapped to controlled JSON error codes by web-ctl):
+#   0 success
+#   1 invalid playlist name
+#   2 a playlist with this name already exists (never overwritten)
+#   3 fewer than two media items
+#   4 more than BLUESTREAM_PLAYLIST_MAX_ITEMS media items
+#   5 invalid media basename
+#   6 a referenced media file is not present in managed media
+#   7 the same media file was listed more than once
+#   8 config directory/save failure (fail closed - no config was written)
+playlist_create_items() {
+    local name="${1:-}"
+    shift || true
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    playlist_exists "$name" && return 2
+    [ "$#" -ge 2 ] || return 3
+    [ "$#" -le "$BLUESTREAM_PLAYLIST_MAX_ITEMS" ] || return 4
+    PLAYLIST_FILES=()
+    local f
+    for f in "$@"; do
+        bs_valid_media_name "$f" || return 5
+        [ -f "$BLUESTREAM_MEDIA_DIR/$f" ] || return 6
+        case " ${PLAYLIST_FILES[*]} " in
+            *" $f "*) return 7 ;;
+        esac
+        PLAYLIST_FILES+=( "$f" )
+    done
+    PLAYLIST_NAME="$name"
+    PLAYLIST_ENABLED="no"
+    mkdir -p "$BLUESTREAM_PLAYLIST_CONF_DIR" 2>/dev/null || return 8
+    playlist_save_config "$name" || return 8
+    return 0
+}
+
 playlist_select_interactive() {
     local names name i j choice
     names="$(playlist_list_names)"

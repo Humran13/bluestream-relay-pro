@@ -420,6 +420,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 10.6 GUI-1D.1 playlist_create bridge validation (fail-closed only: every
+#      case below stops at dispatch/name/media validation - nothing is ever
+#      written)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl playlist_create 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create goodname 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create goodname a.mp4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_FEW_ITEMS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create --help a.mp4 b.mp4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create goodname '../evil.mp4' b.mp4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create goodname 'C:\\x.mp4' b.mp4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_create goodname a.mp4 a.mp4 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "DUPLICATE_ITEM"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "playlist_create bridge: fail-closed validation (missing/too-few/name/media/duplicate)" 0
+    else
+        check "playlist_create bridge: fail-closed validation (missing/too-few/name/media/duplicate)" 1
+    fi
+    unset _ok
+else
+    skip "playlist_create bridge: fail-closed validation (no python)"
+fi
+
+# ---------------------------------------------------------------------------
 # 11. no existing engine files changed unexpectedly
 # ---------------------------------------------------------------------------
 if [ -d .git ]; then

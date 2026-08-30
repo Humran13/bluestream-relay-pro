@@ -94,6 +94,26 @@ input[type="password"] {
 
 .source { word-break: break-all; max-width: 22rem; }
 
+/* GUI-1D.1: copyable HLS URL in the playlists table */
+.hls-url {
+  width: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fafbfc;
+  color: var(--text);
+}
+
+input[type="number"] {
+  width: 4.5rem;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
 input[type="file"] { display: block; margin: 0.25rem 0 0.75rem; }
 
 /* Status badges */

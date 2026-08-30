@@ -58,6 +58,11 @@ ProtectSystem=strict
 #                             relay_save_config); on disk root:root 0600, so
 #                             only the sudo-root web-ctl child can write
 #                             inside the namespace
+#   /etc/bluestream/playlists - GUI-1D.1 playlist config create/save
+#                             (playlist_create / playlist_save_config); same
+#                             root:root 0600 model as the relays directory, so
+#                             only the sudo-root web-ctl child can write inside
+#                             the namespace during browser playlist creation
 #   /var/www/bluestream/hls - HLS output directories created by
 #                             bs_ensure_hls_dir for relays and playlists
 #   /var/lib/bluestream/run - playlist concat file (playlist_write_concat_file)
@@ -74,7 +79,7 @@ ProtectSystem=strict
 # Ownership/modes of these paths are unchanged; the web state dir below stays
 # READ-ONLY for bluestream-web (root:bluestream-web 0640/0750; the installer
 # pre-creates admin.json/secret_key/web.conf).
-ReadWritePaths=/run/sudo /etc/systemd/system /etc/bluestream/relays /var/www/bluestream/hls /var/lib/bluestream/run /var/lib/bluestream/web/upload /var/lib/bluestream/media
+ReadWritePaths=/run/sudo /etc/systemd/system /etc/bluestream/relays /etc/bluestream/playlists /var/www/bluestream/hls /var/lib/bluestream/run /var/lib/bluestream/web/upload /var/lib/bluestream/media
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

@@ -1,4 +1,4 @@
-"""BlueStream Relay Pro - authenticated web console (GUI-1A.2 / 1B.1 / 1C.1).
+"""BlueStream Relay Pro - authenticated web console (GUI-1A.2 / 1B.1 / 1C.1 / 1D.1).
 
 Local development entrypoint::
 
@@ -26,6 +26,10 @@ GUI-1C.1 create-stream / media-library workflows (auth + CSRF on all POSTs):
     GET/POST /console/media/upload
     GET/POST /console/media/<name>/create-stream
     GET  /console/playlists
+
+GUI-1D.1 playlist builder (auth + CSRF on all POSTs, friendly names normalized
+at the web boundary, media selected from the Media Library only):
+    GET/POST /console/playlists/create
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from webapp.engine import (
     ALLOWED_UPLOAD_EXTENSIONS,
+    MAX_PLAYLIST_ITEMS,
     EngineClient,
     EngineError,
     valid_media_name,
@@ -222,6 +227,101 @@ def _upload_error_message(exc: EngineError) -> str:
     if isinstance(exc, EngineError) and exc.code in _UPLOAD_ERROR_MESSAGES:
         return _UPLOAD_ERROR_MESSAGES[exc.code]
     return "Media import failed. Please try again."
+
+
+# ---------------------------------------------------------------------------
+# GUI-1D.1 playlist helpers
+# ---------------------------------------------------------------------------
+_PLAYLIST_ERROR_MESSAGES = {
+    "INVALID_NAME": "Invalid playlist name.",
+    "ALREADY_EXISTS": "A playlist with that name already exists.",
+    "TOO_FEW_ITEMS": "Select at least two media files.",
+    "TOO_MANY_ITEMS": "Too many media files selected.",
+    "INVALID_MEDIA": "One or more selected media files are not valid.",
+    "MEDIA_NOT_FOUND": "One or more selected media files are no longer available.",
+    "DUPLICATE_ITEM": "The same media file cannot be used more than once in a playlist.",
+    "CREATION_FAILED": "Playlist creation failed. Please try again.",
+    "MISSING_ARGUMENT": "Playlist creation failed. Please try again.",
+}
+
+
+def _playlist_error_message(exc: EngineError, fallback: str) -> str:
+    if isinstance(exc, EngineError) and exc.code in _PLAYLIST_ERROR_MESSAGES:
+        return _PLAYLIST_ERROR_MESSAGES[exc.code]
+    return fallback
+
+
+def _parse_order(value) -> int | None:
+    """Return a positive integer for a submitted order field, else None."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s or not s.isdigit():
+        return None
+    n = int(s)
+    return n if n >= 1 else None
+
+
+def _validate_playlist_items(form) -> tuple:
+    """Validate the submitted media selection/order server-side.
+
+    The browser submits one ``items`` checkbox value per selected basename plus
+    one integer ``order_<basename>`` field per media row.  This function
+    revalidates EVERY basename with the strict media-name rule (so arbitrary
+    paths, traversal, absolute paths and Windows-style separators are rejected),
+    requires unique orders forming exactly ``1..N`` (deterministic, no silent
+    reordering), and returns ``(True, [ordered basenames], None)`` or
+    ``(False, None, user-safe error message)``.
+    """
+    selected = form.getlist("items") or []
+    if not isinstance(selected, list):
+        selected = []
+    seen = set()
+    entries = []  # (order, basename)
+    for raw in selected:
+        item = (raw or "").strip()
+        if not valid_media_name(item):
+            return False, None, "One or more selected media files are not valid."
+        if item in seen:
+            return False, None, "The same media file was selected more than once."
+        seen.add(item)
+        order = _parse_order(form.get("order_" + item))
+        if order is None:
+            return (
+                False,
+                None,
+                "One or more selected files are missing a valid play order.",
+            )
+        entries.append((order, item))
+    if len(entries) < 2:
+        return False, None, "Select at least two media files."
+    if len(entries) > MAX_PLAYLIST_ITEMS:
+        return False, None, "Select at most %d media files." % MAX_PLAYLIST_ITEMS
+    orders = [o for o, _ in entries]
+    if len(set(orders)) != len(orders):
+        return False, None, "Each selected file needs a unique play order number."
+    if sorted(orders) != list(range(1, len(entries) + 1)):
+        return (
+            False,
+            None,
+            "Play order numbers must be 1 to %d in sequence." % len(entries),
+        )
+    entries.sort(key=lambda pair: pair[0])
+    return True, [name for _, name in entries], None
+
+
+def playlist_hls_url(snapshot, name: str) -> str | None:
+    """Public playlist HLS URL derived from the engine's trusted server config.
+
+    ``snapshot`` is the root-derived web-ctl snapshot (``domain`` +
+    ``https_configured`` read from /etc/bluestream/server.conf); the Host
+    header is never trusted.  Mirrors ``bs_playlist_m3u8_url`` in the engine.
+    """
+    domain = ((snapshot or {}).get("domain") or "").strip()
+    if not domain:
+        return None
+    scheme = "https" if (snapshot or {}).get("https_configured") == "yes" else "http"
+    return "%s://%s/hls/playlist/%s/index.m3u8" % (scheme, domain, name)
 
 
 
@@ -757,16 +857,80 @@ def _register_console_routes(app: Flask) -> None:
         engine = current_app.extensions["bluestream_engine"]
         items = []
         errors = []
+        snapshot = {}
+        try:
+            snapshot = engine.call("snapshot") or {}
+        except EngineError as exc:
+            current_app.logger.warning("engine snapshot unavailable: %s", exc)
+            errors.append("snapshot")
         try:
             items = engine.call("playlist_list") or []
         except EngineError as exc:
             current_app.logger.warning("engine playlist_list unavailable: %s", exc)
             errors.append("playlist_list")
+        # GUI-1D.1: public HLS URL derived from the engine's trusted server
+        # config (never from the Host header).  Rendered as a copyable value.
+        for item in items:
+            if isinstance(item, dict):
+                item["hls_url"] = playlist_hls_url(snapshot, item.get("name") or "")
         return render_template(
             "playlists.html",
             playlists=items,
             engine_unavailable=bool(errors),
         )
+
+    # ------------------------------------------------------------------
+    # GUI-1D.1: playlist builder (ordered Media Library files only).
+    # ------------------------------------------------------------------
+    @console.route("/playlists/create", methods=["GET"])
+    def playlists_create():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        media = []
+        errors = []
+        try:
+            media = engine.call("media_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("engine media_list unavailable: %s", exc)
+            errors.append("media_list")
+        return render_template(
+            "playlists_create.html",
+            media=media,
+            max_playlist_items=MAX_PLAYLIST_ITEMS,
+            engine_unavailable=bool(errors),
+        )
+
+    @console.route("/playlists/create", methods=["POST"])
+    def playlists_create_post():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        # Friendly display names are normalized to the safe internal playlist ID
+        # here, at the web boundary; the privileged bridge only ever receives an
+        # ID that passes the engine's strict internal-name rule.
+        name = normalize_stream_name(request.form.get("name"))
+        if name is None:
+            flash("We could not create a safe playlist name from that value.", "error")
+            return redirect(url_for("console.playlists_create"))
+        ok, ordered, error = _validate_playlist_items(request.form)
+        if not ok:
+            flash(error, "error")
+            return redirect(url_for("console.playlists_create"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.playlist_create(name, ordered)
+        except EngineError as exc:
+            current_app.logger.warning("playlist_create '%s' failed: %s", name, exc)
+            if exc.code == "ALREADY_EXISTS":
+                flash("A playlist named '%s' already exists." % name, "error")
+            else:
+                flash(_playlist_error_message(exc, "Playlist creation failed."), "error")
+            return redirect(url_for("console.playlists_create"))
+        flash(
+            "Playlist '%s' created. It is stopped - press Start to begin." % name,
+            "success",
+        )
+        return redirect(url_for("console.playlists"))
 
     app.register_blueprint(console)
 

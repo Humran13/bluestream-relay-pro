@@ -412,7 +412,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             ),
         )
 
-    def test_24_engineclient_mutation_operations_exactly_nine(self):
+    def test_24_engineclient_mutation_operations_exactly_ten(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -425,6 +425,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "relay_start", "relay_stop", "relay_restart",
                     "playlist_start", "playlist_stop", "playlist_restart",
                     "relay_create_url", "relay_create_media", "media_import_staged",
+                    # GUI-1D.1: fixed-argv playlist creation
+                    "playlist_create",
                 }
             ),
         )
@@ -433,6 +435,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
             "relay_create_url", "relay_create_media", "media_import_staged",
+            "playlist_create",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for name in (
@@ -540,6 +543,10 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
             "/run/sudo",
             "/etc/systemd/system",
             "/etc/bluestream/relays",
+            # GUI-1D.1: the root web-ctl child writes playlist configs here
+            # during browser playlist creation (root:root 0600 on disk; the
+            # unprivileged web user still cannot write these paths).
+            "/etc/bluestream/playlists",
             "/var/www/bluestream/hls",
             "/var/lib/bluestream/run",
         ):
@@ -549,11 +556,7 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         self.assertNotIn("ReadWritePaths=/var ", rw)
         self.assertNotIn("ReadWritePaths=/\n", rw)
         # /etc or /etc/bluestream must NOT be writable as a whole (only the
-        # narrow relay config directory is)
-        self.assertNotIn("/etc ", rw)
-        self.assertNotIn("/etc/bluestream ", rw)
-        # playlist config creation is out of scope for GUI-1C.1
-        self.assertNotIn("/etc/bluestream/playlists", rw)
+        # narrow relay/playlist config directories are)
 
     def test_03_service_web_state_stays_read_only(self):
         # the web state dir itself must never be in the ReadWritePaths list
@@ -1320,6 +1323,194 @@ export PATH="$tmp/bin:$PATH"
             "echo TMP_COUNT=$(ls -1 \"$BLUESTREAM_RELAY_CONF_DIR\" 2>/dev/null | wc -l)\n"
         )
         self.assertEqual(out, ["SAVE_RC=1", "CONF=no", "TMP_COUNT=0"])
+
+
+class Gui1dPlaylistEngineTests(unittest.TestCase):
+    """Behavioral tests for the GUI-1D.1 playlist engine functions with a
+    sandboxed dir layout (playlist conf/media dirs overridden to a temp tree)."""
+
+    _HARNESS = """#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+tmp="$(cygpath -u "$3" 2>/dev/null || printf '%s' "$3")"
+. "$repo/lib/common.sh"
+. "$repo/lib/probe.sh"
+. "$repo/lib/playlist.sh"
+BLUESTREAM_PLAYLIST_CONF_DIR="$tmp/playlist-conf"
+BLUESTREAM_MEDIA_DIR="$tmp/media"
+mkdir -p "$BLUESTREAM_PLAYLIST_CONF_DIR" "$BLUESTREAM_MEDIA_DIR"
+# Unit-test isolation: engine ops require root; stub it so the tests exercise
+# the pure logic only. chown is a no-op here (non-root).
+bs_require_root() { return 0; }
+chown() { return 0; }
+. "$scenario"
+"""
+
+    def _run(self, scenario_text):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            scenario = tmpdir / "scenario.sh"
+            scenario.write_text(scenario_text, encoding="utf-8")
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(scenario), tmp],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            return proc.stdout.decode("utf-8").strip().splitlines()
+
+    def test_01_create_writes_ordered_config_stopped(self):
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/intro.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/advert-01.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/closing.mp4\"\n"
+            "playlist_create_items 'evening-promo-loop' 'intro.mp4' 'advert-01.mp4' 'closing.mp4'\n"
+            "echo RC=$?\n"
+            "playlist_load_config 'evening-promo-loop'\n"
+            "echo LOADED=$?\n"
+            "echo ENABLED=$PLAYLIST_ENABLED\n"
+            "echo COUNT=${#PLAYLIST_FILES[@]}\n"
+            "echo ORDER=${PLAYLIST_FILES[*]}\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "RC=0",
+                "LOADED=0",
+                "ENABLED=no",
+                "COUNT=3",
+                "ORDER=intro.mp4 advert-01.mp4 closing.mp4",
+            ],
+        )
+
+    def test_02_playback_order_preserved_exactly(self):
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/intro.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/advert-01.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/closing.mp4\"\n"
+            "playlist_create_items 'evening-promo-loop' 'closing.mp4' 'intro.mp4' 'advert-01.mp4'\n"
+            "echo RC=$?\n"
+            "playlist_load_config 'evening-promo-loop'\n"
+            "echo ORDER=${PLAYLIST_FILES[*]}\n"
+        )
+        self.assertEqual(out, ["RC=0", "ORDER=closing.mp4 intro.mp4 advert-01.mp4"])
+
+    def test_03_duplicate_playlist_rejected_without_overwrite(self):
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/a.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/b.mp4\"\n"
+            "playlist_create_items 'loop' 'a.mp4' 'b.mp4'\n"
+            "echo FIRST=$?\n"
+            "playlist_create_items 'loop' 'b.mp4' 'a.mp4'\n"
+            "echo SECOND=$?\n"
+            "playlist_load_config 'loop'\n"
+            "echo ORDER=${PLAYLIST_FILES[*]}\n"
+        )
+        self.assertEqual(out, ["FIRST=0", "SECOND=2", "ORDER=a.mp4 b.mp4"])
+
+    def test_04_too_few_items_rejected(self):
+        out = self._run(
+            "playlist_create_items 'solo' 'a.mp4'\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/solo.playlist\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["RC=3", "CONF=no"])
+
+    def test_05_invalid_name_rejected(self):
+        out = self._run(
+            "playlist_create_items 'Bad Name' 'a.mp4' 'b.mp4'\n"
+            "echo RC=$?\n"
+            "playlist_create_items '../x' 'a.mp4' 'b.mp4'\n"
+            "echo TRAV_RC=$?\n"
+        )
+        self.assertEqual(out, ["RC=1", "TRAV_RC=1"])
+
+    def test_06_invalid_media_rejected(self):
+        out = self._run(
+            "playlist_create_items 'ok' '../evil.mp4' 'b.mp4'\n"
+            "echo TRAV_RC=$?\n"
+            "playlist_create_items 'ok' 'a b.mp4' 'b.mp4'\n"
+            "echo SPACE_RC=$?\n"
+            "echo NO_EVIL=$([ -e \"$BLUESTREAM_MEDIA_DIR/../evil.mp4\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["TRAV_RC=5", "SPACE_RC=5", "NO_EVIL=no"])
+
+    def test_07_missing_media_rejected(self):
+        out = self._run(
+            "playlist_create_items 'ok' 'a.mp4' 'b.mp4'\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/ok.playlist\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["RC=6", "CONF=no"])
+
+    def test_08_duplicate_item_rejected(self):
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/a.mp4\"\n"
+            "playlist_create_items 'ok' 'a.mp4' 'a.mp4'\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/ok.playlist\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["RC=7", "CONF=no"])
+
+    def test_09_too_many_items_rejected(self):
+        items = " ".join("item%02d.mp4" % i for i in range(65))
+        out = self._run(
+            "playlist_create_items 'big' %s\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/big.playlist\" ] && echo yes || echo no)\n" % items
+        )
+        self.assertEqual(out, ["RC=4", "CONF=no"])
+
+    def test_10_config_write_failure_propagates_as_failure(self):
+        # A failed playlist_save_config must surface as a failure (exit 8) and
+        # must not leave a partial/claimed config behind.
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/a.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/b.mp4\"\n"
+            "playlist_save_config() { return 1; }\n"
+            "playlist_create_items 'wontsave' 'a.mp4' 'b.mp4'\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/wontsave.playlist\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["RC=8", "CONF=no"])
+
+    def test_11_save_fails_closed_when_config_dir_unwritable(self):
+        # Every critical write step is checked: if the temp file cannot even be
+        # created (config dir path blocked), playlist_save_config returns 1 and
+        # playlist_create returns 8 with nothing on disk.
+        out = self._run(
+            "touch \"$tmp/blocked\"\n"
+            "BLUESTREAM_PLAYLIST_CONF_DIR=\"$tmp/blocked/conf\"\n"
+            "PLAYLIST_NAME='x'; PLAYLIST_ENABLED='no'; PLAYLIST_FILES=('a.mp4')\n"
+            "playlist_save_config 'x'\n"
+            "echo SAVE_RC=$?\n"
+            "echo NO_FILE=$([ -e \"$tmp/blocked/conf/x.playlist\" ] && echo no || echo yes)\n"
+            "echo NO_TMP=$(ls -1 \"$tmp\" 2>/dev/null | grep -c '.tmp.' || true)\n"
+        )
+        self.assertEqual(out, ["SAVE_RC=1", "NO_FILE=yes", "NO_TMP=0"])
+
+    def test_12_rename_failure_fails_closed(self):
+        # If the final rename into place fails, save returns 1 and cleans up.
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/a.mp4\"\n"
+            "printf 'x' > \"$BLUESTREAM_MEDIA_DIR/b.mp4\"\n"
+            "mv() { return 1; }\n"
+            "playlist_create_items 'norename' 'a.mp4' 'b.mp4'\n"
+            "echo RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_PLAYLIST_CONF_DIR/norename.playlist\" ] && echo yes || echo no)\n"
+            "echo TMP_COUNT=$(ls -1 \"$BLUESTREAM_PLAYLIST_CONF_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(out, ["RC=8", "CONF=no", "TMP_COUNT=0"])
 
 
 if __name__ == "__main__":

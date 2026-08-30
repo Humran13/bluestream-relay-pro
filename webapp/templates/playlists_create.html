@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Create Playlist - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Create Playlist</h1>
+
+{% if engine_unavailable %}
+<p class="error">Media library information is temporarily unavailable.</p>
+{% endif %}
+
+<section class="card">
+  {% if media %}
+  <form method="post" action="{{ url_for('console.playlists_create_post') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+    <label for="name">Playlist Name</label>
+    <input type="text" id="name" name="name" required maxlength="48" placeholder="e.g. Evening Promo Loop">
+    <p class="muted">Use a normal name - spaces and punctuation are converted to a safe internal ID automatically (e.g. &quot;Evening Promo Loop&quot; becomes &quot;evening-promo-loop&quot;).</p>
+
+    <label>Media items (select at least two)</label>
+    <table>
+      <thead>
+        <tr><th>Use</th><th>File</th><th>Play order</th></tr>
+      </thead>
+      <tbody>
+      {% for item in media %}
+        <tr>
+          <td><input type="checkbox" name="items" value="{{ item.get('name') }}"></td>
+          <td>{{ item.get('name') }}</td>
+          <td><input type="number" name="order_{{ item.get('name') }}" min="1" max="{{ max_playlist_items }}" placeholder="-"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">Tick each file to include it, then give every selected file a unique play order number starting at 1 (1 = plays first). Files play in that order and loop continuously. Maximum {{ max_playlist_items }} files.</p>
+
+    <button type="submit" class="btn">Create Playlist</button>
+  </form>
+  {% else %}
+  <p class="muted">No media files available yet. <a href="{{ url_for('console.media_upload') }}">Upload media</a> first, then create a playlist.</p>
+  {% endif %}
+</section>
+<p><a href="{{ url_for('console.playlists') }}">&laquo; Back to Playlists</a></p>
+{% endblock %}

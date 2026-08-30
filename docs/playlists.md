@@ -46,6 +46,31 @@ sudo bluestream-manager playlist add channel1 video01.mp4 video02.mp4 video03.mp
 
 Interactive options are available under **Playlist Management**.
 
+### Creating a playlist from the web console (GUI-1D.1)
+
+The Playlists page in the web console offers a no-command-line builder:
+
+1. Open **Playlists** and click **+ Create Playlist**.
+2. Enter a normal friendly name (e.g. `Evening Promo Loop`). The console
+   normalizes it to the safe internal ID (`evening-promo-loop`) before it
+   crosses the privileged boundary.
+3. Tick **two or more** media files from the Media Library and give each a
+   unique play order number starting at 1. Files play in that order and loop.
+4. Click **Create Playlist**. The playlist is created **STOPPED** — press
+   **Start** to begin playing.
+
+The playlist HLS URL is shown in the Playlists table:
+
+```text
+https://<your-domain>/hls/playlist/<id>/index.m3u8
+```
+
+A playlist must contain **at least two** media files, may contain **at most
+64** (`BLUESTREAM_PLAYLIST_MAX_ITEMS`), and each file may appear only once.
+Selected files are validated against the managed-media name rule on every
+layer; arbitrary paths, traversal markers and Windows-style separators are
+always rejected.
+
 ## Playlist operations
 
 | Operation | Command |

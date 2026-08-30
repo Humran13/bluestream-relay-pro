@@ -32,6 +32,12 @@
 #   web-ctl relay_create_media <name> <mediafile>
 #   web-ctl media_import_staged <stagingid>
 #
+# GUI-1D.1 playlist creation (fixed argv only; the operation is fixed, the
+# name and every media item are independently revalidated, nothing is ever
+# interpolated into shell code):
+#
+#   web-ctl playlist_create <name> <mediafile...>
+#
 # The six lifecycle actions and the create/import operations above are the ONLY
 # write operations at any layer.  No configuration editing, deletion, or
 # user-management operations exist beyond these.
@@ -209,7 +215,7 @@ wc_op_relay_list() {
 }
 
 wc_op_playlist_list() {
-    local name unit active enabled
+    local name unit active enabled items health
     for name in $(playlist_list_names 2>/dev/null); do
         # Names come from validated playlist config discovery ([a-z0-9_-]{1,48}).
         unit="$(bs_unit playlist "$name")"
@@ -217,11 +223,19 @@ wc_op_playlist_list() {
         if [ "$(systemctl is-active "$unit" 2>/dev/null)" = "active" ]; then active="yes"; fi
         enabled="no"
         if [ "$(systemctl is-enabled "$unit" 2>/dev/null)" = "enabled" ]; then enabled="yes"; fi
+        # GUI-1D.1: item count and health re-use the engine's own config loader
+        # and health classifier (never a second implementation in the web layer).
+        items="0"
+        if playlist_load_config "$name" 2>/dev/null; then items="${#PLAYLIST_FILES[@]}"; fi
+        health="UNKNOWN"
+        if health_state playlist "$name" 2>/dev/null; then health="$HEALTH_STATE"; fi
         {
             printf '\0'
             printf 'name\0%s\0'    "$name"
             printf 'active\0%s\0'  "$active"
             printf 'enabled\0%s\0' "$enabled"
+            printf 'items\0%s\0'   "$items"
+            printf 'health\0%s\0'  "$health"
         }
     done | wc_json array
 }
@@ -300,6 +314,57 @@ wc_op_media_import_staged() {
 }
 
 # ---------------------------------------------------------------------------
+# GUI-1D.1: playlist creation (fixed argv, strict validation, fail closed).
+# ---------------------------------------------------------------------------
+wc_op_playlist_create() {
+    local name="${1:-}"
+    shift || true
+    [ -n "$name" ] || wc_fail "missing playlist name" "MISSING_TARGET"
+    # Revalidate the playlist ID with the engine's own name rule before any
+    # engine function runs (rejects option-like, traversal, spaces, shell
+    # metacharacters, and >48-char names).
+    bs_valid_name "$name" || wc_fail "invalid playlist name" "INVALID_NAME"
+    playlist_exists "$name" && wc_fail "a playlist named '$name' already exists" "ALREADY_EXISTS"
+    # Minimum two media items (product rule) and the engine's shared ceiling.
+    if [ "$#" -lt 2 ]; then
+        wc_fail "a playlist needs at least two media files" "TOO_FEW_ITEMS"
+    fi
+    if [ "$#" -gt "$BLUESTREAM_PLAYLIST_MAX_ITEMS" ]; then
+        wc_fail "too many media files (maximum is $BLUESTREAM_PLAYLIST_MAX_ITEMS)" "TOO_MANY_ITEMS"
+    fi
+    # Independently revalidate every media basename here.  Two passes: first
+    # names + duplicates (so no arbitrary value or duplicate ever reaches the
+    # engine or a filesystem path), then authoritative existence in managed
+    # media.  The engine's playlist_create_items re-validates everything again
+    # as a backstop and is only reached with fully-validated data.
+    local f seen=""
+    for f in "$@"; do
+        bs_valid_media_name "$f" || wc_fail "invalid media name" "INVALID_MEDIA"
+        case " $seen " in
+            *" $f "*) wc_fail "the same media file cannot be used more than once" "DUPLICATE_ITEM" ;;
+        esac
+        seen="$seen $f"
+    done
+    for f in "$@"; do
+        [ -f "$BLUESTREAM_MEDIA_DIR/$f" ] || wc_fail "media file not found: $f" "MEDIA_NOT_FOUND"
+    done
+    ( playlist_create_items "$name" "$@" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid playlist name" "INVALID_NAME" ;;
+        2) wc_fail "a playlist named '$name' already exists" "ALREADY_EXISTS" ;;
+        3) wc_fail "a playlist needs at least two media files" "TOO_FEW_ITEMS" ;;
+        4) wc_fail "too many media files" "TOO_MANY_ITEMS" ;;
+        5) wc_fail "invalid media name" "INVALID_MEDIA" ;;
+        6) wc_fail "one or more media files are no longer available" "MEDIA_NOT_FOUND" ;;
+        7) wc_fail "the same media file cannot be used more than once" "DUPLICATE_ITEM" ;;
+        *) wc_fail "playlist creation failed" "CREATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0items\0%d\0' "playlist_create" "$name" "$#" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
 # Controlled lifecycle operations (GUI-1B.1): exactly one validated target.
 # ---------------------------------------------------------------------------
 wc_op_lifecycle() {
@@ -348,7 +413,9 @@ wc_op_lifecycle() {
 # Dispatch: hard-coded allowlist, fail closed.  No dynamic execution.
 # ---------------------------------------------------------------------------
 wc_dispatch() {
-    local operation="${1:-}" name="${2:-}" value2="${3:-}" argcount="${4:-0}"
+    local operation="${1:-}" name="${2:-}" value2="${3:-}"
+    # argcount = total number of original shell argv entries (operation included).
+    local argcount="$#"
     case "$operation" in
         version)       wc_op_version ;;
         snapshot)      wc_op_snapshot ;;
@@ -381,6 +448,20 @@ wc_dispatch() {
             fi
             wc_op_media_import_staged "$name"
             ;;
+        playlist_create)
+            # Fixed operation + playlist ID + 2..MAX_ITEMS media basenames
+            # (shell argv count ranges from 3 to 1+BLUESTREAM_PLAYLIST_MAX_ITEMS).
+            # The whole allowlist is fixed here; only the validated data values
+            # are passed on, each as its own argv element - never a shell string.
+            if [ "$argcount" -lt 3 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt $((1 + BLUESTREAM_PLAYLIST_MAX_ITEMS)) ]; then
+                wc_fail "too many arguments" "TOO_MANY_ARGUMENTS"
+            fi
+            shift 2  # drop operation + name; remaining "$@" are the media items
+            wc_op_playlist_create "$name" "$@"
+            ;;
         relay_create_url|relay_create_media)
             # EXACTLY operation + two arguments (shell argv count == 3).
             if [ "$argcount" -lt 3 ]; then
@@ -395,7 +476,7 @@ wc_dispatch() {
             esac
             ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"
@@ -403,4 +484,4 @@ wc_dispatch() {
     esac
 }
 
-wc_dispatch "${1:-}" "${2:-}" "${3:-}" "$#"
+wc_dispatch "$@"
