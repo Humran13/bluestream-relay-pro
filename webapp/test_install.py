@@ -539,6 +539,7 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         for path in (
             "/run/sudo",
             "/etc/systemd/system",
+            "/etc/bluestream/relays",
             "/var/www/bluestream/hls",
             "/var/lib/bluestream/run",
         ):
@@ -547,6 +548,12 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         self.assertNotIn("ReadWritePaths=/ ", rw)
         self.assertNotIn("ReadWritePaths=/var ", rw)
         self.assertNotIn("ReadWritePaths=/\n", rw)
+        # /etc or /etc/bluestream must NOT be writable as a whole (only the
+        # narrow relay config directory is)
+        self.assertNotIn("/etc ", rw)
+        self.assertNotIn("/etc/bluestream ", rw)
+        # playlist config creation is out of scope for GUI-1C.1
+        self.assertNotIn("/etc/bluestream/playlists", rw)
 
     def test_03_service_web_state_stays_read_only(self):
         # the web state dir itself must never be in the ReadWritePaths list
@@ -853,6 +860,21 @@ class Gui1cValidationTests(unittest.TestCase):
         self.assertIn('chown root:"$BLUESTREAM_GROUP" "$snapshot"', media)
         self.assertIn('chmod 0640 "$snapshot"', media)
         self.assertNotIn('chown root:"$BLUESTREAM_GROUP" "$tmp"', media)
+
+    def test_08_relay_create_fail_closed_and_webctl_mapping(self):
+        r = repo_text("lib/relay.sh")
+        # relay_create propagates mkdir and config-save failures
+        self.assertIn('mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null || return 1', r)
+        self.assertIn('relay_save_config "$name" || return 1', r)
+        # relay_save_config fails closed on every critical write step
+        self.assertIn('} > "$tmp"; then', r)
+        self.assertIn('mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }', r)
+        self.assertIn('chmod 0600 "$dest" || { rm -f "$dest"; return 1; }', r)
+        w = repo_text("web-ctl")
+        # a failed relay_create never reports success through the bridge
+        self.assertIn('[ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"', w)
+        # success path still emits the normal envelope
+        self.assertIn("relay_create_url", w)
 
 
 class Gui1cEngineBehaviorTests(unittest.TestCase):
@@ -1240,6 +1262,29 @@ export PATH="$tmp/bin:$PATH"
             out,
             ["CHMOD_RC=7", "MEDIA=no", "QUARANTINE_COUNT=0"],
         )
+
+    def test_18_relay_create_mkdir_failure_returns_nonzero(self):
+        # If the relay config directory cannot be created, relay_create must
+        # fail closed instead of reporting success with no config on disk.
+        out = self._run(
+            "mkdir() { return 1; }\n"
+            "relay_create news24 remote-hls 'https://x/live/index.m3u8'\n"
+            "echo MKDIR_RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_RELAY_CONF_DIR/news24.conf\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["MKDIR_RC=1", "CONF=no"])
+
+    def test_19_relay_create_save_failure_returns_nonzero(self):
+        # If the config save (final rename) fails, relay_create must return
+        # non-zero and leave no partial config or temp file behind.
+        out = self._run(
+            "mv() { return 1; }\n"
+            "relay_create news24 remote-hls 'https://x/live/index.m3u8'\n"
+            "echo SAVE_RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_RELAY_CONF_DIR/news24.conf\" ] && echo yes || echo no)\n"
+            "echo TMP_COUNT=$(ls -1 \"$BLUESTREAM_RELAY_CONF_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(out, ["SAVE_RC=1", "CONF=no", "TMP_COUNT=0"])
 
 
 if __name__ == "__main__":

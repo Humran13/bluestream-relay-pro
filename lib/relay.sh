@@ -65,7 +65,11 @@ relay_config_validate() {
 relay_save_config() {
     local name="$1"
     local tmp="$BLUESTREAM_RELAY_CONF_DIR/.$name.conf.tmp.$$"
-    {
+    local dest="$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
+    # Fail closed: any critical write step (temp creation, chmod, rename into
+    # place, final mode) must succeed or the function returns non-zero and
+    # cleans up its temp file, so a partial config is never presented as saved.
+    if ! {
         printf '# BlueStream Relay Pro relay configuration (root-only)\n'
         printf 'NAME=%s\n' "$RELAY_NAME"
         printf 'TYPE=%s\n' "$RELAY_TYPE"
@@ -75,11 +79,15 @@ relay_save_config() {
         printf 'ENABLED=%s\n' "$RELAY_ENABLED"
         printf 'NOTE=%s\n' "$RELAY_NOTE"
         printf 'CREATED=%s\n' "$RELAY_CREATED"
-    } > "$tmp"
-    chmod 0600 "$tmp"
+    } > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
     chown root:root "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
-    chmod 0600 "$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+    chmod 0600 "$dest" || { rm -f "$dest"; return 1; }
+    return 0
 }
 
 relay_exists() {
@@ -101,8 +109,11 @@ relay_create() {
     RELAY_ENABLED="no"; RELAY_NOTE="created via web console"
     RELAY_CREATED="$(bs_now_ts)"
     relay_config_validate || return 1
-    mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null
-    relay_save_config "$name"
+    # Fail closed: the relay only counts as created once its config file is
+    # actually on disk. A failed mkdir or a failed save must not report a
+    # green success to the caller (and therefore to the browser).
+    mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null || return 1
+    relay_save_config "$name" || return 1
     return 0
 }
 
