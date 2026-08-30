@@ -86,6 +86,26 @@ relay_exists() {
     [ -f "$BLUESTREAM_RELAY_CONF_DIR/$1.conf" ]
 }
 
+# Authoritative relay creation (GUI-1C.1). Validates and writes a NEW relay
+# config; the relay starts STOPPED with ENABLED=no so the operator explicitly
+# starts it from the console. Shares the exact config model/save path as the
+# CLI. Returns 0 on success.
+relay_create() {
+    local name="$1" type="$2" url="$3"
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    bs_valid_type "$type" || return 1
+    relay_exists "$name" && return 1
+    RELAY_NAME="$name"; RELAY_TYPE="$type"; RELAY_URL="$url"
+    RELAY_LOOP="no"; RELAY_RESTART_SEC="5"
+    RELAY_ENABLED="no"; RELAY_NOTE="created via web console"
+    RELAY_CREATED="$(bs_now_ts)"
+    relay_config_validate || return 1
+    mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null
+    relay_save_config "$name"
+    return 0
+}
+
 relay_list_names() {
     local f
     shopt -s nullglob
@@ -373,7 +393,7 @@ relay_select_interactive() {
     return 1
 }
 
-relay_create() {
+relay_create_interactive() {
     bs_require_root
     local name="" type="" url="" loop="no" restart="5" note=""
     local choice=""

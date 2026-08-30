@@ -23,6 +23,151 @@ media_list_names() {
     shopt -u nullglob
 }
 
+# Import a web-staged upload into managed media (GUI-1C.1).
+#
+# Security model: the unprivileged web process may only write into
+# BLUESTREAM_WEB_UPLOAD_DIR. This root operation takes exclusive control of
+# the staged directory entry FIRST by atomically renaming it into a root-only
+# quarantine directory (BLUESTREAM_MEDIA_QUARANTINE_DIR), rejecting symlinks
+# and hardlinks, and then performs a ROOT-OWNED SNAPSHOT HANDOFF: the bytes of
+# the web-originated inode are copied into a NEW root-created inode inside
+# quarantine, and the web-originated inode is unlinked before any validation.
+# This breaks trust in the web-controlled inode entirely - a retained writable
+# file descriptor held by bluestream-web can only write to the unlinked,
+# discarded original and can never change the snapshot. ffprobe and the
+# atomic no-clobber publication operate ONLY on that root-owned snapshot, so
+# the object validated is exactly the object published. The snapshot is
+# removed on every failure path.
+#
+# Exit status contract (mapped to controlled JSON error codes by web-ctl):
+#   0 success
+#   1 invalid staging ID (media-name rule)
+#   2 staged upload not found / already consumed
+#   3 destination already exists in managed media (never overwritten)
+#   4 staged object is not a genuine regular file (symlink/hardlink/dir)
+#   5 ffprobe is unavailable
+#   6 probe failed - uploaded file is not recognized media
+#   7 quarantine setup / snapshot / ownership / publication failure
+media_import_staged() {
+    bs_require_root
+    local stagingfile="${1:-}" staged dest
+    local quarantine="$BLUESTREAM_MEDIA_QUARANTINE_DIR"
+    local quarantined="" snapshot="" staged_dev q_dev media_dev
+    bs_valid_media_name "$stagingfile" || return 1
+    staged="$BLUESTREAM_WEB_UPLOAD_DIR/$stagingfile"
+    dest="$BLUESTREAM_MEDIA_DIR/$stagingfile"
+
+    # Early duplicate rejection (re-checked after probe; the final publication
+    # is no-overwrite, so a concurrent duplicate can never clobber the file).
+    if [ -e "$dest" ]; then
+        rm -f "$staged"
+        return 3
+    fi
+
+    # Root-only quarantine (root:root 0700). Defensive create + verify so an
+    # upgraded host that never ran the installer still fails closed safely.
+    mkdir -p "$quarantine" 2>/dev/null || return 7
+    chown root:root "$quarantine" 2>/dev/null || true
+    chmod 0700 "$quarantine" || return 7
+    [ -d "$quarantine" ] && [ ! -L "$quarantine" ] || return 7
+    if [ "$(id -u)" -eq 0 ]; then
+        # Owner/mode are only verifiable as root (production always runs here
+        # as root; the test harness stubs bs_require_root instead).
+        [ "$(stat -c %u:%a "$quarantine" 2>/dev/null || printf 'x')" = "0:700" ] || return 7
+    fi
+
+    # Atomic ownership transfer requires staging, quarantine and the final
+    # media dir to live on the SAME filesystem; otherwise mv would degrade to
+    # a racy copy+delete. Fail closed if the invariant cannot be established.
+    staged_dev="$(stat -c %d "$BLUESTREAM_WEB_UPLOAD_DIR" 2>/dev/null || printf '0')"
+    q_dev="$(stat -c %d "$quarantine" 2>/dev/null || printf '0')"
+    media_dev="$(stat -c %d "$BLUESTREAM_MEDIA_DIR" 2>/dev/null || printf '0')"
+    [ "$staged_dev" = "$q_dev" ] && [ "$q_dev" = "$media_dev" ] || return 7
+
+    # Exclusive acquisition: rename whatever directory entry exists at the
+    # staging path right now into quarantine (atomic rename on the same
+    # filesystem). If the entry was a symlink, the symlink itself is moved and
+    # rejected below; the web user can no longer influence this object.
+    quarantined="$quarantine/.import.$$.$stagingfile"
+    mv "$staged" "$quarantined" 2>/dev/null || return 2
+
+    # The moved entry must be a genuine regular file - never a symlink (the
+    # rename would have moved the symlink itself) and never a hardlink to a
+    # file the web user cannot legitimately read.
+    if [ -L "$quarantined" ] || [ ! -f "$quarantined" ]; then
+        rm -rf -- "$quarantined"
+        return 4
+    fi
+    if [ "$(stat -c %h "$quarantined" 2>/dev/null || printf '2')" -gt 1 ]; then
+        rm -rf -- "$quarantined"
+        return 4
+    fi
+
+    # --- root-owned snapshot handoff ---------------------------------------
+    # Do NOT probe or publish the web-originated inode: a retained writable FD
+    # held by bluestream-web can keep mutating it even after the rename into
+    # the root-only quarantine. Copy its bytes into a NEW root-created inode
+    # inside quarantine, then unlink the original so any such FD writes to an
+    # unlinked, discarded inode. Only the root-owned snapshot is validated or
+    # published from this point on.
+    snapshot="$quarantine/.import.$$.$stagingfile.snapshot"
+    if ! cp -f -- "$quarantined" "$snapshot" 2>/dev/null; then
+        rm -f -- "$snapshot"
+        rm -f -- "$quarantined"
+        return 7
+    fi
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || {
+        rm -f -- "$snapshot"
+        rm -f -- "$quarantined"
+        return 7
+    }
+    # Unlink the web-originated original NOW. Any retained writable FD writes
+    # to an unlinked inode and is discarded.
+    rm -f -- "$quarantined"
+
+    # Test-only seam (never set in production - sudo env_reset strips it):
+    # lets a deterministic POSIX harness write through a retained FD or
+    # recreate the original staging pathname AFTER the snapshot handoff to
+    # prove the validated/published object can no longer be influenced.
+    if [ -n "${BLUESTREAM_MEDIA_IMPORT_HOOK:-}" ]; then
+        ( BLUESTREAM_IMPORT_HOOK_SNAPSHOT="$snapshot" "$BLUESTREAM_MEDIA_IMPORT_HOOK" ) 2>/dev/null || true
+    fi
+
+    # ffprobe gate - on the root-owned SNAPSHOT only (never the original).
+    if ! command -v ffprobe >/dev/null 2>&1; then
+        rm -f -- "$snapshot"
+        return 5
+    fi
+    if ! probe_media_path "$snapshot"; then
+        rm -f -- "$snapshot"
+        return 6
+    fi
+
+    # Duplicate re-check before publication (never overwrite managed media).
+    if [ -e "$dest" ]; then
+        rm -f -- "$snapshot"
+        return 3
+    fi
+
+    # Normalize owner/mode on the snapshot itself and publish THE SAME inode
+    # that passed ffprobe with an atomic no-clobber rename. chown/chmod
+    # failures fail closed - a file the relay runtime cannot read is never
+    # published.
+    chown root:"$BLUESTREAM_GROUP" "$snapshot" 2>/dev/null || { rm -f -- "$snapshot"; return 7; }
+    chmod 0640 "$snapshot" || { rm -f -- "$snapshot"; return 7; }
+    mv -n "$snapshot" "$dest" 2>/dev/null || true
+    if [ -e "$snapshot" ]; then
+        # mv -n declined (destination appeared concurrently) or failed.
+        rm -f -- "$snapshot"
+        [ -e "$dest" ] && return 3
+        return 7
+    fi
+
+    # Success: the snapshot inode is now the managed-media file; nothing else
+    # remains in quarantine.
+    return 0
+}
+
 media_import() {
     bs_require_root
     local src="${1:-}" name="${2:-}"

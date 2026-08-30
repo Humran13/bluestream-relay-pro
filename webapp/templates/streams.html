@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Streams - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Streams</h1>
+<p><a class="btn" href="{{ url_for('console.streams_create') }}">+ Create Stream</a></p>
+
+{% if engine_unavailable %}
+<p class="error">BlueStream engine information is temporarily unavailable.</p>
+{% endif %}
+
+{% if relays %}
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Source Type</th><th>Source</th><th>Active</th><th>Enabled</th><th>Health</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for relay in relays %}
+      <tr>
+        <td>{{ relay.get('name') }}</td>
+        <td>{{ type_labels.get(relay.get('type'), relay.get('type')) }}</td>
+        <td class="source">{{ relay.get('source') or '-' }}</td>
+        <td>{{ relay.get('active') }}</td>
+        <td>{{ relay.get('enabled') }}</td>
+        <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span></td>
+        <td class="actions">
+          <form method="post" action="{{ url_for('console.relay_start', name=relay.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Start</button>
+          </form>
+          <form method="post" action="{{ url_for('console.relay_stop', name=relay.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Stop</button>
+          </form>
+          <form method="post" action="{{ url_for('console.relay_restart', name=relay.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Restart</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<section class="card">
+  <p class="muted">No streams yet. <a href="{{ url_for('console.streams_create') }}">Create your first stream</a>.</p>
+</section>
+{% endif %}
+{% endblock %}

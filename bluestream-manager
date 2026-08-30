@@ -187,7 +187,7 @@ menu_relay() {
         printf '\nSelection [0-17]: '
         read -r choice || return 0
         case "$choice" in
-            1) relay_create ;;
+            1) relay_create_interactive ;;
             2) relay_list ;;
             3)
                 if relay_select_interactive; then relay_status_detail "$RELAY_SELECTED"; fi ;;

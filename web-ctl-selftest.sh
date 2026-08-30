@@ -308,6 +308,118 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 10.5 GUI-1C.1 create/import bridge validation (fail-closed only: every case
+#      below stops at name/URL/media validation - nothing is ever written)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _out="$(bash web-ctl media_list 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is True; assert isinstance(d["data"], list)'; then
+        check "media bridge: media_list exit 0, valid JSON, data is array" 0
+    else
+        check "media bridge: media_list exit 0, valid JSON, data is array" 1
+    fi
+    unset _out _rc
+else
+    skip "media bridge: media_list (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _out="$(bash web-ctl media_list extra 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then
+        check "media bridge: media_list rejects extra arguments" 0
+    else
+        check "media bridge: media_list rejects extra arguments" 1
+    fi
+    unset _out _rc
+else
+    skip "media bridge: media_list extra args (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_create_url 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_url goodname 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_url goodname 'https://x/y.m3u8' extra 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "create bridge: relay_create_url exact argc (missing/extra) fail closed" 0
+    else
+        check "create bridge: relay_create_url exact argc (missing/extra) fail closed" 1
+    fi
+    unset _ok
+else
+    skip "create bridge: relay_create_url argc (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_create_url --help https://x/y.m3u8 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_url goodname 'file:///etc/passwd' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_URL"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_url goodname 'https://x/a b.m3u8' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_URL"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "create bridge: relay_create_url invalid name/URL rejected" 0
+    else
+        check "create bridge: relay_create_url invalid name/URL rejected" 1
+    fi
+    unset _ok
+else
+    skip "create bridge: relay_create_url validation (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_create_media goodname '../evil.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_media --help 'a.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "create bridge: relay_create_media invalid media/name rejected" 0
+    else
+        check "create bridge: relay_create_media invalid media/name rejected" 1
+    fi
+    unset _ok
+else
+    skip "create bridge: relay_create_media validation (no python)"
+fi
+
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl media_import_staged 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_TARGET"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl media_import_staged '../evil.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_STAGING"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl media_import_staged 'a b.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_STAGING"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl media_import_staged ok.mp4 extra 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "import bridge: media_import_staged fail-closed validation" 0
+    else
+        check "import bridge: media_import_staged fail-closed validation" 1
+    fi
+    unset _ok
+else
+    skip "import bridge: media_import_staged (no python)"
+fi
+
+# ---------------------------------------------------------------------------
 # 11. no existing engine files changed unexpectedly
 # ---------------------------------------------------------------------------
 if [ -d .git ]; then

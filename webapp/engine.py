@@ -22,9 +22,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-ALLOWED_OPERATIONS = frozenset({"version", "snapshot", "relay_list", "playlist_list"})
+ALLOWED_OPERATIONS = frozenset(
+    {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+)
 
-# GUI-1B.1: exactly these six lifecycle operations, and nothing else.
+# GUI-1B.1/GUI-1C.1: exactly these controlled write operations, and nothing else.
 ALLOWED_MUTATION_OPERATIONS = frozenset(
     {
         "relay_start",
@@ -33,18 +35,58 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "playlist_start",
         "playlist_stop",
         "playlist_restart",
+        "relay_create_url",
+        "relay_create_media",
+        "media_import_staged",
     }
 )
 
 # Mirrors bs_valid_name in lib/common.sh: lowercase letters, digits, '-' and
 # '_', first character alphanumeric, at most 48 characters.  This is the ONLY
-# name rule used by the engine, so the web layer reuses it verbatim.
+# relay-name rule used by the engine, so the web layer reuses it verbatim.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+
+# Mirrors bs_valid_media_name in lib/common.sh: [A-Za-z0-9._-], no leading
+# dot, no "..", max 255 chars. Used for managed-media file names and the web
+# upload staging id.
+_MEDIA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+
+# Source URL schemes permitted by the engine (bs_valid_url / bs_classify_source_type).
+_SUPPORTED_URL_SCHEMES = ("http://", "https://", "rtmp://", "rtmps://", "rtsp://")
+
+# Conservative browser-upload extension set (engine ffprobe is the real gate).
+ALLOWED_UPLOAD_EXTENSIONS = (".mp4", ".mkv", ".mov", ".webm", ".m4v", ".ts")
 
 
 def valid_target_name(name) -> bool:
     """Return True only for names accepted by the engine's ``bs_valid_name``."""
     return isinstance(name, str) and bool(_NAME_RE.match(name))
+
+
+def valid_media_name(name) -> bool:
+    """Return True only for names accepted by the engine's ``bs_valid_media_name``."""
+    return isinstance(name, str) and bool(_MEDIA_NAME_RE.match(name))
+
+
+def valid_source_url(url) -> bool:
+    """Treat a source URL strictly as data (never executed).
+
+    Mirrors the engine's ``bs_valid_url``: supported scheme only, no whitespace,
+    control characters or shell-hostile characters, bounded length.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    if len(url) > 4096:
+        return False
+    if not url.startswith(_SUPPORTED_URL_SCHEMES):
+        return False
+    for ch in url:
+        o = ord(ch)
+        if o < 0x21 or o == 0x7F:
+            return False
+    if any(ch in url for ch in '`"\\<>{}[]'):
+        return False
+    return True
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -56,7 +98,15 @@ INSTALLED_WEB_CTL = "/usr/local/lib/bluestream/web-ctl"
 
 
 class EngineError(Exception):
-    """Controlled, user-safe error when the engine bridge is unavailable."""
+    """Controlled, user-safe error when the engine bridge is unavailable.
+
+    ``code`` optionally carries the web-ctl failure code (e.g. INVALID_NAME,
+    ALREADY_EXISTS) so callers can show specific, controlled messages.
+    """
+
+    def __init__(self, message: str = "", code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def default_web_ctl_path() -> Path:
@@ -170,26 +220,25 @@ class EngineClient:
             raise EngineError("engine returned an invalid response envelope")
         return doc["data"]
 
-    def _mutation(self, operation: str, name: str, timeout: float | None = None):
-        """Run one controlled lifecycle operation against a validated target.
+    def _mutation(self, operation: str, *values, timeout: float | None = None):
+        """Run one controlled lifecycle/creation operation against validated values.
 
         ``operation`` is fixed by the calling explicit method (never by browser
-        input) and must be in ALLOWED_MUTATION_OPERATIONS.  ``name`` must pass
-        :func:`valid_target_name` (the engine's own rule) before any subprocess
-        is started.  web-ctl emits a JSON envelope on stdout for both success
-        and failure; a non-zero exit or an ``ok: false`` envelope becomes a
-        controlled :class:`EngineError` carrying the bridge's message.
+        input) and must be in ALLOWED_MUTATION_OPERATIONS.  Values are validated
+        per operation (stream name, media name, or source URL) before any
+        subprocess is started.  web-ctl emits a JSON envelope on stdout for both
+        success and failure; a non-zero exit or an ``ok: false`` envelope becomes
+        a controlled :class:`EngineError` carrying the bridge's message/code.
         """
         if operation not in ALLOWED_MUTATION_OPERATIONS:
             raise EngineError("unsupported operation: %r" % operation)
-        if not valid_target_name(name):
-            raise EngineError("invalid target name")
+        validated = self._validate_mutation_values(operation, values)
         if self._production:
-            cmd = [SUDO_PATH, "-n", INSTALLED_WEB_CTL, operation, name]
+            cmd = [SUDO_PATH, "-n", INSTALLED_WEB_CTL, operation, *validated]
         else:
             if not self._web_ctl.is_file():
                 raise EngineError("engine bridge not found")
-            cmd = [self._bash, str(self._web_ctl), operation, name]
+            cmd = [self._bash, str(self._web_ctl), operation, *validated]
         rc, text = self._run_argv(cmd, timeout)
         try:
             doc = json.loads(text)
@@ -200,9 +249,47 @@ class EngineClient:
         if rc != 0 or doc.get("ok") is not True:
             message = doc.get("error")
             if isinstance(message, str) and message.strip():
-                raise EngineError(message)
-            raise EngineError("engine command failed")
+                raise EngineError(message, code=doc.get("code"))
+            raise EngineError("engine command failed", code=doc.get("code"))
         return doc.get("data")
+
+    @staticmethod
+    def _validate_mutation_values(operation: str, values: tuple) -> list:
+        """Validate argv values for a fixed mutation operation before execution.
+
+        Returns the validated argv list; raises :class:`EngineError` on any
+        invalid input so no subprocess is ever started with bad data.
+        """
+        if operation in (
+            "relay_start", "relay_stop", "relay_restart",
+            "playlist_start", "playlist_stop", "playlist_restart",
+        ):
+            if len(values) != 1 or not valid_target_name(values[0]):
+                raise EngineError("invalid target name", code="INVALID_NAME")
+            return list(values)
+        if operation == "media_import_staged":
+            if len(values) != 1 or not valid_media_name(values[0]):
+                raise EngineError("invalid upload id", code="INVALID_STAGING")
+            return list(values)
+        if operation == "relay_create_url":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, url = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_source_url(url):
+                raise EngineError("unsupported or malformed source URL", code="INVALID_URL")
+            return [name, url]
+        if operation == "relay_create_media":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, media = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_media_name(media):
+                raise EngineError("invalid media name", code="INVALID_MEDIA")
+            return [name, media]
+        raise EngineError("unsupported operation: %r" % operation)
 
     # ------------------------------------------------------------------
     # GUI-1B.1: the ONLY lifecycle entry points (operation fixed per method).
@@ -224,3 +311,18 @@ class EngineClient:
 
     def playlist_restart(self, name: str):
         return self._mutation("playlist_restart", name)
+
+    # ------------------------------------------------------------------
+    # GUI-1C.1: relay creation + media import (operation fixed per method).
+    # ------------------------------------------------------------------
+    def media_list(self):
+        return self.call("media_list")
+
+    def relay_create_url(self, name: str, url: str):
+        return self._mutation("relay_create_url", name, url)
+
+    def relay_create_media(self, name: str, media: str):
+        return self._mutation("relay_create_media", name, media)
+
+    def media_import_staged(self, staging: str):
+        return self._mutation("media_import_staged", staging)

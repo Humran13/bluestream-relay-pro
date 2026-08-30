@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Media Library - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Media Library</h1>
+<p><a class="btn" href="{{ url_for('console.media_upload') }}">+ Upload Media</a></p>
+
+{% if engine_unavailable %}
+<p class="error">Media library information is temporarily unavailable.</p>
+{% endif %}
+
+{% if media %}
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>File</th><th>Type</th><th>Size</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for item in media %}
+      <tr>
+        <td>{{ item.get('name') }}</td>
+        <td>{{ item.get('extension') }}</td>
+        <td>{{ human_size(item.get('size')) }}</td>
+        <td><a class="btn btn-sm" href="{{ url_for('console.media_create_stream', name=item.get('name')) }}">Create Stream</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<section class="card">
+  <p class="muted">No media yet. <a href="{{ url_for('console.media_upload') }}">Upload your first video</a>.</p>
+</section>
+{% endif %}
+{% endblock %}

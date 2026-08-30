@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Playlists - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Playlists</h1>
+
+{% if engine_unavailable %}
+<p class="error">Playlist information is temporarily unavailable.</p>
+{% endif %}
+
+{% if playlists %}
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Active</th><th>Enabled</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for playlist in playlists %}
+      <tr>
+        <td>{{ playlist.get('name') }}</td>
+        <td>{{ playlist.get('active') }}</td>
+        <td>{{ playlist.get('enabled') }}</td>
+        <td class="actions">
+          <form method="post" action="{{ url_for('console.playlist_start', name=playlist.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Start</button>
+          </form>
+          <form method="post" action="{{ url_for('console.playlist_stop', name=playlist.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Stop</button>
+          </form>
+          <form method="post" action="{{ url_for('console.playlist_restart', name=playlist.get('name')) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Restart</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<section class="card">
+  <p class="muted">No playlists configured.</p>
+</section>
+{% endif %}
+{% endblock %}

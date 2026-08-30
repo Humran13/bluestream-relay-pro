@@ -29,11 +29,25 @@ BLUESTREAM_MEDIA_DIR="${BLUESTREAM_VAR_DIR}/media"
 BLUESTREAM_RUN_DIR="${BLUESTREAM_VAR_DIR}/run"
 BLUESTREAM_BACKUP_DIR="${BLUESTREAM_VAR_DIR}/backups"
 
+# GUI-1C.1: root-only quarantine for web-staged uploads. The privileged import
+# atomically renames the staged directory entry here BEFORE ffprobe/import so
+# bluestream-web can never swap or symlink the object that gets probed/copied.
+# Created root:root 0700 by web_configure_state (and defensively by the root
+# importer). Its parent BLUESTREAM_RUN_DIR is bluestream-relay:bluestream-relay
+# 0750, so the web user has no access to the quarantine or its contents.
+BLUESTREAM_MEDIA_QUARANTINE_DIR="${BLUESTREAM_RUN_DIR}/media-import"
+
 BLUESTREAM_WWW_DIR="/var/www/bluestream"
 BLUESTREAM_HLS_ROOT="${BLUESTREAM_WWW_DIR}/hls"
 BLUESTREAM_HLS_RELAY_DIR="${BLUESTREAM_HLS_ROOT}/relay"
 BLUESTREAM_HLS_PLAYLIST_DIR="${BLUESTREAM_HLS_ROOT}/playlist"
 BLUESTREAM_WEB_DIR="${BLUESTREAM_WWW_DIR}/web"
+
+# Narrowly writable web upload staging area (GUI-1C.1). The unprivileged
+# bluestream-web process writes browser uploads here; the root web-ctl bridge
+# then imports them into BLUESTREAM_MEDIA_DIR. The final media directory is
+# never directly writable by the web user.
+BLUESTREAM_WEB_UPLOAD_DIR="/var/lib/bluestream/web/upload"
 
 BLUESTREAM_USER="bluestream-relay"
 BLUESTREAM_GROUP="bluestream-relay"
@@ -206,6 +220,26 @@ bs_valid_url() {
         return 1
     fi
     [ "${#url}" -le 4096 ] || return 1
+    return 0
+}
+
+# Auto-classify a source URL into the relay TYPE grammar used by the engine
+# (bs_valid_type). Used by the web create-stream workflow; the CLI stays free
+# to pick any explicit type. Returns 1 for unsupported schemes.
+bs_classify_source_type() {
+    local url="$1" noquery="${1%%\?*}"
+    case "$url" in
+        rtmp://*)  printf 'rtmp' ;;
+        rtmps://*) printf 'rtmps' ;;
+        rtsp://*)  printf 'rtsp' ;;
+        http://*|https://*)
+            case "$noquery" in
+                *.m3u8)   printf 'remote-hls' ;;
+                *)        printf 'http-file' ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
     return 0
 }
 

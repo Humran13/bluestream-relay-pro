@@ -10,6 +10,7 @@ real relays/playlists, or any production configuration.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -61,11 +62,13 @@ class FakeEngine:
             raise value
         return value
 
-    def _mutation(self, operation, name):
-        self.mutation_calls.append((operation, name))
-        value = self.mutation_payloads.get(
-            (operation, name), {"operation": operation, "name": name}
-        )
+    def _mutation(self, operation, *values):
+        self.mutation_calls.append((operation,) + tuple(values))
+        value = self.mutation_payloads.get((operation,) + tuple(values))
+        if value is None:
+            value = self.mutation_payloads.get((operation,))
+        if value is None:
+            value = {"operation": operation, "values": values}
         if isinstance(value, Exception):
             raise value
         return value
@@ -87,6 +90,15 @@ class FakeEngine:
 
     def playlist_restart(self, name):
         return self._mutation("playlist_restart", name)
+
+    def relay_create_url(self, name, url):
+        return self._mutation("relay_create_url", name, url)
+
+    def relay_create_media(self, name, media):
+        return self._mutation("relay_create_media", name, media)
+
+    def media_import_staged(self, staging):
+        return self._mutation("media_import_staged", staging)
 
 
 def make_state(tmpdir, password=ADMIN_PASSWORD):
@@ -142,12 +154,14 @@ DEFAULT_PAYLOADS = {
         {
             "name": "news",
             "type": "remote-hls",
+            "source": "https://source.example.com/live/index.m3u8",
             "active": "yes",
             "enabled": "no",
             "health": "HEALTHY",
         }
     ],
     "playlist_list": [],
+    "media_list": [],
 }
 
 
@@ -378,11 +392,12 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
         self.assertNotIn("<b>bold-host</b>", html)
 
     def test_21_route_surface_only_allowed_endpoints(self):
-        # GUI-1B.1 adds exactly the six lifecycle endpoints; everything else
-        # that mutates (create/edit/delete/upload/restore/...) stays forbidden.
+        # GUI-1B.1/GUI-1C.1 add the lifecycle, create-stream and media endpoints;
+        # everything else that mutates (edit/delete/remove/restore/...) stays
+        # forbidden. The exact-set assertion below is the real guard.
         forbidden = (
+            "edit", "delete", "remove", "restore",
             "enable", "disable",
-            "create", "edit", "delete", "upload", "restore",
             "nginx", "ssl", "firewall",
         )
         endpoints = set()
@@ -391,8 +406,7 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
             lower = rule.endpoint.lower()
             for word in forbidden:
                 self.assertNotIn(word, lower)
-        # the complete console surface is exactly: index, login(+post),
-        # logout, dashboard, the six GUI-1B.1 lifecycle endpoints (+ static)
+        # the complete console surface
         console = {e for e in endpoints if e.startswith("console.")}
         self.assertEqual(
             console,
@@ -408,6 +422,15 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.playlist_start",
                 "console.playlist_stop",
                 "console.playlist_restart",
+                "console.streams",
+                "console.streams_create",
+                "console.streams_create_post",
+                "console.media",
+                "console.media_upload",
+                "console.media_upload_post",
+                "console.media_create_stream",
+                "console.media_create_stream_post",
+                "console.playlists",
             },
         )
         # only the expected HTTP methods
@@ -553,18 +576,17 @@ class LifecycleActionTests(unittest.TestCase):
             ],
         )
 
-    def test_10_dashboard_shows_controls_with_csrf(self):
+    def test_10_streams_page_shows_controls_with_csrf(self):
         login(self.client)
-        html = self.client.get("/console/").get_data(as_text=True)
+        html = self.client.get("/console/streams").get_data(as_text=True)
         self.assertIn("/console/relays/news/start", html)
         self.assertIn("/console/relays/news/stop", html)
         self.assertIn("/console/relays/news/restart", html)
         # every action form carries its own CSRF token (3 actions + logout)
         self.assertGreaterEqual(html.count('name="csrf_token"'), 4)
-        # no create/edit/delete controls yet
+        # no delete/edit controls yet
         self.assertNotIn("Delete", html)
         self.assertNotIn("Edit", html)
-        self.assertNotIn("Add", html)
 
 
 class EngineClientTests(unittest.TestCase):
@@ -584,7 +606,9 @@ class EngineClientTests(unittest.TestCase):
                 client.call(op)
         self.assertEqual(
             ALLOWED_OPERATIONS,
-            frozenset({"version", "snapshot", "relay_list", "playlist_list"}),
+            frozenset(
+                {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+            ),
         )
 
     def test_16_engine_client_uses_shell_false_and_argv(self):
@@ -683,7 +707,7 @@ class EngineClientTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # GUI-1B.1: lifecycle mutations
     # ------------------------------------------------------------------
-    def test_20_mutation_methods_are_exactly_six_and_fixed(self):
+    def test_20_mutation_methods_are_exactly_nine_and_fixed(self):
         client = EngineClient(
             web_ctl=Path(self._tmp.name) / "web-ctl", bash="/bin/bash"
         )
@@ -694,11 +718,15 @@ class EngineClientTests(unittest.TestCase):
             "playlist_start",
             "playlist_stop",
             "playlist_restart",
+            "relay_create_url",
+            "relay_create_media",
+            "media_import_staged",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for forbidden in (
-            "relay_create", "relay_edit", "relay_delete",
-            "playlist_create", "playlist_edit", "playlist_upload",
+            "relay_edit", "relay_delete",
+            "playlist_edit", "playlist_delete",
+            "media_remove", "media_delete",
         ):
             self.assertFalse(hasattr(client, forbidden), forbidden)
         self.assertEqual(
@@ -711,11 +739,14 @@ class EngineClientTests(unittest.TestCase):
                     "playlist_start",
                     "playlist_stop",
                     "playlist_restart",
+                    "relay_create_url",
+                    "relay_create_media",
+                    "media_import_staged",
                 }
             ),
         )
         # the read-only call() surface still rejects lifecycle operations
-        for op in ("relay_start", "playlist_stop", "create", "delete"):
+        for op in ("relay_start", "playlist_stop", "relay_create_url", "delete"):
             with self.assertRaises(EngineError):
                 client.call(op)
 
@@ -950,6 +981,60 @@ class WebCtlArgvBoundaryTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(doc["code"], "UNKNOWN_OPERATION")
 
+    # ------------------------------------------------------------------
+    # GUI-1C.1: exact argv + fail-closed validation for create/import ops.
+    # ------------------------------------------------------------------
+    def test_20_relay_create_url_missing_argument_fails(self):
+        rc, doc = self._run("relay_create_url", "news24")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_ARGUMENT")
+
+    def test_21_relay_create_url_extra_argument_fails(self):
+        rc, doc = self._run("relay_create_url", "news24", "https://x/y.m3u8", "extra")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+
+    def test_22_relay_create_url_invalid_name_fails(self):
+        rc, doc = self._run("relay_create_url", "--help", "https://x/y.m3u8")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_NAME")
+
+    def test_23_relay_create_url_unsupported_scheme_fails(self):
+        rc, doc = self._run("relay_create_url", "news24", "file:///etc/passwd")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_URL")
+
+    def test_24_relay_create_media_invalid_media_name_fails(self):
+        rc, doc = self._run("relay_create_media", "news24", "../evil.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_MEDIA")
+
+    def test_25_media_import_staged_missing_fails(self):
+        rc, doc = self._run("media_import_staged")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_TARGET")
+
+    def test_26_media_import_staged_extra_fails(self):
+        rc, doc = self._run("media_import_staged", "a.mp4", "extra")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+
+    def test_27_media_import_staged_invalid_staging_fails(self):
+        rc, doc = self._run("media_import_staged", "../evil.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_STAGING")
+
+    def test_28_media_list_rejects_extra_args(self):
+        rc, doc = self._run("media_list", "extra")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+
+    def test_29_media_list_read_only_succeeds(self):
+        rc, doc = self._run("media_list")
+        self.assertEqual(rc, 0)
+        self.assertIs(doc["ok"], True)
+        self.assertIsInstance(doc.get("data"), list)
+
 
 class SecurityTests(unittest.TestCase):
     """Password storage, secret key persistence, and the admin CLI."""
@@ -1016,10 +1101,10 @@ class ProductionModeTests(unittest.TestCase):
     """GUI-1A.3A production runtime and privilege-separation plumbing."""
 
     FORBIDDEN = (
-        # GUI-1B.1 allows exactly the six lifecycle operations (start/stop/
-        # restart on relays/playlists); every other mutation word stays banned.
+        # GUI-1B.1/GUI-1C.1 allow the lifecycle + create-stream + upload
+        # operations; every other mutation word stays banned.
         "enable", "disable",
-        "create", "edit", "delete", "upload", "restore",
+        "edit", "delete", "remove", "restore",
         "nginx", "ssl", "firewall",
     )
 
@@ -1347,6 +1432,286 @@ class IntegrationTest(unittest.TestCase):
             html = rv.get_data(as_text=True)
             self.assertIn("Dashboard", html)
             self.assertIn("0.1.0", html)  # version from the real bridge
+
+
+class Gui1cWorkflowTests(unittest.TestCase):
+    """GUI-1C.1 routes: streams create, media library, upload, create-stream.
+
+    Uses a FakeEngine so no privileged bridge call is ever made; auth, CSRF,
+    GET-vs-POST and PRG behaviour are exercised end to end.
+    """
+
+    RELAYS_PAYLOADS = {
+        "snapshot": VALID_SNAPSHOT,
+        "relay_list": [
+            {
+                "name": "news",
+                "type": "remote-hls",
+                "source": "https://source.example.com/live/index.m3u8",
+                "active": "no",
+                "enabled": "yes",
+                "health": "STOPPED",
+            }
+        ],
+        "playlist_list": [],
+        "media_list": [{"name": "promo.mp4", "size": "12345", "extension": "mp4"}],
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.engine = FakeEngine(self.RELAYS_PAYLOADS)
+        self.upload_dir = Path(self._tmp.name) / "upload"
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+            config={"WEB_UPLOAD_DIR": str(self.upload_dir)},
+        )
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _login(self):
+        login(self.client)
+
+    def _csrf(self):
+        return get_csrf(self.client, path="/console/streams")
+
+    def test_01_streams_page_lists_relays_professionally(self):
+        self._login()
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("news", html)
+        self.assertIn("Remote HLS", html)
+        self.assertIn("https://source.example.com/live/index.m3u8", html)
+        self.assertIn("STOPPED", html)
+        self.assertIn("/console/relays/news/start", html)
+        self.assertIn("/console/relays/news/stop", html)
+        self.assertIn("/console/relays/news/restart", html)
+
+    def test_02_create_stream_get_form_has_csrf(self):
+        self._login()
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn('name="csrf_token"', html)
+        self.assertIn("Source URL", html)
+
+    def test_03_unauthenticated_create_stream_cannot_mutate(self):
+        token = get_csrf(self.client)
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "news24", "url": "https://x/live/index.m3u8", "csrf_token": token},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_04_create_stream_requires_csrf(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "news24", "url": "https://x/live/index.m3u8"},
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_05_create_stream_invalid_name_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "Bad Name!", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn("Invalid stream name", html)
+
+    def test_06_create_stream_traversal_name_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "../evil", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_07_create_stream_unsupported_scheme_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "news24", "url": "file:///etc/passwd", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn("Unsupported or malformed source URL", html)
+
+    def test_08_create_stream_success_prg(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "news24", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_create_url", "news24", "https://x/live/index.m3u8")],
+        )
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("Stream &#39;news24&#39; created", html)
+
+    def test_09_create_stream_duplicate_controlled_error(self):
+        self._login()
+        self.engine.mutation_payloads[("relay_create_url", "news24", "https://x/live/index.m3u8")] = EngineError(
+            "stream already exists", code="ALREADY_EXISTS"
+        )
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "news24", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn("already exists", html)
+        self.assertNotIn("Traceback", html)
+
+    def test_10_media_page_lists_items(self):
+        self._login()
+        html = self.client.get("/console/media").get_data(as_text=True)
+        self.assertIn("promo.mp4", html)
+        self.assertIn("mp4", html)
+        self.assertIn("Upload Media", html)
+
+    def test_11_upload_get_form_has_csrf_and_size_hint(self):
+        self._login()
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn('name="csrf_token"', html)
+        self.assertIn("Upload limit", html)
+
+    def test_12_upload_path_traversal_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"data"), "../../promo.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        # traversal anywhere in the submitted name is rejected: no engine call,
+        # nothing written inside OR outside the upload dir.
+        self.assertEqual(self.engine.mutation_calls, [])
+        self.assertFalse(list(self.upload_dir.iterdir()) if self.upload_dir.exists() else [])
+        self.assertFalse((self.upload_dir.parent / "promo.mp4").exists())
+
+    def test_12b_upload_dotdot_basename_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"data"), "a..b.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        self.assertFalse(list(self.upload_dir.iterdir()) if self.upload_dir.exists() else [])
+
+    def test_13_upload_unsupported_extension_rejected(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"data"), "evil.exe"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_14_upload_oversized_rejected(self):
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+            config={"WEB_UPLOAD_DIR": str(self.upload_dir), "MAX_UPLOAD_SIZE": 10},
+        )
+        client = app.test_client()
+        login(client)
+        token = get_csrf(client, path="/console/media/upload")
+        rv = client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"x" * 100), "big.mp4"), "csrf_token": token},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("upload size limit", html)
+
+    def test_15_upload_success_stages_and_imports(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"video-data"), "promo.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/media", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [("media_import_staged", "promo.mp4")])
+        self.assertTrue((self.upload_dir / "promo.mp4").exists())
+
+    def test_15b_upload_not_regular_controlled_error(self):
+        self._login()
+        self.engine.mutation_payloads[("media_import_staged", "promo.mp4")] = EngineError(
+            "staged upload is not a regular file", code="NOT_REGULAR"
+        )
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"video-data"), "promo.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("not a regular file", html)
+        self.assertNotIn("Traceback", html)
+
+    def test_16_media_create_stream_get_form(self):
+        self._login()
+        html = self.client.get("/console/media/promo.mp4/create-stream").get_data(as_text=True)
+        self.assertIn("promo.mp4", html)
+        self.assertIn('name="csrf_token"', html)
+
+    def test_17_media_create_stream_success_prg(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/promo.mp4/create-stream",
+            data={"name": "promo-loop", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_create_media", "promo-loop", "promo.mp4")],
+        )
+
+    def test_18_media_create_stream_nonexistent_media(self):
+        self._login()
+        rv = self.client.get("/console/media/missing.mp4/create-stream")
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/media", rv.headers["Location"])
+
+    def test_19_media_create_stream_invalid_name(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/promo.mp4/create-stream",
+            data={"name": "bad name!", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_20_playlists_page_renders(self):
+        self._login()
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Playlists", html)
+
+    def test_21_navigation_present_on_pages(self):
+        self._login()
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("/console/media", html)
+        self.assertIn("/console/playlists", html)
+        self.assertIn("/console/", html)
 
 
 if __name__ == "__main__":

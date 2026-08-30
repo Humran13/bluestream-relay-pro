@@ -8,7 +8,17 @@
 </head>
 <body>
   <header class="topbar">
-    <span class="brand">BlueStream Relay Pro</span>
+    <div class="topbar-left">
+      <span class="brand">BlueStream Relay Pro</span>
+      {% if session.get('authenticated') %}
+      <nav class="nav">
+        <a href="{{ url_for('console.dashboard') }}">Dashboard</a>
+        <a href="{{ url_for('console.streams') }}">Streams</a>
+        <a href="{{ url_for('console.media') }}">Media Library</a>
+        <a href="{{ url_for('console.playlists') }}">Playlists</a>
+      </nav>
+      {% endif %}
+    </div>
     {% if session.get('authenticated') %}
     <form method="post" action="{{ url_for('console.logout') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

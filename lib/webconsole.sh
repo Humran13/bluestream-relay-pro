@@ -124,6 +124,23 @@ web_create_state() {
 # `bluestream-manager ssl issue` (see nginx_sync_web_conf in lib/nginx.sh).
 web_configure_state() {
     nginx_sync_web_conf
+    # GUI-1C.1: narrowly writable upload staging area. This is the ONLY path
+    # the unprivileged bluestream-web process may write to; the root web-ctl
+    # bridge imports staged uploads from here into /var/lib/bluestream/media.
+    # 0770 root:bluestream-web keeps it private to root and the web user.
+    mkdir -p "$BLUESTREAM_WEB_STATE_DIR/upload" 2>/dev/null
+    chown root:"$BLUESTREAM_WEB_GROUP" "$BLUESTREAM_WEB_STATE_DIR/upload"
+    chmod 0770 "$BLUESTREAM_WEB_STATE_DIR/upload"
+    # GUI-1C.1: root-only quarantine for staged uploads. The root bridge
+    # atomically renames the staged entry here BEFORE ffprobe/import, so
+    # bluestream-web can never swap or symlink the object that gets imported.
+    # The quarantine lives under the existing /var/lib/bluestream/run tree
+    # (root:root 0700; that parent directory is 0750 and not accessible to
+    # bluestream-web) and is covered by the service ReadWritePaths entry for
+    # /var/lib/bluestream/run.
+    mkdir -p "$BLUESTREAM_MEDIA_QUARANTINE_DIR" 2>/dev/null
+    chown root:root "$BLUESTREAM_MEDIA_QUARANTINE_DIR"
+    chmod 0700 "$BLUESTREAM_MEDIA_QUARANTINE_DIR"
     return 0
 }
 

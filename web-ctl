@@ -11,6 +11,7 @@
 #   web-ctl snapshot
 #   web-ctl relay_list
 #   web-ctl playlist_list
+#   web-ctl media_list
 #
 # Controlled lifecycle operations (GUI-1B.1).  Each accepts exactly ONE target
 # name, validated with the engine's own bs_valid_name rule before any engine
@@ -24,7 +25,16 @@
 #   web-ctl playlist_stop <name>
 #   web-ctl playlist_restart <name>
 #
-# The six lifecycle actions above are the ONLY write operations at any layer.
+# GUI-1C.1 creation/import operations (exact argc, strict validation, data
+# never interpolated into shell code):
+#
+#   web-ctl relay_create_url <name> <url>
+#   web-ctl relay_create_media <name> <mediafile>
+#   web-ctl media_import_staged <stagingid>
+#
+# The six lifecycle actions and the create/import operations above are the ONLY
+# write operations at any layer.  No configuration editing, deletion, or
+# user-management operations exist beyond these.
 #
 # Output contract:
 #   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
@@ -89,7 +99,7 @@ fi
 # business logic (version, config parsing, discovery, service state, health)
 # stays in these libraries; Python is used only for JSON serialization.
 # ---------------------------------------------------------------------------
-for _bs_lib in common health relay playlist; do
+for _bs_lib in common health probe relay playlist media; do
     # shellcheck source=lib/common.sh
     . "$BS_ROOT/lib/$_bs_lib.sh" || {
         printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
@@ -166,7 +176,7 @@ wc_op_snapshot() {
 }
 
 wc_op_relay_list() {
-    local name unit active enabled type health
+    local name unit active enabled type health source
     for name in $(relay_list_names 2>/dev/null); do
         # Names come from validated relay config discovery ([a-z0-9_-]{1,48});
         # the for-loop word split is therefore safe.
@@ -177,8 +187,11 @@ wc_op_relay_list() {
         if [ "$(systemctl is-enabled "$unit" 2>/dev/null)" = "enabled" ]; then enabled="yes"; fi
         type="unknown"
         health="UNKNOWN"
+        source=""
         if relay_load_config "$name" 2>/dev/null; then
             type="$RELAY_TYPE"
+            # Display-only representation: credentials/query tokens are redacted.
+            source="$(bs_redact_url "$RELAY_URL")"
             if health_state relay "$name" 2>/dev/null; then
                 health="$HEALTH_STATE"
             fi
@@ -187,6 +200,7 @@ wc_op_relay_list() {
             printf '\0'
             printf 'name\0%s\0'    "$name"
             printf 'type\0%s\0'    "$type"
+            printf 'source\0%s\0'  "$source"
             printf 'active\0%s\0'  "$active"
             printf 'enabled\0%s\0' "$enabled"
             printf 'health\0%s\0'  "$health"
@@ -210,6 +224,79 @@ wc_op_playlist_list() {
             printf 'enabled\0%s\0' "$enabled"
         }
     done | wc_json array
+}
+
+# ---------------------------------------------------------------------------
+# GUI-1C.1: media library and relay creation (fixed argc + strict validation).
+# ---------------------------------------------------------------------------
+
+wc_op_media_list() {
+    local name size ext
+    for name in $(media_list_names 2>/dev/null); do
+        size="$(stat -c '%s' "$BLUESTREAM_MEDIA_DIR/$name" 2>/dev/null || printf '0')"
+        case "$name" in
+            *.*) ext="${name##*.}" ;;
+            *)   ext="unknown" ;;
+        esac
+        {
+            printf '\0'
+            printf 'name\0%s\0'      "$name"
+            printf 'size\0%s\0'      "$size"
+            printf 'extension\0%s\0' "$ext"
+        }
+    done | wc_json array
+}
+
+wc_op_relay_create_url() {
+    local name="${1:-}" url="${2:-}" type="" rc
+    [ -n "$name" ] || wc_fail "missing stream name" "MISSING_TARGET"
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    [ -n "$url" ] || wc_fail "missing source URL" "MISSING_URL"
+    bs_valid_url "$url" || wc_fail "unsupported or malformed source URL" "INVALID_URL"
+    type="$(bs_classify_source_type "$url")" || wc_fail "unsupported source URL scheme" "UNSUPPORTED_URL"
+    relay_exists "$name" && wc_fail "stream already exists: $name" "ALREADY_EXISTS"
+    ( relay_create "$name" "$type" "$url" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0type\0%s\0' "relay_create_url" "$name" "$type" | wc_json object
+}
+
+wc_op_relay_create_media() {
+    local name="${1:-}" media="${2:-}" rc
+    [ -n "$name" ] || wc_fail "missing stream name" "MISSING_TARGET"
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    [ -n "$media" ] || wc_fail "missing media name" "MISSING_MEDIA"
+    bs_valid_media_name "$media" || wc_fail "invalid media name" "INVALID_MEDIA"
+    relay_exists "$name" && wc_fail "stream already exists: $name" "ALREADY_EXISTS"
+    [ -f "$BLUESTREAM_MEDIA_DIR/$media" ] || wc_fail "media not found: $media" "MEDIA_NOT_FOUND"
+    ( relay_create "$name" "local-file" "$BLUESTREAM_MEDIA_DIR/$media" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0type\0local-file\0' "relay_create_media" "$name" | wc_json object
+}
+
+wc_op_media_import_staged() {
+    local stagingfile="${1:-}" rc
+    [ -n "$stagingfile" ] || wc_fail "missing upload id" "MISSING_STAGING"
+    bs_valid_media_name "$stagingfile" || wc_fail "invalid upload id" "INVALID_STAGING"
+    # The complete filesystem trust boundary (web staging -> root-only
+    # quarantine -> symlink rejection -> ffprobe -> no-overwrite import) is
+    # enforced by the authoritative media_import_staged engine function. The
+    # bridge only maps its exit status to a controlled JSON error code and
+    # never re-implements a second (weaker) trust decision.
+    ( media_import_staged "$stagingfile" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid upload id" "INVALID_STAGING" ;;
+        2) wc_fail "staged upload not found" "STAGING_NOT_FOUND" ;;
+        3) wc_fail "a file with this name already exists in managed media" "MEDIA_EXISTS" ;;
+        4) wc_fail "staged upload is not a regular file" "NOT_REGULAR" ;;
+        5) wc_fail "ffprobe is unavailable for media validation" "NO_FFPROBE" ;;
+        6) wc_fail "uploaded file is not recognized media" "NOT_MEDIA" ;;
+        *) wc_fail "media import failed" "IMPORT_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "media_import_staged" "$stagingfile" | wc_json object
 }
 
 # ---------------------------------------------------------------------------
@@ -261,12 +348,16 @@ wc_op_lifecycle() {
 # Dispatch: hard-coded allowlist, fail closed.  No dynamic execution.
 # ---------------------------------------------------------------------------
 wc_dispatch() {
-    local operation="${1:-}" name="${2:-}" argcount="${3:-0}"
+    local operation="${1:-}" name="${2:-}" value2="${3:-}" argcount="${4:-0}"
     case "$operation" in
         version)       wc_op_version ;;
         snapshot)      wc_op_snapshot ;;
         relay_list)    wc_op_relay_list ;;
         playlist_list) wc_op_playlist_list ;;
+        media_list)
+            [ "$argcount" -eq 1 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            wc_op_media_list
+            ;;
         relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart)
             # Lifecycle operations accept EXACTLY operation + one target
             # (shell argv count == 2).  An explicitly empty third argument
@@ -280,8 +371,31 @@ wc_dispatch() {
             fi
             wc_op_lifecycle "$operation" "$name"
             ;;
+        media_import_staged)
+            # EXACTLY operation + one staging id (shell argv count == 2).
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing upload id" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            wc_op_media_import_staged "$name"
+            ;;
+        relay_create_url|relay_create_media)
+            # EXACTLY operation + two arguments (shell argv count == 3).
+            if [ "$argcount" -lt 3 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt 3 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                relay_create_url)  wc_op_relay_create_url  "$name" "$value2" ;;
+                relay_create_media) wc_op_relay_create_media "$name" "$value2" ;;
+            esac
+            ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"
@@ -289,4 +403,4 @@ wc_dispatch() {
     esac
 }
 
-wc_dispatch "${1:-}" "${2:-}" "$#"
+wc_dispatch "${1:-}" "${2:-}" "${3:-}" "$#"

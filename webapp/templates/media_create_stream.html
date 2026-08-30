@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Create Stream from Media - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Create Stream from Media</h1>
+<section class="card">
+  <form method="post" action="{{ url_for('console.media_create_stream_post', name=media) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="media_display">Selected media (read-only)</label>
+    <input type="text" id="media_display" value="{{ media }}" readonly>
+    <label for="name">Stream Name</label>
+    <input type="text" id="name" name="name" required maxlength="48" placeholder="e.g. promo-loop">
+    <button type="submit" class="btn">Create</button>
+  </form>
+</section>
+<p><a href="{{ url_for('console.media') }}">&laquo; Back to Media Library</a></p>
+{% endblock %}

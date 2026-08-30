@@ -65,11 +65,53 @@ input[type="password"] {
   color: #fff;
   font-size: 0.95rem;
   cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-sm {
+  margin-top: 0;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.82rem;
 }
 
 .error { color: var(--error); font-weight: 600; }
 
 .muted { color: var(--muted); }
+
+/* GUI-1C.1 navigation */
+.topbar-left { display: flex; align-items: center; gap: 1.25rem; }
+
+.nav { display: flex; gap: 0.75rem; }
+.nav a { color: #cfd8e3; text-decoration: none; font-size: 0.9rem; }
+.nav a:hover { color: #fff; }
+
+.flash p { padding: 0.6rem 0.85rem; border-radius: 4px; margin: 0 0 0.75rem; }
+.flash .success { background: #e7f6ec; color: #1a7f37; border: 1px solid #b7e4c7; }
+.flash .error { background: #fdecea; color: var(--error); border: 1px solid #f5c6bf; font-weight: 600; }
+
+.actions { white-space: nowrap; }
+.actions form { display: inline-block; margin-right: 0.35rem; }
+
+.source { word-break: break-all; max-width: 22rem; }
+
+input[type="file"] { display: block; margin: 0.25rem 0 0.75rem; }
+
+/* Status badges */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.badge-healthy   { background: #e7f6ec; color: #1a7f37; }
+.badge-stopped   { background: #eef1f4; color: #57606a; }
+.badge-stale     { background: #fff4e5; color: #b36b00; }
+.badge-failed    { background: #fdecea; color: var(--error); }
+.badge-starting  { background: #e8f1fd; color: #1f6feb; }
+.badge-unknown   { background: #eef1f4; color: #57606a; }
+
+h1 { margin: 0.25rem 0 1rem; font-size: 1.4rem; }
 
 .grid {
   display: grid;

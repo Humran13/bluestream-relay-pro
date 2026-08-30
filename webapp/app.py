@@ -1,27 +1,36 @@
-"""BlueStream Relay Pro - local read-only Flask console (GUI-1A.2).
+"""BlueStream Relay Pro - authenticated web console (GUI-1A.2 / 1B.1 / 1C.1).
 
-Development-only local entrypoint::
+Local development entrypoint::
 
     python -m webapp.app
 
-Binds to 127.0.0.1 only. Debug mode is never enabled. Deployment integration
-(nginx, Gunicorn, systemd, sudoers) is deferred to later phases.
+Binds to 127.0.0.1 only. Debug mode is never enabled. Production runs behind
+nginx/Gunicorn as the unprivileged bluestream-web user.
 
 Routes (all under ``/console``):
     GET  /console/login   - login form
     POST /console/login   - login (CSRF + rate limited)
     POST /console/logout  - logout (CSRF)
-    GET  /console/        - authenticated read-only dashboard
+    GET  /console/        - authenticated dashboard (overview)
     GET  /console         - redirect to /console/
 
 GUI-1B.1 lifecycle actions (POST only, CSRF + auth required, operation fixed
 by the route, target validated server-side, Post/Redirect/Get):
     POST /console/relays/<name>/start|stop|restart
     POST /console/playlists/<name>/start|stop|restart
+
+GUI-1C.1 create-stream / media-library workflows (auth + CSRF on all POSTs):
+    GET  /console/streams
+    GET/POST /console/streams/create
+    GET  /console/media
+    GET/POST /console/media/upload
+    GET/POST /console/media/<name>/create-stream
+    GET  /console/playlists
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -40,7 +49,14 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from webapp.engine import EngineClient, EngineError, valid_target_name
+from webapp.engine import (
+    ALLOWED_UPLOAD_EXTENSIONS,
+    EngineClient,
+    EngineError,
+    valid_media_name,
+    valid_source_url,
+    valid_target_name,
+)
 from webapp.security import (
     ADMIN_USERNAME,
     LoginRateLimiter,
@@ -56,6 +72,107 @@ from webapp.security import (
 # It holds only web-console state (admin.json, secret_key, web.conf); engine
 # configs stay root-only in /etc/bluestream behind web-ctl.
 PRODUCTION_STATE_DIR = "/var/lib/bluestream/web"
+
+# GUI-1C.1 upload staging directory (matches BLUESTREAM_WEB_UPLOAD_DIR in
+# lib/common.sh). ONLY this directory is writable by the web user; staged files
+# are imported into managed media by the root web-ctl bridge.
+PRODUCTION_UPLOAD_DIR = "/var/lib/bluestream/web/upload"
+
+# Default upload cap (matches client_max_body_size in the nginx console
+# location). Configurable via create_app(config={"MAX_UPLOAD_SIZE": N}).
+DEFAULT_MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1 GiB
+
+
+# ---------------------------------------------------------------------------
+# GUI-1C.1 helpers
+# ---------------------------------------------------------------------------
+
+def sanitize_upload_filename(filename) -> str | None:
+    """Return a safe managed-media basename for a browser upload, or None.
+
+    Strips every directory component (both ``/`` and ``\\`` separators), rejects
+    hidden names, traversal, control characters and non-safe characters, and
+    enforces the engine's media-name rule plus the conservative upload
+    extension set. The destination is always ``<upload dir>/<result>``; the
+    caller never lets the browser pick a path.
+    """
+    if not filename:
+        return None
+    # Fail closed on any traversal marker anywhere in the submitted name,
+    # before stripping directory components (defense in depth).
+    if ".." in filename:
+        return None
+    base = filename.replace("\\", "/").split("/")[-1]
+    if not base or base.startswith(".") or ".." in base:
+        return None
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in base):
+        return None
+    if not valid_media_name(base):
+        return None
+    ext = os.path.splitext(base)[1].lower()
+    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        return None
+    return base
+
+
+def human_size(value) -> str:
+    """Human-readable byte size for the media library table."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 1024:
+        return "%d B" % n
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        n /= 1024.0
+        if n < 1024 or unit == "TiB":
+            return "%.1f %s" % (n, unit)
+    return "?"
+
+
+TYPE_LABELS = {
+    "local-file": "Local File",
+    "remote-hls": "Remote HLS",
+    "http-file": "HTTP Media",
+    "rtmp": "RTMP",
+    "rtmps": "RTMPS",
+    "rtsp": "RTSP",
+}
+
+_CREATE_ERROR_MESSAGES = {
+    "INVALID_NAME": "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
+    "INVALID_URL": "Unsupported or malformed source URL.",
+    "UNSUPPORTED_URL": "Unsupported source URL scheme. Supported: http(s), rtmp(s), rtsp.",
+    "MISSING_URL": "A source URL is required.",
+    "ALREADY_EXISTS": "A stream with that name already exists.",
+    "CREATION_FAILED": "Stream creation failed.",
+    "MISSING_MEDIA": "A media file must be selected.",
+    "INVALID_MEDIA": "Invalid media file name.",
+    "MEDIA_NOT_FOUND": "The selected media file was not found.",
+}
+
+_UPLOAD_ERROR_MESSAGES = {
+    "MEDIA_EXISTS": "A file with that name already exists in the media library.",
+    "NOT_MEDIA": "The uploaded file is not recognized media.",
+    "NO_FFPROBE": "Media validation is unavailable on this server.",
+    "NOT_REGULAR": "The uploaded file was rejected (not a regular file).",
+    "IMPORT_FAILED": "Media import failed. Please try again.",
+    "STAGING_NOT_FOUND": "The uploaded file could not be found for import.",
+    "INVALID_STAGING": "The upload was rejected.",
+}
+
+
+def _create_error_message(exc: EngineError, fallback: str) -> str:
+    if isinstance(exc, EngineError) and exc.code in _CREATE_ERROR_MESSAGES:
+        return _CREATE_ERROR_MESSAGES[exc.code]
+    return fallback
+
+
+def _upload_error_message(exc: EngineError) -> str:
+    if isinstance(exc, EngineError) and exc.code in _UPLOAD_ERROR_MESSAGES:
+        return _UPLOAD_ERROR_MESSAGES[exc.code]
+    return "Media import failed. Please try again."
+
 
 
 def _read_secure_cookie_setting(state_dir) -> bool:
@@ -116,7 +233,12 @@ def create_app(state_dir=None, engine=None, config=None, production: bool = Fals
         # (derived from BlueStream's own SSL state, never from request headers).
         SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
-        MAX_CONTENT_LENGTH=16 * 1024,
+        # GUI-1C.1: upload cap. Werkzeug rejects larger request bodies (nginx's
+        # console location enforces the same cap first); the upload route also
+        # checks Content-Length for a clean error.
+        MAX_CONTENT_LENGTH=DEFAULT_MAX_UPLOAD_SIZE,
+        MAX_UPLOAD_SIZE=DEFAULT_MAX_UPLOAD_SIZE,
+        WEB_UPLOAD_DIR=PRODUCTION_UPLOAD_DIR,
     )
     if production:
         app.config["SESSION_COOKIE_SECURE"] = _read_secure_cookie_setting(state_dir)
@@ -377,6 +499,216 @@ def _register_console_routes(app: Flask) -> None:
     @console.route("/playlists/<name>/restart", methods=["POST"])
     def playlist_restart(name):
         return _lifecycle_action("playlist", "restart", name)
+
+    # ------------------------------------------------------------------
+    # GUI-1C.1: streams page + create stream from URL (auth + CSRF, PRG).
+    # ------------------------------------------------------------------
+    @console.route("/streams", methods=["GET"])
+    def streams():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        relays = []
+        errors = []
+        try:
+            relays = engine.call("relay_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("engine relay_list unavailable: %s", exc)
+            errors.append("relay_list")
+        return render_template(
+            "streams.html",
+            relays=relays,
+            type_labels=TYPE_LABELS,
+            engine_unavailable=bool(errors),
+        )
+
+    @console.route("/streams/create", methods=["GET"])
+    def streams_create():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return render_template("streams_create.html")
+
+    @console.route("/streams/create", methods=["POST"])
+    def streams_create_post():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        name = (request.form.get("name") or "").strip()
+        url = (request.form.get("url") or "").strip()
+        if not valid_target_name(name):
+            flash(
+                "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
+                "error",
+            )
+            return redirect(url_for("console.streams_create"))
+        if not valid_source_url(url):
+            flash(
+                "Unsupported or malformed source URL. Supported: http(s), rtmp(s), rtsp.",
+                "error",
+            )
+            return redirect(url_for("console.streams_create"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.relay_create_url(name, url)
+        except EngineError as exc:
+            current_app.logger.warning("relay_create_url '%s' failed: %s", name, exc)
+            flash(_create_error_message(exc, "Stream creation failed."), "error")
+            return redirect(url_for("console.streams_create"))
+        flash(
+            "Stream '%s' created. It is stopped - press Start to begin." % name,
+            "success",
+        )
+        return redirect(url_for("console.streams"))
+
+    # ------------------------------------------------------------------
+    # GUI-1C.1: media library + upload (auth + CSRF, PRG; size capped).
+    # ------------------------------------------------------------------
+    @console.route("/media", methods=["GET"])
+    def media():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        items = []
+        errors = []
+        try:
+            items = engine.call("media_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("engine media_list unavailable: %s", exc)
+            errors.append("media_list")
+        return render_template(
+            "media.html",
+            media=items,
+            human_size=human_size,
+            engine_unavailable=bool(errors),
+        )
+
+    @console.route("/media/upload", methods=["GET"])
+    def media_upload():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return render_template(
+            "media_upload.html",
+            max_upload=current_app.config.get("MAX_UPLOAD_SIZE", DEFAULT_MAX_UPLOAD_SIZE),
+            human_size=human_size,
+        )
+
+    @console.route("/media/upload", methods=["POST"])
+    def media_upload_post():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        max_size = current_app.config.get("MAX_UPLOAD_SIZE", DEFAULT_MAX_UPLOAD_SIZE)
+        if (request.content_length or 0) > max_size:
+            flash("File exceeds the upload size limit (%s)." % human_size(max_size), "error")
+            return redirect(url_for("console.media_upload"))
+        upload = request.files.get("media")
+        if upload is None or not upload.filename:
+            flash("No file selected.", "error")
+            return redirect(url_for("console.media_upload"))
+        safe = sanitize_upload_filename(upload.filename)
+        if safe is None:
+            flash(
+                "Unsupported or unsafe file name. Allowed: .mp4 .mkv .mov .webm .m4v .ts.",
+                "error",
+            )
+            return redirect(url_for("console.media_upload"))
+        upload_dir = Path(current_app.config.get("WEB_UPLOAD_DIR", PRODUCTION_UPLOAD_DIR))
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        staged = upload_dir / safe
+        if staged.exists():
+            flash("A file with that name is already being processed.", "error")
+            return redirect(url_for("console.media_upload"))
+        try:
+            upload.save(str(staged))
+        except OSError as exc:
+            current_app.logger.warning("upload save failed: %s", exc)
+            flash("Upload could not be stored. Please try again.", "error")
+            return redirect(url_for("console.media_upload"))
+        try:
+            if staged.stat().st_size == 0:
+                staged.unlink()
+                flash("The uploaded file is empty.", "error")
+                return redirect(url_for("console.media_upload"))
+        except OSError:
+            flash("Upload could not be stored. Please try again.", "error")
+            return redirect(url_for("console.media_upload"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.media_import_staged(safe)
+        except EngineError as exc:
+            current_app.logger.warning("media_import_staged '%s' failed: %s", safe, exc)
+            flash(_upload_error_message(exc), "error")
+            return redirect(url_for("console.media_upload"))
+        flash("Media '%s' added to the library." % safe, "success")
+        return redirect(url_for("console.media"))
+
+    # ------------------------------------------------------------------
+    # GUI-1C.1: create a local-file stream from an uploaded media item.
+    # ------------------------------------------------------------------
+    @console.route("/media/<name>/create-stream", methods=["GET"])
+    def media_create_stream(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_media_name(name):
+            flash("Invalid media selection.", "error")
+            return redirect(url_for("console.media"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            items = engine.call("media_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("engine media_list unavailable: %s", exc)
+            flash("Media library is temporarily unavailable.", "error")
+            return redirect(url_for("console.media"))
+        if not any(item.get("name") == name for item in items):
+            flash("The selected media file was not found.", "error")
+            return redirect(url_for("console.media"))
+        return render_template("media_create_stream.html", media=name)
+
+    @console.route("/media/<name>/create-stream", methods=["POST"])
+    def media_create_stream_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_media_name(name):
+            flash("Invalid media selection.", "error")
+            return redirect(url_for("console.media"))
+        stream_name = (request.form.get("name") or "").strip()
+        if not valid_target_name(stream_name):
+            flash(
+                "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
+                "error",
+            )
+            return redirect(url_for("console.media_create_stream", name=name))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.relay_create_media(stream_name, name)
+        except EngineError as exc:
+            current_app.logger.warning("relay_create_media '%s' failed: %s", stream_name, exc)
+            flash(_create_error_message(exc, "Stream creation failed."), "error")
+            return redirect(url_for("console.media_create_stream", name=name))
+        flash(
+            "Stream '%s' created from media. It is stopped - press Start to begin." % stream_name,
+            "success",
+        )
+        return redirect(url_for("console.streams"))
+
+    @console.route("/playlists", methods=["GET"])
+    def playlists():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        items = []
+        errors = []
+        try:
+            items = engine.call("playlist_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("engine playlist_list unavailable: %s", exc)
+            errors.append("playlist_list")
+        return render_template(
+            "playlists.html",
+            playlists=items,
+            engine_unavailable=bool(errors),
+        )
 
     app.register_blueprint(console)
 

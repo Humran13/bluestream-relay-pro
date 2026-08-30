@@ -375,7 +375,7 @@ class HttpsFollowupTests(unittest.TestCase):
 
 
 class ReadOnlyGuaranteeTests(unittest.TestCase):
-    """Mutation surface is exactly GUI-1B.1's six lifecycle operations."""
+    """Mutation surface is exactly GUI-1B.1/GUI-1C.1's controlled operations."""
 
     def test_22_flask_routes_read_only_beyond_lifecycle(self):
         import sys
@@ -390,8 +390,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             security.init_admin(state, "pw")
             app = create_app(state_dir=state)
             forbidden = (
+                "edit", "delete", "remove", "restore",
                 "enable", "disable",
-                "create", "edit", "delete", "upload", "restore",
                 "nginx", "ssl", "firewall",
             )
             for rule in app.url_map.iter_rules():
@@ -399,7 +399,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 for word in forbidden:
                     self.assertNotIn(word, lower)
 
-    def test_23_engineclient_operations_exactly_four(self):
+    def test_23_engineclient_operations_exactly_five(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -407,10 +407,12 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
 
         self.assertEqual(
             ALLOWED_OPERATIONS,
-            frozenset({"version", "snapshot", "relay_list", "playlist_list"}),
+            frozenset(
+                {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+            ),
         )
 
-    def test_24_engineclient_mutation_operations_exactly_six(self):
+    def test_24_engineclient_mutation_operations_exactly_nine(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -422,6 +424,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 {
                     "relay_start", "relay_stop", "relay_restart",
                     "playlist_start", "playlist_stop", "playlist_restart",
+                    "relay_create_url", "relay_create_media", "media_import_staged",
                 }
             ),
         )
@@ -429,11 +432,12 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
         for name in (
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
+            "relay_create_url", "relay_create_media", "media_import_staged",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for name in (
-            "relay_create", "relay_edit", "relay_delete",
-            "playlist_create", "playlist_edit", "playlist_delete",
+            "relay_edit", "relay_delete", "playlist_edit", "playlist_delete",
+            "media_remove", "media_delete",
         ):
             self.assertFalse(hasattr(client, name), name)
 
@@ -449,9 +453,15 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
         self.assertNotIn("eval ", w)
         self.assertNotIn("eval(", w)
         self.assertNotIn("sh -c", w)
-        # no create/edit/delete dispatch words anywhere in web-ctl
-        for word in ("create", "delete", "upload", "restore"):
-            self.assertNotIn(word, w)
+        # no OUT-OF-SCOPE mutation operation tokens anywhere in web-ctl
+        # (create/upload are in scope for GUI-1C.1; edit/delete/remove/restore
+        # and the infrastructure managers are not)
+        for op in (
+            "relay_delete", "relay_edit", "relay_remove",
+            "playlist_delete", "playlist_edit", "playlist_remove",
+            "media_delete", "media_remove", "restore", "firewall",
+        ):
+            self.assertNotIn(op, w)
 
     def test_26_webctl_reuses_engine_name_rule_and_lifecycle_functions(self):
         w = repo_text("web-ctl")
@@ -539,15 +549,18 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         self.assertNotIn("ReadWritePaths=/\n", rw)
 
     def test_03_service_web_state_stays_read_only(self):
-        # the web state dir must never be in the ReadWritePaths directive
+        # the web state dir itself must never be in the ReadWritePaths list
         # (comments legitimately mention it); it stays read-only for the
-        # unprivileged bluestream-web user.
+        # unprivileged bluestream-web user. Only the narrow upload staging
+        # subdir may be writable by the web process.
         s = repo_text("config/systemd/bluestream-web.service")
-        rw_lines = [
-            ln.strip() for ln in s.splitlines() if ln.strip().startswith("ReadWritePaths=")
-        ]
-        rw = " ".join(rw_lines)
+        rw = set()
+        for ln in s.splitlines():
+            ln = ln.strip()
+            if ln.startswith("ReadWritePaths="):
+                rw.update(ln.split("=", 1)[1].split())
         self.assertNotIn("/var/lib/bluestream/web", rw)
+        self.assertIn("/var/lib/bluestream/web/upload", rw)
 
     def test_04_relay_stop_normalizes_intentional_stop(self):
         r = repo_text("lib/relay.sh")
@@ -716,6 +729,517 @@ printf '%s\\n' "$HEALTH_STATE"
         h = repo_text("lib/health.sh")
         self.assertIn('systemctl show -p Result --value "$unit"', h)
         self.assertIn('[ "$result" = "success" ]', h)
+
+
+class Gui1cValidationTests(unittest.TestCase):
+    """Python-side validation mirrors for the engine rules used by GUI-1C.1."""
+
+    def test_01_valid_source_url_accepts_supported_schemes(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.engine import valid_source_url
+
+        for good in (
+            "https://example.com/live/index.m3u8",
+            "http://example.com/video.mp4",
+            "rtmp://127.0.0.1:1935/app/key",
+            "rtmps://example.com/app/key",
+            "rtsp://example.com/live/stream",
+            "https://example.com/live/index.m3u8?token=abc&x=1",
+        ):
+            self.assertTrue(valid_source_url(good), good)
+
+    def test_02_valid_source_url_rejects_unsupported_schemes(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.engine import valid_source_url
+
+        for bad in (
+            "file:///etc/passwd",
+            "ftp://example.com/x.mp4",
+            "ssh://host/x",
+            "data:text/html,<script>",
+            "javascript:alert(1)",
+            "",
+            "https://example.com/a b.m3u8",
+            "https://example.com/`id`.m3u8",
+            "https://" + "a" * 5000,
+        ):
+            self.assertFalse(valid_source_url(bad), bad)
+
+    def test_03_valid_media_name_rule(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.engine import valid_media_name
+
+        for good in ("promo.mp4", "clip_01.mkv", "file.mov", "A.B.webm", "x" * 255):
+            self.assertTrue(valid_media_name(good), good)
+        for bad in ("", "..", "../x", "a/b", "a\\b", ".hidden", "x y", "a;b", "x" * 256):
+            self.assertFalse(valid_media_name(bad), bad)
+
+    def test_04_sanitize_upload_filename_strips_traversal(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.app import sanitize_upload_filename
+
+        self.assertEqual(sanitize_upload_filename("promo.mp4"), "promo.mp4")
+        self.assertEqual(sanitize_upload_filename("promo.MP4"), "promo.MP4")
+        # directory components are stripped, never trusted
+        self.assertEqual(sanitize_upload_filename("C:\\fakepath\\promo.mp4"), "promo.mp4")
+        self.assertEqual(sanitize_upload_filename("../../etc/passwd"), None)
+        self.assertEqual(sanitize_upload_filename("..\\..\\evil.mp4"), None)
+        self.assertEqual(sanitize_upload_filename("a/b.mp4"), "b.mp4")
+        self.assertEqual(sanitize_upload_filename(""), None)
+        self.assertEqual(sanitize_upload_filename(".hidden.mp4"), None)
+        self.assertEqual(sanitize_upload_filename("x y.mp4"), None)
+        self.assertEqual(sanitize_upload_filename("evil.exe"), None)
+        self.assertEqual(sanitize_upload_filename("script.sh"), None)
+        self.assertEqual(sanitize_upload_filename("x" * 300 + ".mp4"), None)
+
+    def test_05_human_size_formats(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.app import human_size
+
+        self.assertEqual(human_size(0), "0 B")
+        self.assertEqual(human_size(1024), "1.0 KiB")
+        self.assertEqual(human_size(1048576), "1.0 MiB")
+        self.assertEqual(human_size("not-a-number"), "?")
+
+    def test_06_media_quarantine_dir_root_only_by_installer(self):
+        common = repo_text("lib/common.sh")
+        # quarantine lives under the existing root-run tree, not a web-writable
+        # path
+        self.assertIn('BLUESTREAM_MEDIA_QUARANTINE_DIR="${BLUESTREAM_RUN_DIR}/media-import"', common)
+        wc = repo_text("lib/webconsole.sh")
+        # installer creates it root:root 0700 idempotently
+        self.assertIn('chown root:root "$BLUESTREAM_MEDIA_QUARANTINE_DIR"', wc)
+        self.assertIn('chmod 0700 "$BLUESTREAM_MEDIA_QUARANTINE_DIR"', wc)
+        inst = repo_text("install.sh")
+        # its parent /var/lib/bluestream/run is NOT web-writable
+        # (bluestream-relay:bluestream-relay 0750; web user is not in the group)
+        self.assertIn('chown "$BLUESTREAM_USER":"$BLUESTREAM_GROUP" "$BLUESTREAM_RUN_DIR"', inst)
+        self.assertIn('chmod 0750 "$BLUESTREAM_RUN_DIR"', inst)
+        media = repo_text("lib/media.sh")
+        # the import path transfers ownership via rename and rejects symlinks
+        self.assertIn('mv "$staged" "$quarantined"', media)
+        self.assertIn('[ -L "$quarantined" ]', media)
+        # ffprobe runs on the root-owned snapshot, never the web-originated
+        # inode or the staging path
+        self.assertIn('probe_media_path "$snapshot"', media)
+        self.assertNotIn('probe_media_path "$quarantined"', media)
+        self.assertNotIn('probe_media_path "$staged"', media)
+
+    def test_07_snapshot_handoff_ordering(self):
+        # Root-owned snapshot handoff: copy the web-originated inode into a
+        # NEW root-owned inode, unlink the original, and only then probe and
+        # publish the snapshot. The object validated is exactly the object
+        # published.
+        media = repo_text("lib/media.sh")
+        cp_pos = media.index('cp -f -- "$quarantined" "$snapshot"')
+        unlink_pos = media.rindex('rm -f -- "$quarantined"')
+        probe_pos = media.index('probe_media_path "$snapshot"')
+        self.assertLess(cp_pos, unlink_pos)
+        self.assertLess(unlink_pos, probe_pos)
+        # the web-originated inode is never probed or published
+        self.assertNotIn('probe_media_path "$quarantined"', media)
+        self.assertNotIn('mv -n "$quarantined"', media)
+        # ownership failures fail closed on the snapshot itself
+        self.assertIn('chown root:"$BLUESTREAM_GROUP" "$snapshot"', media)
+        self.assertIn('chmod 0640 "$snapshot"', media)
+        self.assertNotIn('chown root:"$BLUESTREAM_GROUP" "$tmp"', media)
+
+
+class Gui1cEngineBehaviorTests(unittest.TestCase):
+    """Behavioral tests for the GUI-1C.1 engine functions with a sandboxed dir
+    layout (conf/media/upload dirs overridden to a temp tree)."""
+
+    _HARNESS = """#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+tmp="$(cygpath -u "$3" 2>/dev/null || printf '%s' "$3")"
+. "$repo/lib/common.sh"
+. "$repo/lib/probe.sh"
+. "$repo/lib/relay.sh"
+. "$repo/lib/media.sh"
+BLUESTREAM_RELAY_CONF_DIR="$tmp/conf"
+BLUESTREAM_MEDIA_DIR="$tmp/media"
+BLUESTREAM_WEB_UPLOAD_DIR="$tmp/upload"
+BLUESTREAM_MEDIA_QUARANTINE_DIR="$tmp/quarantine"
+mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" "$BLUESTREAM_MEDIA_DIR" "$BLUESTREAM_WEB_UPLOAD_DIR" "$BLUESTREAM_MEDIA_QUARANTINE_DIR"
+# Unit-test isolation: engine ops require root + ffprobe; stub both so the
+# tests exercise the pure logic only. chown is a no-op here (non-root); the
+# quarantine owner check is gated on id -u in the engine function, and the
+# snapshot chown is overridden to succeed so import logic is exercised.
+bs_require_root() { return 0; }
+chown() { return 0; }
+probe_media_path() { return 0; }
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/ffprobe" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmp/bin/ffprobe" "$tmp/bin/install"
+export PATH="$tmp/bin:$PATH"
+. "$scenario"
+"""
+
+    def _run(self, scenario_text):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            scenario = tmpdir / "scenario.sh"
+            scenario.write_text(scenario_text, encoding="utf-8")
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(scenario), tmp],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            return proc.stdout.decode("utf-8").strip().splitlines()
+
+    def _symlinks_supported(self):
+        """Detect whether the host can create REAL symlinks via ln -s.
+
+        Git Bash/MSYS on some Windows hosts silently falls back to copying the
+        target instead of creating a symlink; the symlink-rejection tests are
+        only meaningful where a real symlink is produced (they run on POSIX).
+        """
+        out = self._run(
+            "printf 'x' > \"$tmp/src.mp4\"\n"
+            "ln -s \"$tmp/src.mp4\" \"$tmp/link.mp4\"\n"
+            "[ -L \"$tmp/link.mp4\" ] && echo YES || echo NO\n"
+        )
+        return out == ["YES"]
+
+    def test_01_classify_source_type(self):
+        out = self._run(
+            "echo \"$(bs_classify_source_type 'https://x/live/index.m3u8')\"\n"
+            "echo \"$(bs_classify_source_type 'https://x/live/index.m3u8?token=a')\"\n"
+            "echo \"$(bs_classify_source_type 'https://x/video.mp4')\"\n"
+            "echo \"$(bs_classify_source_type 'http://x/a.ts')\"\n"
+            "echo \"$(bs_classify_source_type 'rtmp://h/a/k')\"\n"
+            "echo \"$(bs_classify_source_type 'rtmps://h/a/k')\"\n"
+            "echo \"$(bs_classify_source_type 'rtsp://h/s')\"\n"
+            "echo \"$(bs_classify_source_type 'file:///etc/passwd' || echo UNSUPPORTED)\"\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "remote-hls", "remote-hls", "http-file", "http-file",
+                "rtmp", "rtmps", "rtsp", "UNSUPPORTED",
+            ],
+        )
+
+    def test_02_relay_create_url_config_and_duplicate(self):
+        out = self._run(
+            "relay_create news24 remote-hls 'https://x/live/index.m3u8'\n"
+            "echo CREATE_RC=$?\n"
+            "echo CONF=$([ -f \"$BLUESTREAM_RELAY_CONF_DIR/news24.conf\" ] && echo yes || echo no)\n"
+            "relay_load_config news24\n"
+            "echo TYPE=$RELAY_TYPE URL=$RELAY_URL ENABLED=$RELAY_ENABLED\n"
+            "relay_create news24 remote-hls 'https://x/again.m3u8'\n"
+            "echo DUP_RC=$?\n"
+            "relay_create 'Bad Name' remote-hls 'https://x/a.m3u8'\n"
+            "echo BADNAME_RC=$?\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "CREATE_RC=0",
+                "CONF=yes",
+                "TYPE=remote-hls URL=https://x/live/index.m3u8 ENABLED=no",
+                "DUP_RC=1",
+                "BADNAME_RC=1",
+            ],
+        )
+
+    def test_03_relay_create_media_local_file(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/promo.mp4\"\n"
+            "relay_create promo-loop local-file \"$BLUESTREAM_MEDIA_DIR/promo.mp4\"\n"
+            "echo CREATE_RC=$?\n"
+            "relay_load_config promo-loop\n"
+            "echo \"TYPE=$RELAY_TYPE URL=$(basename \"$RELAY_URL\") ENABLED=$RELAY_ENABLED\"\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "CREATE_RC=0",
+                "TYPE=local-file URL=promo.mp4 ENABLED=no",
+            ],
+        )
+
+    def test_04_media_import_staged_imports_and_cleans(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "media_import_staged promo.mp4\n"
+            "echo IMPORT_RC=$?\n"
+            "echo MEDIA=$([ -f \"$BLUESTREAM_MEDIA_DIR/promo.mp4\" ] && echo yes || echo no)\n"
+            "echo STAGED_GONE=$([ -e \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\" ] && echo no || echo yes)\n"
+            "printf 'x' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "media_import_staged promo.mp4\n"
+            "echo DUP_RC=$?\n"
+        )
+        self.assertEqual(
+            out,
+            ["IMPORT_RC=0", "MEDIA=yes", "STAGED_GONE=yes", "DUP_RC=3"],
+        )
+
+    def test_05_media_import_staged_rejects_traversal_and_bad_names(self):
+        out = self._run(
+            "printf 'x' > \"$BLUESTREAM_WEB_UPLOAD_DIR/ok.mp4\"\n"
+            "media_import_staged '../evil.mp4'\n"
+            "echo TRAV_RC=$?\n"
+            "media_import_staged 'a b.mp4'\n"
+            "echo SPACE_RC=$?\n"
+            "media_import_staged ''\n"
+            "echo EMPTY_RC=$?\n"
+            "echo NO_EVIL=$([ -e \"$BLUESTREAM_MEDIA_DIR/../evil.mp4\" ] && echo yes || echo no)\n"
+        )
+        self.assertEqual(out, ["TRAV_RC=1", "SPACE_RC=1", "EMPTY_RC=1", "NO_EVIL=no"])
+
+    def test_06_media_list_names_only_files(self):
+        out = self._run(
+            "printf 'a' > \"$BLUESTREAM_MEDIA_DIR/a.mp4\"\n"
+            "printf 'b' > \"$BLUESTREAM_MEDIA_DIR/b.ts\"\n"
+            "mkdir -p \"$BLUESTREAM_MEDIA_DIR/subdir\"\n"
+            "printf 'c' > \"$BLUESTREAM_MEDIA_DIR/subdir/c.mp4\"\n"
+            "for n in $(media_list_names | sort); do echo \"LIST:$n\"; done\n"
+        )
+        self.assertEqual(out, ["LIST:a.mp4", "LIST:b.ts"])
+
+    def test_07_bs_redact_url_removes_credentials_and_query_tokens(self):
+        out = self._run(
+            "echo \"$(bs_redact_url 'https://user:pass@example.com/live/index.m3u8?token=abc&x=1')\"\n"
+            "echo \"$(bs_redact_url 'https://example.com/live/index.m3u8?X-Amz-Signature=deadbeef&y=2')\"\n"
+            "echo \"$(bs_redact_url 'https://example.com/live/plain.m3u8')\"\n"
+            "echo \"$(bs_redact_url '/var/lib/bluestream/media/promo.mp4')\"\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "https://example.com/live/index.m3u8?token=***&x=1",
+                "https://example.com/live/index.m3u8?X-Amz-Signature=***&y=2",
+                "https://example.com/live/plain.m3u8",
+                "/var/lib/bluestream/media/promo.mp4",
+            ],
+        )
+
+    def test_08_relay_config_never_stores_redacted_values(self):
+        # storage keeps the REAL URL; redaction is display-only
+        out = self._run(
+            "relay_create secfeed remote-hls 'https://user:pass@example.com/live/index.m3u8?token=abc'\n"
+            "relay_load_config secfeed\n"
+            "echo STORED=$RELAY_URL\n"
+            "echo DISPLAY=$(bs_redact_url \"$RELAY_URL\")\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "STORED=https://user:pass@example.com/live/index.m3u8?token=abc",
+                "DISPLAY=https://example.com/live/index.m3u8?token=***",
+            ],
+        )
+
+    def test_09_symlink_to_media_rejected(self):
+        if not self._symlinks_supported():
+            self.skipTest("host cannot create real symlinks (ln -s copies); POSIX-only")
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/existing.mp4\"\n"
+            "ln -s \"$BLUESTREAM_MEDIA_DIR/existing.mp4\" \"$BLUESTREAM_WEB_UPLOAD_DIR/evil.mp4\"\n"
+            "media_import_staged evil.mp4\n"
+            "echo SYMLINK_RC=$?\n"
+            "echo IMPORTED=$([ -e \"$BLUESTREAM_MEDIA_DIR/evil.mp4\" ] && echo yes || echo no)\n"
+            "echo STAGING_GONE=$([ -e \"$BLUESTREAM_WEB_UPLOAD_DIR/evil.mp4\" ] && echo no || echo yes)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["SYMLINK_RC=4", "IMPORTED=no", "STAGING_GONE=yes", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_10_symlink_to_outside_path_rejected(self):
+        # a symlink pointing OUTSIDE the staging/web writable area must be
+        # rejected before any ffprobe/import, even if the target is readable
+        # by root only.
+        if not self._symlinks_supported():
+            self.skipTest("host cannot create real symlinks (ln -s copies); POSIX-only")
+        out = self._run(
+            "printf 'not-media' > \"$tmp/outside.bin\"\n"
+            "ln -s \"$tmp/outside.bin\" \"$BLUESTREAM_WEB_UPLOAD_DIR/outside.mp4\"\n"
+            "media_import_staged outside.mp4\n"
+            "echo OUTSIDE_RC=$?\n"
+            "echo IMPORTED=$([ -e \"$BLUESTREAM_MEDIA_DIR/outside.mp4\" ] && echo yes || echo no)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["OUTSIDE_RC=4", "IMPORTED=no", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_11_broken_symlink_rejected(self):
+        if not self._symlinks_supported():
+            self.skipTest("host cannot create real symlinks (ln -s copies); POSIX-only")
+        out = self._run(
+            "ln -s \"$BLUESTREAM_WEB_UPLOAD_DIR/does-not-exist.mp4\" \"$BLUESTREAM_WEB_UPLOAD_DIR/broken.mp4\"\n"
+            "media_import_staged broken.mp4\n"
+            "echo BROKEN_RC=$?\n"
+            "echo IMPORTED=$([ -e \"$BLUESTREAM_MEDIA_DIR/broken.mp4\" ] && echo yes || echo no)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["BROKEN_RC=4", "IMPORTED=no", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_12_staging_recreated_after_quarantine_cannot_alter_import(self):
+        # Deterministic ownership-transfer proof: a hook (test-only seam, inert
+        # in production) recreates the ORIGINAL staging pathname AFTER the
+        # privileged quarantine rename. The import must still use the
+        # quarantined object (ORIGINAL content), never the recreated staging
+        # entry.
+        out = self._run(
+            "printf 'ORIGINAL' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "cat > \"$tmp/hook.sh\" <<EOF\n"
+            "#!/usr/bin/env bash\n"
+            "printf 'EVIL' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "exit 0\n"
+            "EOF\n"
+            "chmod +x \"$tmp/hook.sh\"\n"
+            "export BLUESTREAM_MEDIA_IMPORT_HOOK=\"$tmp/hook.sh\"\n"
+            "media_import_staged promo.mp4\n"
+            "echo IMPORT_RC=$?\n"
+            "echo CONTENT=$(cat \"$BLUESTREAM_MEDIA_DIR/promo.mp4\")\n"
+            "echo STAGING_CONTENT=$(cat \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\")\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+            "unset BLUESTREAM_MEDIA_IMPORT_HOOK\n"
+        )
+        self.assertEqual(
+            out,
+            ["IMPORT_RC=0", "CONTENT=ORIGINAL", "STAGING_CONTENT=EVIL", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_13_failed_probe_cleans_quarantine(self):
+        # A staged file that fails the ffprobe gate must be removed from
+        # quarantine (here the harness overrides probe_media_path to succeed,
+        # so simulate failure by overriding it inside the scenario AFTER
+        # defining the failure mode via a symlink-free regular file).
+        out = self._run(
+            "printf 'junk' > \"$BLUESTREAM_WEB_UPLOAD_DIR/junk.mp4\"\n"
+            "probe_media_path() { return 1; }\n"
+            "media_import_staged junk.mp4\n"
+            "echo PROBE_RC=$?\n"
+            "echo IMPORTED=$([ -e \"$BLUESTREAM_MEDIA_DIR/junk.mp4\" ] && echo yes || echo no)\n"
+            "echo STAGING_GONE=$([ -e \"$BLUESTREAM_WEB_UPLOAD_DIR/junk.mp4\" ] && echo no || echo yes)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["PROBE_RC=6", "IMPORTED=no", "STAGING_GONE=yes", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_14_retained_writable_fd_cannot_alter_snapshot(self):
+        # Deterministic snapshot-handoff proof (POSIX/Linux only - Windows/MSYS
+        # does not reproduce rename-with-open-handle or write-to-unlinked-inode
+        # semantics). A writable FD is opened on the staged file and KEPT OPEN;
+        # the hook writes through it AFTER the root snapshot handoff. The
+        # imported file must still contain the snapshot content, the ffprobe
+        # path must be the root-owned snapshot, and the probed inode must be
+        # the published inode.
+        import sys
+
+        if sys.platform not in ("linux", "darwin"):
+            self.skipTest("retained-FD write-to-unlinked-inode semantics require a POSIX host")
+        out = self._run(
+            "printf 'ORIGINAL' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "exec 9>>\"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "probe_media_path() { stat -c %i \"$1\" > \"$tmp/probed_inode.txt\"; printf '%s\\n' \"$1\" > \"$tmp/probed_path.txt\"; return 0; }\n"
+            "cat > \"$tmp/hook.sh\" <<EOF\n"
+            "#!/usr/bin/env bash\n"
+            "printf 'EVIL' >&9\n"
+            "exit 0\n"
+            "EOF\n"
+            "chmod +x \"$tmp/hook.sh\"\n"
+            "export BLUESTREAM_MEDIA_IMPORT_HOOK=\"$tmp/hook.sh\"\n"
+            "media_import_staged promo.mp4\n"
+            "echo IMPORT_RC=$?\n"
+            "echo CONTENT=$(cat \"$BLUESTREAM_MEDIA_DIR/promo.mp4\")\n"
+            "echo SAME_INODE=$([ \"$(cat \"$tmp/probed_inode.txt\")\" = \"$(stat -c %i \"$BLUESTREAM_MEDIA_DIR/promo.mp4\")\" ] && echo yes || echo no)\n"
+            "P=$(cat \"$tmp/probed_path.txt\")\n"
+            "echo PROBED_QUARANTINE=$([ \"${P#$BLUESTREAM_MEDIA_QUARANTINE_DIR/}\" != \"$P\" ] && echo yes || echo no)\n"
+            "echo PROBED_SNAPSHOT_SUFFIX=$([ \"${P%.snapshot}\" != \"$P\" ] && echo yes || echo no)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+            "exec 9>&-\n"
+        )
+        self.assertEqual(
+            out,
+            [
+                "IMPORT_RC=0",
+                "CONTENT=ORIGINAL",
+                "SAME_INODE=yes",
+                "PROBED_QUARANTINE=yes",
+                "PROBED_SNAPSHOT_SUFFIX=yes",
+                "QUARANTINE_COUNT=0",
+            ],
+        )
+
+    def test_15_snapshot_copy_failure_cleans_original_and_snapshot(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "cp() { return 1; }\n"
+            "media_import_staged promo.mp4\n"
+            "echo COPY_RC=$?\n"
+            "echo MEDIA=$([ -e \"$BLUESTREAM_MEDIA_DIR/promo.mp4\" ] && echo yes || echo no)\n"
+            "echo STAGING_GONE=$([ -e \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\" ] && echo no || echo yes)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["COPY_RC=7", "MEDIA=no", "STAGING_GONE=yes", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_16_chown_failure_fails_closed(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "chown() { return 1; }\n"
+            "media_import_staged promo.mp4\n"
+            "echo CHOWN_RC=$?\n"
+            "echo MEDIA=$([ -e \"$BLUESTREAM_MEDIA_DIR/promo.mp4\" ] && echo yes || echo no)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["CHOWN_RC=7", "MEDIA=no", "QUARANTINE_COUNT=0"],
+        )
+
+    def test_17_chmod_failure_fails_closed(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_WEB_UPLOAD_DIR/promo.mp4\"\n"
+            "chmod() { case \"$1\" in 0700) command chmod \"$@\" ;; *) return 1 ;; esac; }\n"
+            "media_import_staged promo.mp4\n"
+            "echo CHMOD_RC=$?\n"
+            "echo MEDIA=$([ -e \"$BLUESTREAM_MEDIA_DIR/promo.mp4\" ] && echo yes || echo no)\n"
+            "echo QUARANTINE_COUNT=$(ls -1 \"$BLUESTREAM_MEDIA_QUARANTINE_DIR\" 2>/dev/null | wc -l)\n"
+        )
+        self.assertEqual(
+            out,
+            ["CHMOD_RC=7", "MEDIA=no", "QUARANTINE_COUNT=0"],
+        )
 
 
 if __name__ == "__main__":

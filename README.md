@@ -33,6 +33,7 @@ temporarily reconnects.
 - [Codec recommendations](#codec-recommendations)
 - [Installation](#installation)
 - [Manager usage](#manager-usage)
+- [Web console](#web-console)
 - [Playlists](#playlists)
 - [WordPress / websites](#wordpress--websites)
 - [Security model](#security-model)
@@ -176,6 +177,35 @@ sudo bluestream-manager selftest
 sudo bluestream-manager diagnostics
 sudo bluestream-manager relay url news
 ```
+
+## Web console
+
+An optional authenticated **web console** (Gunicorn + Flask, `127.0.0.1:8080`
+behind nginx at `https://DOMAIN/console/`) provides a professional dashboard
+for the most common tasks. All management remains available through
+`bluestream-manager`; the console never bypasses the root-only engine.
+
+Available pages (GUI-1C.1):
+
+- **Dashboard** — server/engine overview and quick actions.
+- **Streams** — list relays, start/stop/restart, and **create a stream** from a
+  source URL (HLS, HTTP media, RTMP/RTMPS, RTSP). The URL is stored as data
+  only and displayed redacted; new streams start **stopped**.
+- **Media Library** — list managed media, **upload** a video file, and create a
+  local-file stream from it. Uploads are staged in a narrow web-writable
+  directory, probed with ffprobe, and imported by the root bridge — a file is
+  never overwritten and the staged copy is removed after every import attempt.
+- **Playlists** — list playlists and control them (start/stop/restart).
+
+Security properties:
+
+- Every write is a POST guarded by CSRF tokens and authentication, and follows
+  Post/Redirect/Get (no mutation on refresh).
+- Source URLs, stream names and media names are validated against the engine's
+  own rules (and again by the engine) before any bridge call.
+- Uploads are capped (1 GiB default, mirrored in nginx) and restricted to
+  common media extensions; the web process can only write the upload staging
+  directory, never managed media.
 
 ## WordPress / websites
 

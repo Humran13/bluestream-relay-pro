@@ -26,11 +26,19 @@
   </dl>
   <h2>Counts</h2>
   <dl class="grid">
-    <dt>Relays</dt><dd>{{ snap.get('relay_count') }}</dd>
+    <dt>Streams</dt><dd>{{ snap.get('relay_count') }}</dd>
     <dt>Playlists</dt><dd>{{ snap.get('playlist_count') }}</dd>
   </dl>
 </section>
 {% endif %}
+
+<section class="card">
+  <h2>Quick actions</h2>
+  <p>
+    <a class="btn" href="{{ url_for('console.streams_create') }}">Create Stream</a>
+    <a class="btn" href="{{ url_for('console.media_upload') }}">Upload Media</a>
+  </p>
+</section>
 
 {% set relays = data.get('relay_list') %}
 {% if relays is not none %}
@@ -39,7 +47,7 @@
   {% if relays %}
   <table>
     <thead>
-      <tr><th>Name</th><th>Type</th><th>Active</th><th>Enabled</th><th>Health</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Type</th><th>Active</th><th>Health</th></tr>
     </thead>
     <tbody>
     {% for relay in relays %}
@@ -47,28 +55,14 @@
         <td>{{ relay.get('name') }}</td>
         <td>{{ relay.get('type') }}</td>
         <td>{{ relay.get('active') }}</td>
-        <td>{{ relay.get('enabled') }}</td>
-        <td>{{ relay.get('health') }}</td>
-        <td class="actions">
-          <form method="post" action="{{ url_for('console.relay_start', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Start</button>
-          </form>
-          <form method="post" action="{{ url_for('console.relay_stop', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Stop</button>
-          </form>
-          <form method="post" action="{{ url_for('console.relay_restart', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Restart</button>
-          </form>
-        </td>
+        <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span></td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  <p class="muted"><a href="{{ url_for('console.streams') }}">Manage streams &raquo;</a></p>
   {% else %}
-  <p class="muted">No relays configured.</p>
+  <p class="muted">No relays configured. <a href="{{ url_for('console.streams_create') }}">Create a stream</a>.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -80,7 +74,7 @@
   {% if playlists %}
   <table>
     <thead>
-      <tr><th>Name</th><th>Active</th><th>Enabled</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Active</th><th>Enabled</th></tr>
     </thead>
     <tbody>
     {% for playlist in playlists %}
@@ -88,24 +82,11 @@
         <td>{{ playlist.get('name') }}</td>
         <td>{{ playlist.get('active') }}</td>
         <td>{{ playlist.get('enabled') }}</td>
-        <td class="actions">
-          <form method="post" action="{{ url_for('console.playlist_start', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Start</button>
-          </form>
-          <form method="post" action="{{ url_for('console.playlist_stop', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Stop</button>
-          </form>
-          <form method="post" action="{{ url_for('console.playlist_restart', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Restart</button>
-          </form>
-        </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  <p class="muted"><a href="{{ url_for('console.playlists') }}">Manage playlists &raquo;</a></p>
   {% else %}
   <p class="muted">No playlists configured.</p>
   {% endif %}
