@@ -1517,12 +1517,12 @@ class Gui1cWorkflowTests(unittest.TestCase):
         self._login()
         rv = self.client.post(
             "/console/streams/create",
-            data={"name": "Bad Name!", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+            data={"name": "!!!", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
         )
         self.assertEqual(rv.status_code, 302)
         self.assertEqual(self.engine.mutation_calls, [])
         html = self.client.get("/console/streams/create").get_data(as_text=True)
-        self.assertIn("Invalid stream name", html)
+        self.assertIn("safe stream name", html)
 
     def test_06_create_stream_traversal_name_rejected(self):
         self._login()
@@ -1696,7 +1696,7 @@ class Gui1cWorkflowTests(unittest.TestCase):
         self._login()
         rv = self.client.post(
             "/console/media/promo.mp4/create-stream",
-            data={"name": "bad name!", "csrf_token": self._csrf()},
+            data={"name": "!!!", "csrf_token": self._csrf()},
         )
         self.assertEqual(rv.status_code, 302)
         self.assertEqual(self.engine.mutation_calls, [])
@@ -1712,6 +1712,78 @@ class Gui1cWorkflowTests(unittest.TestCase):
         self.assertIn("/console/media", html)
         self.assertIn("/console/playlists", html)
         self.assertIn("/console/", html)
+
+    def test_22_create_stream_friendly_name_normalized(self):
+        self._login()
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "My Promo Stream", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        # only the normalized safe internal ID crosses the privileged boundary
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_create_url", "my-promo-stream", "https://x/live/index.m3u8")],
+        )
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("my-promo-stream", html)
+
+    def test_23_create_stream_normalized_duplicate_message(self):
+        self._login()
+        self.engine.mutation_payloads[("relay_create_url", "my-promo-stream", "https://x/live/index.m3u8")] = EngineError(
+            "stream already exists", code="ALREADY_EXISTS"
+        )
+        rv = self.client.post(
+            "/console/streams/create",
+            data={"name": "My Promo Stream", "url": "https://x/live/index.m3u8", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn("A stream named &#39;my-promo-stream&#39; already exists.", html)
+        self.assertNotIn("Traceback", html)
+
+    def test_24_upload_friendly_name_normalized(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"video-data"), "5 Minute Timer.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/media", rv.headers["Location"])
+        # the engine receives only the normalized safe stored filename
+        self.assertEqual(self.engine.mutation_calls, [("media_import_staged", "5-minute-timer.mp4")])
+        self.assertTrue((self.upload_dir / "5-minute-timer.mp4").exists())
+        self.assertFalse((self.upload_dir / "5 Minute Timer.mp4").exists())
+
+    def test_25_upload_normalized_duplicate_message(self):
+        self._login()
+        self.engine.mutation_payloads[("media_import_staged", "my-video.mp4")] = EngineError(
+            "a file with this name already exists in managed media", code="MEDIA_EXISTS"
+        )
+        rv = self.client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"video-data"), "My Video.mp4"), "csrf_token": self._csrf()},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("A media file named &#39;my-video.mp4&#39; already exists.", html)
+        self.assertNotIn("Traceback", html)
+
+    def test_26_media_create_stream_friendly_name_normalized(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/promo.mp4/create-stream",
+            data={"name": "My Timer Stream", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_create_media", "my-timer-stream", "promo.mp4")],
+        )
 
 
 if __name__ == "__main__":

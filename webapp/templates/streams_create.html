@@ -7,6 +7,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="name">Stream Name</label>
     <input type="text" id="name" name="name" required maxlength="48" placeholder="e.g. news24">
+    <p class="muted">Use a normal name - spaces and punctuation are converted to a safe internal ID automatically (e.g. &quot;My Promo Stream&quot; becomes &quot;my-promo-stream&quot;).</p>
     <label for="url">Source URL</label>
     <input type="text" id="url" name="url" required maxlength="4096" placeholder="https://example.com/live/index.m3u8">
     <p class="muted">Supported sources: HLS (.m3u8), HTTP/HTTPS media, RTMP / RTMPS, RTSP. The URL is stored as data only and never executed by the shell.</p>

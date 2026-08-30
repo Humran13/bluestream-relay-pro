@@ -787,22 +787,32 @@ class Gui1cValidationTests(unittest.TestCase):
         for bad in ("", "..", "../x", "a/b", "a\\b", ".hidden", "x y", "a;b", "x" * 256):
             self.assertFalse(valid_media_name(bad), bad)
 
-    def test_04_sanitize_upload_filename_strips_traversal(self):
+    def test_04_upload_filename_normalization(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
         from webapp.app import sanitize_upload_filename
 
+        # human-friendly names normalize to the safe internal stored form
+        self.assertEqual(sanitize_upload_filename("5 Minute Timer.mp4"), "5-minute-timer.mp4")
+        self.assertEqual(sanitize_upload_filename("My Holiday Video.mp4"), "my-holiday-video.mp4")
+        self.assertEqual(sanitize_upload_filename("Promo   Final 2026.MP4"), "promo-final-2026.mp4")
+        self.assertEqual(sanitize_upload_filename("Ad_Video 01.mov"), "ad_video-01.mov")
+        self.assertEqual(sanitize_upload_filename("  Leading.mp4"), "leading.mp4")
+        self.assertEqual(sanitize_upload_filename("My!! Video??? .mp4"), "my-video.mp4")
+        # existing strict names still behave correctly
         self.assertEqual(sanitize_upload_filename("promo.mp4"), "promo.mp4")
-        self.assertEqual(sanitize_upload_filename("promo.MP4"), "promo.MP4")
+        self.assertEqual(sanitize_upload_filename("promo.MP4"), "promo.mp4")
         # directory components are stripped, never trusted
         self.assertEqual(sanitize_upload_filename("C:\\fakepath\\promo.mp4"), "promo.mp4")
+        self.assertEqual(sanitize_upload_filename("a/b.mp4"), "b.mp4")
+        # fail-closed security rejections
         self.assertEqual(sanitize_upload_filename("../../etc/passwd"), None)
         self.assertEqual(sanitize_upload_filename("..\\..\\evil.mp4"), None)
-        self.assertEqual(sanitize_upload_filename("a/b.mp4"), "b.mp4")
+        self.assertEqual(sanitize_upload_filename("a..b.mp4"), None)
         self.assertEqual(sanitize_upload_filename(""), None)
         self.assertEqual(sanitize_upload_filename(".hidden.mp4"), None)
-        self.assertEqual(sanitize_upload_filename("x y.mp4"), None)
+        self.assertEqual(sanitize_upload_filename("!!!.mp4"), None)  # normalizes empty
         self.assertEqual(sanitize_upload_filename("evil.exe"), None)
         self.assertEqual(sanitize_upload_filename("script.sh"), None)
         self.assertEqual(sanitize_upload_filename("x" * 300 + ".mp4"), None)
@@ -875,6 +885,31 @@ class Gui1cValidationTests(unittest.TestCase):
         self.assertIn('[ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"', w)
         # success path still emits the normal envelope
         self.assertIn("relay_create_url", w)
+
+    def test_09_normalize_stream_name(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.app import normalize_stream_name
+        from webapp.engine import valid_target_name
+
+        self.assertEqual(normalize_stream_name("My Promo Stream"), "my-promo-stream")
+        self.assertEqual(normalize_stream_name("News 24"), "news-24")
+        self.assertEqual(normalize_stream_name("Company TV LIVE!"), "company-tv-live")
+        self.assertEqual(normalize_stream_name("  Promo   Loop  "), "promo-loop")
+        self.assertEqual(normalize_stream_name("My Timer Stream"), "my-timer-stream")
+        self.assertEqual(normalize_stream_name("news24"), "news24")
+        # every derived ID always passes the authoritative strict validator
+        for s in ("My Promo Stream", "News 24", "Company TV LIVE!", "  Promo   Loop  "):
+            self.assertTrue(valid_target_name(normalize_stream_name(s)), s)
+        # fail-closed: empty / punctuation-only / traversal / too long
+        self.assertIsNone(normalize_stream_name(""))
+        self.assertIsNone(normalize_stream_name("   "))
+        self.assertIsNone(normalize_stream_name("!!!"))
+        self.assertIsNone(normalize_stream_name("---"))
+        self.assertIsNone(normalize_stream_name("../evil"))
+        self.assertIsNone(normalize_stream_name("x" * 60))
+        self.assertIsNone(normalize_stream_name(None))
 
 
 class Gui1cEngineBehaviorTests(unittest.TestCase):

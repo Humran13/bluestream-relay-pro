@@ -7,7 +7,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="media">Video file</label>
     <input type="file" id="media" name="media" required>
-    <p class="muted">Allowed formats: .mp4 .mkv .mov .webm .m4v .ts. Upload limit: {{ human_size(max_upload) }}.</p>
+    <p class="muted">Allowed formats: .mp4 .mkv .mov .webm .m4v .ts. Upload limit: {{ human_size(max_upload) }}. Files are stored under a safe internal name automatically (e.g. &quot;5 Minute Timer.mp4&quot; becomes &quot;5-minute-timer.mp4&quot;).</p>
     <button type="submit" class="btn">Upload</button>
   </form>
 </section>

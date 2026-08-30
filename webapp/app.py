@@ -31,6 +31,7 @@ GUI-1C.1 create-stream / media-library workflows (auth + CSRF on all POSTs):
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -87,14 +88,27 @@ DEFAULT_MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1 GiB
 # GUI-1C.1 helpers
 # ---------------------------------------------------------------------------
 
-def sanitize_upload_filename(filename) -> str | None:
-    """Return a safe managed-media basename for a browser upload, or None.
+# Characters permitted in the SAFE INTERNAL media basename stem (lowercase
+# letters, digits, dot, dash, underscore). Everything else in a human-friendly
+# display name is normalized to '-' at the web boundary.
+_INTERNAL_MEDIA_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+# Characters permitted in the SAFE INTERNAL stream ID (engine grammar).
+_INTERNAL_STREAM_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
-    Strips every directory component (both ``/`` and ``\\`` separators), rejects
-    hidden names, traversal, control characters and non-safe characters, and
-    enforces the engine's media-name rule plus the conservative upload
-    extension set. The destination is always ``<upload dir>/<result>``; the
-    caller never lets the browser pick a path.
+
+def sanitize_upload_filename(filename) -> str | None:
+    """Return the safe, normalized managed-media basename for a browser upload.
+
+    Accepts normal human-friendly names (e.g. ``"5 Minute Timer.mp4"``) and
+    deterministically normalizes them to the engine's safe stored form
+    (``"5-minute-timer.mp4"``): basename only, lowercase stem, every
+    unsupported character becomes ``-`` (spaces/punctuation/unicode), repeated
+    ``-`` collapsed, leading/trailing separators trimmed, extension lowercased
+    and checked against the allowlist. Returns None (fail closed) on any
+    traversal marker, path separator escape, hidden/control character,
+    unsupported extension, or a normalization that produces an empty/invalid
+    name. The destination is always ``<upload dir>/<result>`` - the browser
+    never picks a path.
     """
     if not filename:
         return None
@@ -105,14 +119,50 @@ def sanitize_upload_filename(filename) -> str | None:
     base = filename.replace("\\", "/").split("/")[-1]
     if not base or base.startswith(".") or ".." in base:
         return None
-    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in base):
+    # Control characters (0x00-0x1F, 0x7F) are rejected; ordinary spaces are
+    # allowed because they are normalized to '-' below.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in base):
         return None
-    if not valid_media_name(base):
-        return None
-    ext = os.path.splitext(base)[1].lower()
+    stem, ext = os.path.splitext(base)
+    ext = ext.lower()
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         return None
-    return base
+    stem = "".join(c if c in _INTERNAL_MEDIA_CHARS else "-" for c in stem.lower())
+    stem = re.sub(r"-{2,}", "-", stem)
+    stem = stem.strip("-_.")
+    if not stem:
+        return None
+    result = stem + ext
+    if not valid_media_name(result) or len(result) > 255:
+        return None
+    return result
+
+
+def normalize_stream_name(value) -> str | None:
+    """Normalize a human-friendly stream name to the engine's safe internal ID.
+
+    e.g. ``"My Promo Stream"`` -> ``"my-promo-stream"``. Deterministic policy:
+    trim whitespace, lowercase, every unsupported character (spaces,
+    punctuation, unicode) becomes ``-``, repeated ``-`` collapsed, leading and
+    trailing ``-``/``_`` trimmed, then the result must pass the authoritative
+    engine internal-name validator (``[a-z0-9][a-z0-9_-]{0,47}``). Returns None
+    when no safe ID can be derived (empty, only punctuation, traversal marker,
+    or too long). The privileged bridge only ever receives this validated ID.
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lower()
+    # Fail closed on traversal markers in the human-entered value.
+    if ".." in s:
+        return None
+    normalized = "".join(c if c in _INTERNAL_STREAM_CHARS else "-" for c in s)
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    normalized = normalized.strip("-_")
+    if not normalized:
+        return None
+    if not valid_target_name(normalized):
+        return None
+    return normalized
 
 
 def human_size(value) -> str:
@@ -532,14 +582,14 @@ def _register_console_routes(app: Flask) -> None:
     def streams_create_post():
         if not session.get("authenticated"):
             return redirect(url_for("console.login"))
-        name = (request.form.get("name") or "").strip()
-        url = (request.form.get("url") or "").strip()
-        if not valid_target_name(name):
-            flash(
-                "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
-                "error",
-            )
+        # Human-friendly display names are normalized to the safe internal ID
+        # here, at the web boundary; the privileged bridge only ever receives
+        # an ID that passes the engine's strict internal-name rule.
+        name = normalize_stream_name(request.form.get("name"))
+        if name is None:
+            flash("We could not create a safe stream name from that value.", "error")
             return redirect(url_for("console.streams_create"))
+        url = (request.form.get("url") or "").strip()
         if not valid_source_url(url):
             flash(
                 "Unsupported or malformed source URL. Supported: http(s), rtmp(s), rtsp.",
@@ -551,7 +601,10 @@ def _register_console_routes(app: Flask) -> None:
             engine.relay_create_url(name, url)
         except EngineError as exc:
             current_app.logger.warning("relay_create_url '%s' failed: %s", name, exc)
-            flash(_create_error_message(exc, "Stream creation failed."), "error")
+            if exc.code == "ALREADY_EXISTS":
+                flash("A stream named '%s' already exists." % name, "error")
+            else:
+                flash(_create_error_message(exc, "Stream creation failed."), "error")
             return redirect(url_for("console.streams_create"))
         flash(
             "Stream '%s' created. It is stopped - press Start to begin." % name,
@@ -638,7 +691,10 @@ def _register_console_routes(app: Flask) -> None:
             engine.media_import_staged(safe)
         except EngineError as exc:
             current_app.logger.warning("media_import_staged '%s' failed: %s", safe, exc)
-            flash(_upload_error_message(exc), "error")
+            if exc.code == "MEDIA_EXISTS":
+                flash("A media file named '%s' already exists." % safe, "error")
+            else:
+                flash(_upload_error_message(exc), "error")
             return redirect(url_for("console.media_upload"))
         flash("Media '%s' added to the library." % safe, "success")
         return redirect(url_for("console.media"))
@@ -672,19 +728,21 @@ def _register_console_routes(app: Flask) -> None:
         if not valid_media_name(name):
             flash("Invalid media selection.", "error")
             return redirect(url_for("console.media"))
-        stream_name = (request.form.get("name") or "").strip()
-        if not valid_target_name(stream_name):
-            flash(
-                "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
-                "error",
-            )
+        # Same friendly-name normalization as the URL create-stream form; only
+        # the safe internal ID crosses the privileged boundary.
+        stream_name = normalize_stream_name(request.form.get("name"))
+        if stream_name is None:
+            flash("We could not create a safe stream name from that value.", "error")
             return redirect(url_for("console.media_create_stream", name=name))
         engine = current_app.extensions["bluestream_engine"]
         try:
             engine.relay_create_media(stream_name, name)
         except EngineError as exc:
             current_app.logger.warning("relay_create_media '%s' failed: %s", stream_name, exc)
-            flash(_create_error_message(exc, "Stream creation failed."), "error")
+            if exc.code == "ALREADY_EXISTS":
+                flash("A stream named '%s' already exists." % stream_name, "error")
+            else:
+                flash(_create_error_message(exc, "Stream creation failed."), "error")
             return redirect(url_for("console.media_create_stream", name=name))
         flash(
             "Stream '%s' created from media. It is stopped - press Start to begin." % stream_name,
