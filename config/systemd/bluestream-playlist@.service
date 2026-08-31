@@ -2,9 +2,11 @@
 # Instantiated as:  bluestream-playlist@<playlist-name>.service
 # Installed to:     /etc/systemd/system/bluestream-playlist@.service
 #
-# The wrapper reads the root-only playlist config, writes the concat file,
-# prepares the HLS output directory, then permanently drops privileges
-# (setpriv) before exec'ing FFmpeg. FFmpeg never runs as root.
+# The wrapper reads the root-only playlist config, normalizes every entry into
+# the managed playlist cache, writes the concat file (listing only the
+# prepared baseline artifacts), prepares the HLS output directory, then
+# permanently drops privileges (setpriv) before exec'ing FFmpeg. FFmpeg never
+# runs as root.
 
 [Unit]
 Description=BlueStream Relay Pro - Playlist %i
@@ -35,8 +37,10 @@ RestrictRealtime=true
 
 # Narrow writable paths. FFmpeg publishes over the private local RTMP socket
 # only; nginx-rtmp (www-data) owns the HLS output tree. The run directory is
-# needed for the generated concat file.
-ReadWritePaths=/var/lib/bluestream/run
+# needed for the generated concat file and preparation marker; the playlist
+# cache is where the root bootstrap publishes normalized baseline artifacts
+# (read by the dropped-privilege FFmpeg concat process).
+ReadWritePaths=/var/lib/bluestream/run /var/lib/bluestream/playlist-cache
 
 SyslogIdentifier=bluestream-playlist-%i
 StandardOutput=journal

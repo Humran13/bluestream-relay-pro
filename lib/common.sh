@@ -29,6 +29,23 @@ BLUESTREAM_MEDIA_DIR="${BLUESTREAM_VAR_DIR}/media"
 BLUESTREAM_RUN_DIR="${BLUESTREAM_VAR_DIR}/run"
 BLUESTREAM_BACKUP_DIR="${BLUESTREAM_VAR_DIR}/backups"
 
+# Playlist normalization cache. Every playlist entry is normalized (when
+# required) into a content-addressed artifact here BEFORE the concat demuxer
+# ever sees it, so a playlist can safely contain ordinary heterogeneous media
+# (different resolutions, H.264 profiles, frame rates, MP4 time bases, AAC
+# flavors). Artifacts are keyed by a SHA-256 content identity - never by the
+# media basename - so an unchanged file is reused and a changed file
+# automatically produces a fresh artifact (stale cache can never be served).
+# Created root:bluestream-relay 0750 by install.sh and defensively by the
+# root playlist runtime wrapper; artifacts are root:bluestream-relay 0640 so
+# the dropped-privilege FFmpeg concat process can read them.
+BLUESTREAM_PLAYLIST_CACHE_DIR="${BLUESTREAM_VAR_DIR}/playlist-cache"
+
+# While a playlist unit is preparing (normalizing entries in its root
+# bootstrap), health reports STARTING. If preparation takes longer than this
+# many seconds without producing HLS, health degrades to STALE.
+BLUESTREAM_PLAYLIST_PREPARE_TIMEOUT=1800
+
 # GUI-1C.1: root-only quarantine for web-staged uploads. The privileged import
 # atomically renames the staged directory entry here BEFORE ffprobe/import so
 # bluestream-web can never swap or symlink the object that gets probed/copied.

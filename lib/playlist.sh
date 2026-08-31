@@ -3,8 +3,16 @@
 #
 # Playlists are ordered lists of managed media files. They play sequentially
 # and loop continuously through FFmpeg's concat demuxer with stream copy.
-# Before starting, all entries are probed and compatibility mismatches are
-# reported. Playlist operations never delete media files.
+#
+# Playlist media compatibility is handled by a managed normalization cache
+# (BLUESTREAM_PLAYLIST_CACHE_DIR). Before a playlist starts, the root runtime
+# wrapper normalizes every entry into a content-addressed artifact that
+# matches ONE fixed baseline (H.264/yuv420p/720p/25fps + AAC-LC/44100/stereo).
+# Only those uniform artifacts are handed to the concat demuxer, so ordinary
+# heterogeneous media (different resolutions, profiles, frame rates, MP4 time
+# bases, AAC flavors, video-only files) plays as one stable continuous loop.
+# Original media is never modified, and unchanged media reuses its cached
+# artifact. If any entry cannot be prepared the playlist fails closed.
 #
 # BlueStream Relay Pro 0.1.0 (foundation). See LICENSE for terms.
 
@@ -17,6 +25,9 @@ PLAYLIST_NAME=""
 PLAYLIST_ENABLED="no"
 PLAYLIST_FILES=()
 PLAYLIST_CONF_FILE=""
+# Ordered list of prepared (normalized/cached) artifact paths, one per
+# PLAYLIST_FILES entry. Populated by playlist_prepare_all (root runtime).
+PLAYLIST_ARTIFACTS=()
 
 # Conservative maximum entries per playlist (GUI-1D.1).  There was no engine
 # limit before; this bounds privileged argv/config writes so the bridge and
@@ -24,6 +35,33 @@ PLAYLIST_CONF_FILE=""
 # it).  64 is generous for ordinary sequential promo/looping channels while
 # keeping every bridge argv line and config file small.
 BLUESTREAM_PLAYLIST_MAX_ITEMS=64
+
+# ---------------------------------------------------------------------------
+# Playlist normalization baseline (ONE conservative product decision).
+#
+# Every prepared playlist artifact is encoded to exactly these parameters so
+# the concat demuxer only ever concatenates byte-compatible inputs:
+#   - H.264 (libx264), Main profile, yuv420p, 8-bit
+#   - 1280x720 with aspect-ratio-preserving scale + pad (never stretch)
+#   - fixed 25 fps CFR, deterministic 2s keyframe interval
+#   - fixed MP4 video time base 1/90000 (deterministic timestamps)
+#   - AAC-LC 128 kbps, 44100 Hz, stereo
+#   - fresh timestamps starting at 0 (no negative DTS)
+# 720p/25fps/CRF23/veryfast is a conservative balance of quality and VPS CPU;
+# encoding happens once per unchanged media file and is cached.
+# ---------------------------------------------------------------------------
+BLUESTREAM_PLAYLIST_W=1280
+BLUESTREAM_PLAYLIST_H=720
+BLUESTREAM_PLAYLIST_FPS=25
+BLUESTREAM_PLAYLIST_VIDEO_PROFILE=main
+BLUESTREAM_PLAYLIST_VIDEO_CRF=23
+BLUESTREAM_PLAYLIST_VIDEO_PRESET=veryfast
+BLUESTREAM_PLAYLIST_AUDIO_CODEC=aac
+BLUESTREAM_PLAYLIST_AUDIO_BITRATE=128k
+BLUESTREAM_PLAYLIST_AUDIO_RATE=44100
+BLUESTREAM_PLAYLIST_AUDIO_CHANNELS=2
+BLUESTREAM_PLAYLIST_AUDIO_CHANNEL_LAYOUT=stereo
+BLUESTREAM_PLAYLIST_VIDEO_TIMESCALE=90000
 
 # ---------------------------------------------------------------------------
 # Config load / save / validation
@@ -198,26 +236,189 @@ playlist_check_compat() {
     if [ "$first_set" -eq 1 ] && [ "$warn" -eq 0 ]; then
         bs_ok "All playlist entries are compatible (${first_v} ${first_w}x${first_h} / ${first_a:-none})."
     elif [ "$warn" -ne 0 ]; then
-        bs_warn "Playlist entries have compatibility differences. Prefer uniform H.264 + AAC media."
+        bs_warn "Playlist entries have compatibility differences. Entries are normalized automatically before playback."
     fi
     return "$warn"
 }
 
 # ---------------------------------------------------------------------------
+# Playlist media preparation (normalization cache)
+#
+# The concat demuxer requires byte-compatible inputs. Ordinary heterogeneous
+# media therefore never reaches the concat file directly: every entry is first
+# normalized into a content-addressed artifact in BLUESTREAM_PLAYLIST_CACHE_DIR
+# that matches the fixed baseline above. Original media is never modified.
+#
+# Cache identity is the SHA-256 of the managed-media file content, so:
+#   - an unchanged file maps to the same artifact and is reused (no re-encode);
+#   - a changed file maps to a new key and a fresh artifact is produced
+#     (stale cache is never served);
+#   - the cache path is derived ONLY from the hash - never from the media
+#     basename, so browser-controlled names cannot influence cache paths.
+#
+# Publication is atomic (temp file -> rename) and failures remove the temp
+# file, so an incomplete conversion is never visible as a usable artifact.
+# ---------------------------------------------------------------------------
+playlist_cache_key() {
+    # <media basename> -> full SHA-256 of the managed file content.
+    local f="$1"
+    bs_valid_media_name "$f" || return 1
+    local src="$BLUESTREAM_MEDIA_DIR/$f"
+    [ -f "$src" ] || return 1
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    sha256sum "$src" 2>/dev/null | awk '{print $1}' || return 1
+}
+# Normalize one playlist entry into the managed cache. Prints the artifact
+# path on success; returns non-zero (and leaves nothing publishable behind)
+# on any failure.
+playlist_normalize_item() {
+    local f="$1"
+    bs_valid_media_name "$f" || return 1
+    local src="$BLUESTREAM_MEDIA_DIR/$f"
+    [ -f "$src" ] || return 1
+
+    local key art tmp
+    key="$(playlist_cache_key "$f")" || return 1
+    [ -n "$key" ] || return 1
+    case "$key" in *[!0-9a-f]*|'') return 1 ;; esac
+    art="$BLUESTREAM_PLAYLIST_CACHE_DIR/$key.mp4"
+
+    # Cache hit: an existing non-empty artifact for this exact content.
+    if [ -s "$art" ]; then
+        printf '%s' "$art"
+        return 0
+    fi
+
+    mkdir -p "$BLUESTREAM_PLAYLIST_CACHE_DIR" 2>/dev/null || return 1
+    tmp="$BLUESTREAM_PLAYLIST_CACHE_DIR/.tmp.$key.$$.mp4"
+    rm -f "$tmp"
+
+    # Probe BEFORE encoding: decides audio mapping and fails closed on
+    # undecodable/non-media input.
+    if ! probe_media_path "$src"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    local vf scale_args pad_args
+    scale_args="scale=${BLUESTREAM_PLAYLIST_W}:${BLUESTREAM_PLAYLIST_H}:force_original_aspect_ratio=decrease"
+    pad_args="pad=${BLUESTREAM_PLAYLIST_W}:${BLUESTREAM_PLAYLIST_H}:(ow-iw)/2:(oh-ih)/2"
+    vf="${scale_args},${pad_args},setsar=1"
+
+    local audio_map=() gop
+    gop=$(( BLUESTREAM_PLAYLIST_FPS * 2 ))
+    if [ -n "$PA_CODEC" ]; then
+        audio_map=( -map 0:v:0 -map 0:a:0 )
+    else
+        # Video-only item: synthesize a silent stereo AAC track so the concat
+        # input set stays uniform (every artifact carries audio). -shortest
+        # makes the silent track match the video duration.
+        audio_map=(
+            -f lavfi -i "anullsrc=channel_layout=${BLUESTREAM_PLAYLIST_AUDIO_CHANNEL_LAYOUT}:sample_rate=${BLUESTREAM_PLAYLIST_AUDIO_RATE}"
+            -map 0:v:0 -map 1:a:0 -shortest
+        )
+    fi
+
+    if ! ffmpeg -y -nostdin -loglevel error \
+        -i "$src" \
+        "${audio_map[@]}" \
+        -c:v libx264 -preset "$BLUESTREAM_PLAYLIST_VIDEO_PRESET" \
+        -crf "$BLUESTREAM_PLAYLIST_VIDEO_CRF" -profile:v "$BLUESTREAM_PLAYLIST_VIDEO_PROFILE" \
+        -pix_fmt yuv420p -vf "$vf" \
+        -r "$BLUESTREAM_PLAYLIST_FPS" -g "$gop" -keyint_min "$BLUESTREAM_PLAYLIST_FPS" -sc_threshold 0 \
+        -video_track_timescale "$BLUESTREAM_PLAYLIST_VIDEO_TIMESCALE" \
+        -c:a "$BLUESTREAM_PLAYLIST_AUDIO_CODEC" -b:a "$BLUESTREAM_PLAYLIST_AUDIO_BITRATE" \
+        -ar "$BLUESTREAM_PLAYLIST_AUDIO_RATE" -ac "$BLUESTREAM_PLAYLIST_AUDIO_CHANNELS" \
+        -movflags +faststart -avoid_negative_ts make_zero \
+        "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    # Fail closed: never publish an empty/incomplete artifact.
+    [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
+    chown root:"$BLUESTREAM_GROUP" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    chmod 0640 "$tmp" || { rm -f "$tmp"; return 1; }
+    # Atomic publication (same filesystem). The inode that was fully written
+    # is renamed into place; a concurrent/crashed conversion leaves only a
+    # temp file that cleanup removes.
+    mv -f "$tmp" "$art" || { rm -f "$tmp"; return 1; }
+
+    printf '%s' "$art"
+    return 0
+}
+
+# Prepare every playlist entry in order into PLAYLIST_ARTIFACTS. Fails closed
+# on the first un-prepareable entry (no partial playlist is ever started).
+playlist_prepare_all() {
+    PLAYLIST_ARTIFACTS=()
+    local f art
+    for f in "${PLAYLIST_FILES[@]}"; do
+        art="$(playlist_normalize_item "$f")" || return 1
+        [ -n "$art" ] && [ -s "$art" ] || return 1
+        PLAYLIST_ARTIFACTS+=( "$art" )
+    done
+    return 0
+}
+
+# Bounded cache cleanup (best-effort; never fatal). Always removes stale
+# conversion temp files. Fully-published artifacts are content-addressed, so
+# the cache cannot grow beyond one artifact per distinct media content; a
+# sweep only runs when artifacts outnumber managed media files (which can only
+# happen when media was removed or changed), and removes only artifacts whose
+# content key matches NO current managed media file.
+playlist_cache_prune() {
+    local cache="$BLUESTREAM_PLAYLIST_CACHE_DIR"
+    [ -d "$cache" ] || return 0
+    # Failed/incomplete conversions and leftovers from killed wrappers.
+    find "$cache" -maxdepth 1 -name '.tmp.*.mp4' -type f -mmin +60 -delete 2>/dev/null || true
+
+    local n_art n_media
+    n_art="$(find "$cache" -maxdepth 1 -name '*.mp4' -type f 2>/dev/null | wc -l)"
+    n_media="$(find "$BLUESTREAM_MEDIA_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)"
+    [ "${n_art:-0}" -le "${n_media:-0}" ] && return 0
+
+    local f key keyfile keyset=()
+    for f in "$BLUESTREAM_MEDIA_DIR"/*; do
+        [ -f "$f" ] || continue
+        key="$(playlist_cache_key "$(basename "$f")" 2>/dev/null)" || continue
+        case "$key" in ''|*[!0-9a-f]*) continue ;; esac
+        keyset+=( "$key" )
+    done
+    shopt -s nullglob
+    for keyfile in "$cache"/*.mp4; do
+        key="$(basename "$keyfile" .mp4)"
+        case " ${keyset[*]} " in
+            *" $key "*) ;;
+            *) rm -f "$keyfile" 2>/dev/null || true ;;
+        esac
+    done
+    shopt -u nullglob
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Concat file + ffmpeg argument construction
+#
+# The concat file lists ONLY prepared artifact paths (uniform baseline media),
+# so stream copy across the concat demuxer is stable. It is written by the
+# root runtime wrapper after playlist_prepare_all succeeds.
 # ---------------------------------------------------------------------------
 playlist_write_concat_file() {
     local concat_file="$BLUESTREAM_RUN_DIR/$PLAYLIST_NAME.concat.txt"
     mkdir -p "$BLUESTREAM_RUN_DIR" 2>/dev/null || return 1
     local tmp="$BLUESTREAM_RUN_DIR/.$PLAYLIST_NAME.concat.tmp.$$"
-    local f
-    : > "$tmp"
-    for f in "${PLAYLIST_FILES[@]}"; do
-        printf "file '%s'\n" "$BLUESTREAM_MEDIA_DIR/$f" >> "$tmp"
+    [ "${#PLAYLIST_ARTIFACTS[@]}" -gt 0 ] || return 1
+    local i art
+    : > "$tmp" || { rm -f "$tmp"; return 1; }
+    for i in "${!PLAYLIST_ARTIFACTS[@]}"; do
+        art="${PLAYLIST_ARTIFACTS[$i]}"
+        [ -s "$art" ] || { rm -f "$tmp"; return 1; }
+        printf "file '%s'\n" "$art" >> "$tmp" || { rm -f "$tmp"; return 1; }
     done
-    mv -f "$tmp" "$concat_file"
+    mv -f "$tmp" "$concat_file" || { rm -f "$tmp"; return 1; }
     chown "${BLUESTREAM_USER}:${BLUESTREAM_GROUP}" "$concat_file" 2>/dev/null || true
-    chmod 0640 "$concat_file"
+    chmod 0640 "$concat_file" || { rm -f "$concat_file"; return 1; }
     return 0
 }
 
@@ -244,7 +445,6 @@ playlist_start() {
     [ "${#PLAYLIST_FILES[@]}" -gt 0 ] || bs_die "Playlist '$name' has no entries"
     playlist_entries_valid || bs_die "One or more playlist entries are missing from managed media"
     bs_ensure_hls_dir playlist "$name" || bs_die "Could not prepare HLS output directory"
-    playlist_write_concat_file || bs_die "Could not prepare concat file"
     systemctl start "$(bs_unit playlist "$name")" || bs_die "Failed to start playlist '$name'"
     bs_ok "Playlist '$name' started"
 }
@@ -270,7 +470,6 @@ playlist_restart() {
     [ "${#PLAYLIST_FILES[@]}" -gt 0 ] || bs_die "Playlist '$name' has no entries"
     playlist_entries_valid || bs_die "One or more playlist entries are missing from managed media"
     bs_ensure_hls_dir playlist "$name" || bs_die "Could not prepare HLS output directory"
-    playlist_write_concat_file || bs_die "Could not prepare concat file"
     systemctl restart "$(bs_unit playlist "$name")" || bs_die "Failed to restart playlist '$name'"
     bs_ok "Playlist '$name' restarted"
 }

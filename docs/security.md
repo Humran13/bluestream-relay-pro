@@ -25,6 +25,8 @@ describes the model used by version 0.1.0.
 | `/var/lib/bluestream/media/` | root:bluestream-relay | 0750 |
 | imported media files | root:bluestream-relay | 0640 |
 | `/var/lib/bluestream/run/` | bluestream-relay:bluestream-relay | 0750 |
+| `/var/lib/bluestream/playlist-cache/` | root:bluestream-relay | 0750 |
+| playlist-cache artifacts | root:bluestream-relay | 0640 |
 | `/var/lib/bluestream/backups/` | root:root | 0700 |
 | `/var/www/bluestream/hls/` | www-data:www-data | 0750 |
 | HLS segments (created by nginx-rtmp) | www-data:www-data | 0644 |
@@ -73,7 +75,8 @@ Relay and playlist units apply:
 - `LockPersonality=true`
 - `RestrictSUIDSGID=true`
 - `RestrictRealtime=true`
-- Narrow `ReadWritePaths` (HLS output and the playlist run directory)
+- Narrow `ReadWritePaths` (HLS output and, for playlists, the run directory
+  and the normalization cache)
 
 These directives are compatible with systemd >= 231 (all supported Ubuntu
 releases).

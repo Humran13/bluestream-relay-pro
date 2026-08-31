@@ -111,7 +111,8 @@ Renewals are handled by certbot's systemd timers automatically.
 | --- | --- |
 | `/etc/bluestream/` | Root-only configuration (relays, playlists, server.conf) |
 | `/var/lib/bluestream/media/` | Managed media files |
-| `/var/lib/bluestream/run/` | Runtime concat files |
+| `/var/lib/bluestream/run/` | Runtime concat files and preparation markers |
+| `/var/lib/bluestream/playlist-cache/` | Normalized playlist artifacts (content-addressed cache) |
 | `/var/lib/bluestream/backups/` | Configuration backups |
 | `/var/www/bluestream/hls/` | HLS output (relay/ and playlist/) |
 | `/var/www/bluestream/web/` | Bundled hls.js player |

@@ -188,7 +188,8 @@ create_user_and_dirs() {
     chmod 0700 "$BLUESTREAM_ETC_DIR" "$BLUESTREAM_RELAY_CONF_DIR" "$BLUESTREAM_PLAYLIST_CONF_DIR"
 
     # Managed data tree.
-    mkdir -p "$BLUESTREAM_VAR_DIR" "$BLUESTREAM_MEDIA_DIR" "$BLUESTREAM_RUN_DIR" "$BLUESTREAM_BACKUP_DIR"
+    mkdir -p "$BLUESTREAM_VAR_DIR" "$BLUESTREAM_MEDIA_DIR" "$BLUESTREAM_RUN_DIR" "$BLUESTREAM_BACKUP_DIR" \
+        "$BLUESTREAM_PLAYLIST_CACHE_DIR"
     chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_VAR_DIR"
     # 0751: bluestream-relay group keeps read/traverse; other users (e.g.
     # bluestream-web reaching /var/lib/bluestream/web) get execute/traverse ONLY,
@@ -201,6 +202,11 @@ create_user_and_dirs() {
     chmod 0750 "$BLUESTREAM_RUN_DIR"
     chown root:root "$BLUESTREAM_BACKUP_DIR"
     chmod 0700 "$BLUESTREAM_BACKUP_DIR"
+    # Playlist normalization cache: the root playlist runtime wrapper publishes
+    # baseline artifacts here; the dropped-privilege FFmpeg concat process reads
+    # them through group access. Never writable by web or relay users.
+    chown root:"$BLUESTREAM_GROUP" "$BLUESTREAM_PLAYLIST_CACHE_DIR"
+    chmod 0750 "$BLUESTREAM_PLAYLIST_CACHE_DIR"
 
     # Web / HLS tree.
     mkdir -p "$BLUESTREAM_WWW_DIR" "$BLUESTREAM_WEB_DIR" "$BLUESTREAM_HLS_ROOT" \

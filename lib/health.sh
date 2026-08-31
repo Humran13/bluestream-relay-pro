@@ -58,6 +58,22 @@ health_state() {
             HEALTH_STATE="HEALTHY"
             HEALTH_DETAILS="fresh HLS segments being produced"
         else
+            # Playlist preparation (media normalization) happens inside the
+            # unit's root bootstrap BEFORE FFmpeg execs, so an active playlist
+            # may legitimately produce no HLS for a while. While a fresh
+            # prepare marker exists, report STARTING instead of STALE; the
+            # marker is cleared by run-playlist.sh once preparation completes.
+            if [ "$kind" = "playlist" ] && [ -f "$BLUESTREAM_RUN_DIR/$name.prepare" ]; then
+                local p_ts p_now p_age
+                p_ts="$(stat -c %Y "$BLUESTREAM_RUN_DIR/$name.prepare" 2>/dev/null || printf '0')"
+                p_now="$(date +%s)"
+                p_age=$(( p_now - p_ts ))
+                if [ "$p_age" -ge 0 ] && [ "$p_age" -le "$BLUESTREAM_PLAYLIST_PREPARE_TIMEOUT" ]; then
+                    HEALTH_STATE="STARTING"
+                    HEALTH_DETAILS="preparing playlist media (normalizing entries)"
+                    return 0
+                fi
+            fi
             local start_ts="" now age
             start_ts="$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null)"
             now="$(date +%s)"

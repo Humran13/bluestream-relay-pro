@@ -13,8 +13,8 @@ BLUESTREAM_PROBE_LOADED=1
 
 PROBE_OK=0
 PV_CODEC=""; PV_WIDTH=""; PV_HEIGHT=""; PV_FPS=""; PV_FPS_RAW=""
-PV_PIXFMT=""; PV_PROFILE=""; PV_BITRATE=""
-PA_CODEC=""; PA_SAMPLE_RATE=""; PA_CHANNELS=""; PA_CHANNEL_LAYOUT=""
+PV_PIXFMT=""; PV_PROFILE=""; PV_BITRATE=""; PV_TIME_BASE=""
+PA_CODEC=""; PA_SAMPLE_RATE=""; PA_CHANNELS=""; PA_CHANNEL_LAYOUT=""; PA_TIME_BASE=""
 PF_FORMAT=""; PF_DURATION=""; PF_BITRATE=""; PF_SIZE=""; PF_NB_STREAMS=""
 
 STREAM_COPY_RECOMMENDED="no"
@@ -23,8 +23,8 @@ STREAM_COPY_NOTE=""
 probe_reset() {
     PROBE_OK=0
     PV_CODEC=""; PV_WIDTH=""; PV_HEIGHT=""; PV_FPS=""; PV_FPS_RAW=""
-    PV_PIXFMT=""; PV_PROFILE=""; PV_BITRATE=""
-    PA_CODEC=""; PA_SAMPLE_RATE=""; PA_CHANNELS=""; PA_CHANNEL_LAYOUT=""
+    PV_PIXFMT=""; PV_PROFILE=""; PV_BITRATE=""; PV_TIME_BASE=""
+    PA_CODEC=""; PA_SAMPLE_RATE=""; PA_CHANNELS=""; PA_CHANNEL_LAYOUT=""; PA_TIME_BASE=""
     PF_FORMAT=""; PF_DURATION=""; PF_BITRATE=""; PF_SIZE=""; PF_NB_STREAMS=""
     STREAM_COPY_RECOMMENDED="no"
     STREAM_COPY_NOTE=""
@@ -62,11 +62,11 @@ probe_target() {
     local vout aout fout
     vout="$(ffprobe -v error -of default=noprint_wrappers=1 \
         -select_streams v:0 \
-        -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,pix_fmt,profile,bit_rate \
+        -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,pix_fmt,profile,bit_rate,time_base \
         "${opts[@]}" "$target" 2>/dev/null)" || return 1
     aout="$(ffprobe -v error -of default=noprint_wrappers=1 \
         -select_streams a:0 \
-        -show_entries stream=codec_name,sample_rate,channels,channel_layout \
+        -show_entries stream=codec_name,sample_rate,channels,channel_layout,time_base \
         "${opts[@]}" "$target" 2>/dev/null)" || return 1
     fout="$(ffprobe -v error -of default=noprint_wrappers=1 \
         -show_entries format=format_name,duration,bit_rate,size,nb_streams \
@@ -78,6 +78,7 @@ probe_target() {
     PV_PIXFMT="$(printf '%s\n' "$vout" | sed -n 's/^pix_fmt=//p' | head -n1)"
     PV_PROFILE="$(printf '%s\n' "$vout" | sed -n 's/^profile=//p' | head -n1)"
     PV_BITRATE="$(printf '%s\n' "$vout" | sed -n 's/^bit_rate=//p' | head -n1)"
+    PV_TIME_BASE="$(printf '%s\n' "$vout" | sed -n 's/^time_base=//p' | head -n1)"
 
     local rfr afr
     rfr="$(printf '%s\n' "$vout" | sed -n 's/^r_frame_rate=//p' | head -n1)"
@@ -92,6 +93,7 @@ probe_target() {
     PA_SAMPLE_RATE="$(printf '%s\n' "$aout" | sed -n 's/^sample_rate=//p' | head -n1)"
     PA_CHANNELS="$(printf '%s\n' "$aout" | sed -n 's/^channels=//p' | head -n1)"
     PA_CHANNEL_LAYOUT="$(printf '%s\n' "$aout" | sed -n 's/^channel_layout=//p' | head -n1)"
+    PA_TIME_BASE="$(printf '%s\n' "$aout" | sed -n 's/^time_base=//p' | head -n1)"
 
     PF_FORMAT="$(printf '%s\n' "$fout" | sed -n 's/^format_name=//p' | head -n1)"
     PF_DURATION="$(printf '%s\n' "$fout" | sed -n 's/^duration=//p' | head -n1)"

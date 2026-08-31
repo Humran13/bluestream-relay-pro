@@ -92,31 +92,55 @@ always rejected.
 | Health | `playlist health <name>` |
 | Logs | `playlist logs <name>` |
 
-## Compatibility checking
+## Compatibility and automatic normalization
 
-Before a playlist starts, every entry is probed with `ffprobe`. Clear
-warnings are shown when files differ in:
+Any ordinary uploadable media can go into a playlist: 1080p, 720p,
+low-resolution clips, different H.264 profiles, different frame rates,
+different MP4 time bases, AAC-LC or other FFmpeg-decodable audio, even
+video-only files. You do **not** need to re-encode files yourself.
 
-- video codec
-- resolution
-- frame rate
-- audio codec
-- sample rate
-- channel layout
+Before a playlist starts, the root runtime wrapper normalizes every entry
+into a managed cache (`/var/lib/bluestream/playlist-cache/`) using ONE fixed
+baseline:
 
-**Prefer predictable H.264 + AAC media** for playlist channels. Playback is
-performed with stream copy (`-c:v copy -c:a copy`); mismatched files are
-remuxed as-is and may glitch at boundaries or fail to play on some players.
+- Video: H.264 (Main), `yuv420p`, 1280x720 with aspect-ratio-preserving
+  scale + pad (never stretched), fixed 25 fps, deterministic 2s keyframes,
+  MP4 video time base 1/90000.
+- Audio: AAC-LC 128 kbps, 44100 Hz, stereo. Video-only files automatically
+  receive a silent stereo track so the playlist keeps one continuous audio
+  stream.
 
-The compatibility check never blocks a start by default; it warns clearly
-and lets the administrator decide.
+Only those uniform "playlist-ready" artifacts are handed to FFmpeg's concat
+demuxer, so heterogeneous media plays as one stable continuous loop with
+stream copy. Original media files are never modified.
+
+## Caching
+
+Normalized artifacts are content-addressed: the cache key is the SHA-256 of
+the managed-media file, never the filename.
+
+- An unchanged file reuses its cached artifact — no re-encode on every start.
+- A changed file hashes to a new key and produces a fresh artifact, so stale
+  cached content is never served.
+- Publication is atomic (temp file then rename); failed or incomplete
+  conversions are deleted and never appear as usable artifacts.
+- The cache is bounded (one artifact per distinct media content) and pruned
+  automatically of artifacts that no longer match any managed media file.
+- If any entry cannot be decoded/prepared, the playlist fails closed — it
+  never starts, never claims HEALTHY, and the original media is untouched.
+
+The cache directory `/var/lib/bluestream/playlist-cache/` is owned by
+`root:bluestream-relay` mode `0750`; artifacts are `root:bluestream-relay`
+`0640`, readable by the dropped-privilege FFmpeg process and by no one else.
 
 ## Technical notes
 
 - Playlists are played through FFmpeg's concat demuxer with `-stream_loop -1`
-  and `-re` (real-time rate).
+  and `-re` (real-time rate); the whole ordered playlist loops
+  (1 → 2 → ... → N → 1 → ...).
 - The concat file is generated at runtime in `/var/lib/bluestream/run/`
-  (readable by `bluestream-relay`) and rebuilt on every start/restart.
+  (readable by `bluestream-relay`) and lists only the prepared baseline
+  artifacts.
 - Playlist configuration is root-only (`/etc/bluestream/playlists/`, mode
   0600).
 - **Removing an entry from a playlist never deletes the media file.** Use
