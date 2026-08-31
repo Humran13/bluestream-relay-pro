@@ -1953,6 +1953,167 @@ class Gui1cWorkflowTests(unittest.TestCase):
             [("relay_create_media", "my-timer-stream", "promo.mp4")],
         )
 
+    # ------------------------------------------------------------------
+    # GUI-2A: upload progress UI + XHR outcome format (same pipeline).
+    # ------------------------------------------------------------------
+    def test_27_upload_form_has_progress_ui(self):
+        self._login()
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn('id="upload-progress"', html)
+        self.assertIn('role="progressbar"', html)
+        self.assertIn("aria-valuenow", html)
+        self.assertIn("processing media", html)
+
+    def test_28_upload_progress_uses_real_events_not_fake_timer(self):
+        template = (
+            Path(__file__).resolve().parent / "templates" / "media_upload.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("xhr.upload.onprogress", template)
+        # the percentage must come from the browser upload event, never a timer
+        self.assertNotIn("setInterval", template)
+        self.assertNotIn("Math.random", template)
+
+    def test_29_upload_progress_prevents_duplicate_submission(self):
+        template = (
+            Path(__file__).resolve().parent / "templates" / "media_upload.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("submitButton.disabled = true", template)
+        self.assertIn("fileInput.disabled = true", template)
+        self.assertIn("event.preventDefault", template)
+
+    def test_30_upload_ajax_success_returns_json(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            data={
+                "media": (io.BytesIO(b"video-data"), "promo.mp4"),
+                "csrf_token": self._csrf(),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 200)
+        payload = json.loads(rv.get_data(as_text=True))
+        self.assertEqual(
+            payload,
+            {"ok": True, "message": "Media 'promo.mp4' added to the library."},
+        )
+        # the same trusted pipeline ran unchanged
+        self.assertEqual(
+            self.engine.mutation_calls, [("media_import_staged", "promo.mp4")]
+        )
+        self.assertTrue((self.upload_dir / "promo.mp4").exists())
+
+    def test_31_upload_ajax_error_returns_safe_message(self):
+        self._login()
+        self.engine.mutation_payloads[("media_import_staged", "promo.mp4")] = EngineError(
+            "uploaded file is not recognized media", code="NOT_MEDIA"
+        )
+        rv = self.client.post(
+            "/console/media/upload",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            data={
+                "media": (io.BytesIO(b"garbage"), "promo.mp4"),
+                "csrf_token": self._csrf(),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 200)
+        payload = json.loads(rv.get_data(as_text=True))
+        self.assertFalse(payload["ok"])
+        self.assertIn("not recognized media", payload["message"])
+        self.assertNotIn("Traceback", rv.get_data(as_text=True))
+
+    def test_32_upload_ajax_oversized_rejected_with_safe_message(self):
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+            config={"WEB_UPLOAD_DIR": str(self.upload_dir), "MAX_UPLOAD_SIZE": 10},
+        )
+        client = app.test_client()
+        login(client)
+        token = get_csrf(client, path="/console/media/upload")
+        rv = client.post(
+            "/console/media/upload",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            data={"media": (io.BytesIO(b"x" * 100), "big.mp4"), "csrf_token": token},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 200)
+        payload = json.loads(rv.get_data(as_text=True))
+        self.assertFalse(payload["ok"])
+        self.assertIn("upload size limit", payload["message"])
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_33_upload_ajax_still_requires_csrf(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/upload",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            data={"media": (io.BytesIO(b"video-data"), "promo.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+
+class Gui2NavigationTests(unittest.TestCase):
+    """GUI-2B: active top-level navigation highlight (route-aware, child pages
+    keep their parent section highlighted via the active_section context)."""
+
+    ACTIVE_NAV_RE = re.compile(r'<a href="([^"]+)"[^>]*aria-current="page"[^>]*>')
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=FakeEngine(DEFAULT_PAYLOADS),
+        )
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _active_hrefs(self, path):
+        html = self.client.get(path).get_data(as_text=True)
+        return self.ACTIVE_NAV_RE.findall(html)
+
+    def test_01_dashboard_is_active_on_dashboard(self):
+        self.assertEqual(self._active_hrefs("/console/"), ["/console/"])
+
+    def test_02_streams_is_active_on_stream_pages(self):
+        self.assertEqual(self._active_hrefs("/console/streams"), ["/console/streams"])
+        self.assertEqual(
+            self._active_hrefs("/console/streams/create"), ["/console/streams"]
+        )
+
+    def test_03_media_is_active_on_media_pages(self):
+        self.assertEqual(self._active_hrefs("/console/media"), ["/console/media"])
+        self.assertEqual(
+            self._active_hrefs("/console/media/upload"), ["/console/media"]
+        )
+
+    def test_04_playlists_is_active_on_playlist_pages(self):
+        self.assertEqual(
+            self._active_hrefs("/console/playlists"), ["/console/playlists"]
+        )
+        self.assertEqual(
+            self._active_hrefs("/console/playlists/create"), ["/console/playlists"]
+        )
+
+    def test_05_exactly_one_nav_item_is_active(self):
+        for path in (
+            "/console/",
+            "/console/streams",
+            "/console/streams/create",
+            "/console/media",
+            "/console/media/upload",
+            "/console/playlists",
+            "/console/playlists/create",
+        ):
+            self.assertEqual(len(self._active_hrefs(path)), 1, path)
+
 
 class Gui1dPlaylistWorkflowTests(unittest.TestCase):
     """GUI-1D.1 playlist builder: friendly names, ordered media selection,

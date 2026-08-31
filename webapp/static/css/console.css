@@ -81,9 +81,24 @@ input[type="password"] {
 /* GUI-1C.1 navigation */
 .topbar-left { display: flex; align-items: center; gap: 1.25rem; }
 
-.nav { display: flex; gap: 0.75rem; }
-.nav a { color: #cfd8e3; text-decoration: none; font-size: 0.9rem; }
-.nav a:hover { color: #fff; }
+.nav { display: flex; gap: 0.5rem; }
+.nav a {
+  color: #cfd8e3;
+  text-decoration: none;
+  font-size: 0.9rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+}
+.nav a:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+
+/* GUI-2B: active top-level navigation section (route-aware, child pages map
+   to their parent section via the active_section template context). */
+.nav a.nav-active,
+.nav a[aria-current="page"] {
+  color: #fff;
+  font-weight: 600;
+  background: var(--accent);
+}
 
 .flash p { padding: 0.6rem 0.85rem; border-radius: 4px; margin: 0 0 0.75rem; }
 .flash .success { background: #e7f6ec; color: #1a7f37; border: 1px solid #b7e4c7; }
@@ -115,6 +130,25 @@ input[type="number"] {
 }
 
 input[type="file"] { display: block; margin: 0.25rem 0 0.75rem; }
+
+/* GUI-2A: real upload progress (percentages come from browser upload events) */
+.upload-progress { margin-top: 1rem; max-width: 30rem; }
+.upload-progress-track {
+  height: 0.75rem;
+  background: #e9ecf0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.upload-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.15s ease;
+}
+.upload-progress-status { font-size: 0.9rem; margin: 0.5rem 0 0; }
+.upload-progress-status.success { color: #1a7f37; font-weight: 600; }
 
 /* Status badges */
 .badge {

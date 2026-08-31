@@ -46,6 +46,7 @@ from flask import (
     Blueprint,
     current_app,
     flash,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -227,6 +228,38 @@ def _upload_error_message(exc: EngineError) -> str:
     if isinstance(exc, EngineError) and exc.code in _UPLOAD_ERROR_MESSAGES:
         return _UPLOAD_ERROR_MESSAGES[exc.code]
     return "Media import failed. Please try again."
+
+
+# ---------------------------------------------------------------------------
+# GUI-2A: media upload progress. The XHR progress UI posts to the SAME route
+# through the same authenticated pipeline (auth, CSRF, filename sanitization,
+# staging, empty/size checks, engine media_import_staged). Only the response
+# format differs: classic form posts keep the existing flash + Post/Redirect/
+# Get behavior unchanged; the progress UI receives the same safe outcome
+# message as JSON so it can report success/failure in place.
+# ---------------------------------------------------------------------------
+def _is_ajax_upload() -> bool:
+    """True when the request comes from the GUI-2A XHR progress upload."""
+    return request.headers.get("X-Requested-With") == "XMLHttpRequest"
+
+
+def _upload_respond(message: str, category: str, target):
+    """Return the upload outcome in the format the client expects.
+
+    * Classic multipart form posts: flash the safe message and redirect to
+      ``target`` (existing GUI-1C.1 behavior, unchanged).
+    * GUI-2A XHR progress uploads: return the same safe message as JSON. The
+      success flash is still set so the Media Library page shows the usual
+      confirmation after the progress UI navigates there; error flashes are
+      intentionally NOT set for XHR (the error is shown in place and the form
+      is re-enabled, so no stale flash is left in the session).
+    """
+    if _is_ajax_upload():
+        if category == "success":
+            flash(message, "success")
+        return jsonify(ok=category == "success", message=message)
+    flash(message, category)
+    return redirect(target)
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +463,7 @@ def create_app(state_dir=None, engine=None, config=None, production: bool = Fals
         )
 
     _register_csrf_protection(app)
+    _register_template_context(app)
     _register_security_headers(app)
     _register_error_handlers(app)
     _register_console_routes(app)
@@ -492,6 +526,33 @@ def _register_error_handlers(app: Flask) -> None:
         return render_template(
             "error.html", code=500, message="Internal server error."
         ), 500
+
+
+# ---------------------------------------------------------------------------
+# Template context: active top-level navigation section (GUI-2B). Child pages
+# map to their parent section so the header highlight stays correct everywhere
+# (e.g. the upload page and create-stream pages keep their parent highlighted).
+# ---------------------------------------------------------------------------
+_NAV_SECTIONS = {
+    "console.dashboard": "dashboard",
+    "console.streams": "streams",
+    "console.streams_create": "streams",
+    "console.streams_create_post": "streams",
+    "console.media": "media",
+    "console.media_upload": "media",
+    "console.media_upload_post": "media",
+    "console.media_create_stream": "media",
+    "console.media_create_stream_post": "media",
+    "console.playlists": "playlists",
+    "console.playlists_create": "playlists",
+    "console.playlists_create_post": "playlists",
+}
+
+
+def _register_template_context(app: Flask) -> None:
+    @app.context_processor
+    def _inject_active_section():
+        return {"active_section": _NAV_SECTIONS.get(request.endpoint or "", "")}
 
 
 # ---------------------------------------------------------------------------
@@ -750,19 +811,23 @@ def _register_console_routes(app: Flask) -> None:
             return redirect(url_for("console.login"))
         max_size = current_app.config.get("MAX_UPLOAD_SIZE", DEFAULT_MAX_UPLOAD_SIZE)
         if (request.content_length or 0) > max_size:
-            flash("File exceeds the upload size limit (%s)." % human_size(max_size), "error")
-            return redirect(url_for("console.media_upload"))
+            return _upload_respond(
+                "File exceeds the upload size limit (%s)." % human_size(max_size),
+                "error",
+                url_for("console.media_upload"),
+            )
         upload = request.files.get("media")
         if upload is None or not upload.filename:
-            flash("No file selected.", "error")
-            return redirect(url_for("console.media_upload"))
+            return _upload_respond(
+                "No file selected.", "error", url_for("console.media_upload")
+            )
         safe = sanitize_upload_filename(upload.filename)
         if safe is None:
-            flash(
+            return _upload_respond(
                 "Unsupported or unsafe file name. Allowed: .mp4 .mkv .mov .webm .m4v .ts.",
                 "error",
+                url_for("console.media_upload"),
             )
-            return redirect(url_for("console.media_upload"))
         upload_dir = Path(current_app.config.get("WEB_UPLOAD_DIR", PRODUCTION_UPLOAD_DIR))
         try:
             upload_dir.mkdir(parents=True, exist_ok=True)
@@ -770,34 +835,49 @@ def _register_console_routes(app: Flask) -> None:
             pass
         staged = upload_dir / safe
         if staged.exists():
-            flash("A file with that name is already being processed.", "error")
-            return redirect(url_for("console.media_upload"))
+            return _upload_respond(
+                "A file with that name is already being processed.",
+                "error",
+                url_for("console.media_upload"),
+            )
         try:
             upload.save(str(staged))
         except OSError as exc:
             current_app.logger.warning("upload save failed: %s", exc)
-            flash("Upload could not be stored. Please try again.", "error")
-            return redirect(url_for("console.media_upload"))
+            return _upload_respond(
+                "Upload could not be stored. Please try again.",
+                "error",
+                url_for("console.media_upload"),
+            )
         try:
             if staged.stat().st_size == 0:
                 staged.unlink()
-                flash("The uploaded file is empty.", "error")
-                return redirect(url_for("console.media_upload"))
+                return _upload_respond(
+                    "The uploaded file is empty.",
+                    "error",
+                    url_for("console.media_upload"),
+                )
         except OSError:
-            flash("Upload could not be stored. Please try again.", "error")
-            return redirect(url_for("console.media_upload"))
+            return _upload_respond(
+                "Upload could not be stored. Please try again.",
+                "error",
+                url_for("console.media_upload"),
+            )
         engine = current_app.extensions["bluestream_engine"]
         try:
             engine.media_import_staged(safe)
         except EngineError as exc:
             current_app.logger.warning("media_import_staged '%s' failed: %s", safe, exc)
             if exc.code == "MEDIA_EXISTS":
-                flash("A media file named '%s' already exists." % safe, "error")
+                message = "A media file named '%s' already exists." % safe
             else:
-                flash(_upload_error_message(exc), "error")
-            return redirect(url_for("console.media_upload"))
-        flash("Media '%s' added to the library." % safe, "success")
-        return redirect(url_for("console.media"))
+                message = _upload_error_message(exc)
+            return _upload_respond(message, "error", url_for("console.media_upload"))
+        return _upload_respond(
+            "Media '%s' added to the library." % safe,
+            "success",
+            url_for("console.media"),
+        )
 
     # ------------------------------------------------------------------
     # GUI-1C.1: create a local-file stream from an uploaded media item.

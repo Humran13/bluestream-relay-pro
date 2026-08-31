@@ -3,13 +3,107 @@
 {% block content %}
 <h1>Upload Media</h1>
 <section class="card">
-  <form method="post" action="{{ url_for('console.media_upload_post') }}" enctype="multipart/form-data">
+  <form id="upload-form" method="post" action="{{ url_for('console.media_upload_post') }}" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="media">Video file</label>
     <input type="file" id="media" name="media" required>
     <p class="muted">Allowed formats: .mp4 .mkv .mov .webm .m4v .ts. Upload limit: {{ human_size(max_upload) }}. Files are stored under a safe internal name automatically (e.g. &quot;5 Minute Timer.mp4&quot; becomes &quot;5-minute-timer.mp4&quot;).</p>
-    <button type="submit" class="btn">Upload</button>
+    <button type="submit" id="upload-submit" class="btn">Upload</button>
+
+    <div id="upload-progress" class="upload-progress" hidden>
+      <div id="upload-progress-bar" class="upload-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="upload-progress-fill" class="upload-progress-fill"></div>
+      </div>
+      <p id="upload-progress-status" class="upload-progress-status">Uploading&hellip; 0%</p>
+    </div>
   </form>
 </section>
 <p><a href="{{ url_for('console.media') }}">&laquo; Back to Media Library</a></p>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("upload-form");
+  var fileInput = document.getElementById("media");
+  var submitButton = document.getElementById("upload-submit");
+  var progress = document.getElementById("upload-progress");
+  var progressBar = document.getElementById("upload-progress-bar");
+  var progressFill = document.getElementById("upload-progress-fill");
+  var progressStatus = document.getElementById("upload-progress-status");
+  var csrfToken = form.querySelector('input[name="csrf_token"]').value;
+
+  function setProgress(percent, text) {
+    progressFill.style.width = percent + "%";
+    progressBar.setAttribute("aria-valuenow", String(percent));
+    progressStatus.textContent = text;
+    progressStatus.className = "upload-progress-status";
+  }
+
+  function fail(message) {
+    submitButton.disabled = false;
+    fileInput.disabled = false;
+    progressStatus.textContent = message;
+    progressStatus.className = "upload-progress-status error";
+    submitButton.focus();
+  }
+
+  function succeed(message) {
+    setProgress(100, message);
+    progressStatus.className = "upload-progress-status success";
+    // Show the success state, then leave for the Media Library (as today).
+    window.setTimeout(function () {
+      window.location.href = "{{ url_for('console.media') }}";
+    }, 600);
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!fileInput.files || fileInput.files.length === 0) {
+      return;
+    }
+    // Prevent duplicate submissions while one upload is active.
+    submitButton.disabled = true;
+    fileInput.disabled = true;
+    progress.hidden = false;
+    setProgress(0, "Uploading\u2026 0%");
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", form.getAttribute("action"));
+    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+    xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+
+    // Real percentage from the browser's upload events - never a fake timer.
+    xhr.upload.onprogress = function (event) {
+      if (event.lengthComputable && event.total > 0) {
+        var percent = Math.floor((event.loaded / event.total) * 100);
+        setProgress(percent, "Uploading\u2026 " + percent + "%");
+      }
+    };
+    // All bytes are on the server; it is still validating/importing the file.
+    xhr.upload.onload = function () {
+      setProgress(100, "Upload complete \u2014 processing media\u2026");
+    };
+    xhr.onload = function () {
+      var result = null;
+      try {
+        result = JSON.parse(xhr.responseText);
+      } catch (e) {
+        result = null;
+      }
+      if (xhr.status === 200 && result && result.ok) {
+        succeed(result.message || "Upload complete.");
+      } else {
+        fail((result && result.message) || "Upload failed. Please try again.");
+      }
+    };
+    xhr.onerror = function () {
+      fail("Upload failed. Please try again.");
+    };
+
+    var data = new FormData();
+    data.append("media", fileInput.files[0]);
+    xhr.send(data);
+  });
+})();
+</script>
 {% endblock %}

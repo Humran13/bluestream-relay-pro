@@ -12,10 +12,10 @@
       <span class="brand">BlueStream Relay Pro</span>
       {% if session.get('authenticated') %}
       <nav class="nav">
-        <a href="{{ url_for('console.dashboard') }}">Dashboard</a>
-        <a href="{{ url_for('console.streams') }}">Streams</a>
-        <a href="{{ url_for('console.media') }}">Media Library</a>
-        <a href="{{ url_for('console.playlists') }}">Playlists</a>
+        <a href="{{ url_for('console.dashboard') }}"{% if active_section == 'dashboard' %} class="nav-active" aria-current="page"{% endif %}>Dashboard</a>
+        <a href="{{ url_for('console.streams') }}"{% if active_section == 'streams' %} class="nav-active" aria-current="page"{% endif %}>Streams</a>
+        <a href="{{ url_for('console.media') }}"{% if active_section == 'media' %} class="nav-active" aria-current="page"{% endif %}>Media Library</a>
+        <a href="{{ url_for('console.playlists') }}"{% if active_section == 'playlists' %} class="nav-active" aria-current="page"{% endif %}>Playlists</a>
       </nav>
       {% endif %}
     </div>
