@@ -40,6 +40,16 @@ playlist_load_config "$NAME" || exit 1
 # private local RTMP socket and never writes the HLS filesystem directly.
 mkdir -p "$RUN_DIR" || exit 1
 
+# GUI-3A race safety: serialize cache preparation against the manual
+# "Clear Unused Cache" web operation. Both hold a shared flock on
+# $BLUESTREAM_RUN_DIR/.cache.lock, so cleanup can never delete an artifact
+# while this playlist is preparing/normalizing or between concat-write and
+# FFmpeg exec (the flock is released right before the exec below).
+mkdir -p "$BLUESTREAM_RUN_DIR" 2>/dev/null || exit 1
+command -v flock >/dev/null 2>&1 || exit 1
+exec 9>>"$BLUESTREAM_RUN_DIR/.cache.lock" || exit 1
+flock 9 || exit 1
+
 # Managed playlist normalization cache. Defensive create + ownership fix so an
 # upgraded host that never re-ran the installer still fails safely: the
 # wrapper must be able to write artifacts as root, and the dropped-privilege
@@ -91,6 +101,12 @@ fi
 # Preparation is complete: HLS output begins once FFmpeg publishes. Clear the
 # marker so health transitions to HEALTHY/STARTING as normal.
 rm -f "$RUN_DIR/$NAME.prepare" 2>/dev/null || true
+
+# Release the GUI-3A cache lock: preparation is done, so a manual cache
+# cleanup may now run. This playlist's artifacts stay protected while it runs
+# because its unit is active and its concat file lists exactly those artifacts.
+flock -u 9 2>/dev/null || true
+exec 9>&- 2>/dev/null || true
 
 # Final umask so HLS segments are 0640 (group-readable by nginx).
 umask 0027

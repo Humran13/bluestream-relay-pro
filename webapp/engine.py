@@ -23,7 +23,15 @@ import subprocess
 from pathlib import Path
 
 ALLOWED_OPERATIONS = frozenset(
-    {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+    {
+        "version",
+        "snapshot",
+        "relay_list",
+        "playlist_list",
+        "media_list",
+        # GUI-3A: read-only playlist cache statistics (no arguments).
+        "playlist_cache_status",
+    }
 )
 
 # GUI-1B.1/GUI-1C.1: exactly these controlled write operations, and nothing else.
@@ -41,6 +49,9 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
         "playlist_create",
+        # GUI-3A: conservative manual playlist-cache cleanup. Takes NO
+        # arguments; the privileged engine derives the protected set itself.
+        "playlist_cache_clear_unused",
     }
 )
 
@@ -327,6 +338,15 @@ class EngineClient:
                     )
                 seen.add(media)
             return list(values)
+        if operation == "playlist_cache_clear_unused":
+            # GUI-3A: fixed operation, NO browser-supplied path or filename.
+            # Any argument is rejected before a subprocess is started.
+            if values:
+                raise EngineError(
+                    "playlist cache cleanup takes no arguments",
+                    code="TOO_MANY_ARGUMENTS",
+                )
+            return []
         raise EngineError("unsupported operation: %r" % operation)
 
     # ------------------------------------------------------------------
@@ -372,3 +392,16 @@ class EngineClient:
         basenames; the order is preserved exactly as the playback order.
         """
         return self._mutation("playlist_create", name, *items)
+
+    # ------------------------------------------------------------------
+    # GUI-3A: playlist cache visibility + conservative manual cleanup.
+    # Fixed operations with NO arguments; the privileged engine derives the
+    # protected set internally (never from browser-supplied paths/filenames).
+    # ------------------------------------------------------------------
+    def playlist_cache_status(self):
+        """Return {total_bytes, artifact_count, protected_*, reclaimable_*}."""
+        return self.call("playlist_cache_status")
+
+    def playlist_cache_clear_unused(self):
+        """Delete reclaimable playlist-cache artifacts; return freed bytes/count."""
+        return self._mutation("playlist_cache_clear_unused")

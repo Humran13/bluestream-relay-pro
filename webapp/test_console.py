@@ -104,6 +104,12 @@ class FakeEngine:
     def playlist_create(self, name, items):
         return self._mutation("playlist_create", name, *items)
 
+    def playlist_cache_status(self):
+        return self.call("playlist_cache_status")
+
+    def playlist_cache_clear_unused(self):
+        return self._mutation("playlist_cache_clear_unused")
+
 
 def make_state(tmpdir, password=ADMIN_PASSWORD):
     state = Path(tmpdir) / "state"
@@ -446,6 +452,7 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.playlists",
                 "console.playlists_create",
                 "console.playlists_create_post",
+                "console.playlists_cache_clear",
             },
         )
         # only the expected HTTP methods
@@ -622,7 +629,14 @@ class EngineClientTests(unittest.TestCase):
         self.assertEqual(
             ALLOWED_OPERATIONS,
             frozenset(
-                {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+                {
+                    "version",
+                    "snapshot",
+                    "relay_list",
+                    "playlist_list",
+                    "media_list",
+                    "playlist_cache_status",
+                }
             ),
         )
 
@@ -760,6 +774,7 @@ class EngineClientTests(unittest.TestCase):
                     "relay_create_media",
                     "media_import_staged",
                     "playlist_create",
+                    "playlist_cache_clear_unused",
                 }
             ),
         )
@@ -2280,6 +2295,187 @@ class Gui2NavigationTests(unittest.TestCase):
             "/console/playlists/create",
         ):
             self.assertEqual(len(self._active_hrefs(path)), 1, path)
+
+
+class Gui3PlaylistCacheTests(unittest.TestCase):
+    """GUI-3A: playlist cache visibility + manual clear (auth/CSRF/PRG).
+
+    Uses a FakeEngine so no privileged bridge call is ever made. The page-level
+    cache card, POST-only clear route, auth/CSRF, safe success/nothing/failure
+    messages, and status-failure resilience are exercised end to end.
+    """
+
+    CACHE_STATUS = {
+        "total_bytes": "1468006400",  # 1.4 GiB
+        "artifact_count": "6",
+        "protected_bytes": "650117120",  # 620 MiB
+        "protected_count": "3",
+        "reclaimable_bytes": "817889280",  # 780 MiB
+        "reclaimable_count": "3",
+    }
+
+    EMPTY_CACHE_STATUS = {
+        "total_bytes": "0",
+        "artifact_count": "0",
+        "protected_bytes": "0",
+        "protected_count": "0",
+        "reclaimable_bytes": "0",
+        "reclaimable_count": "0",
+    }
+
+    def _make_app(self, cache_status=None, cache_status_payload=True):
+        payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [],
+            "playlist_list": [],
+            "media_list": [],
+        }
+        if cache_status_payload:
+            payloads["playlist_cache_status"] = cache_status or self.CACHE_STATUS
+        self.engine = FakeEngine(payloads)
+        return app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+        )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.app = self._make_app()
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _login(self):
+        login(self.client)
+
+    def _csrf(self, path="/console/playlists"):
+        return get_csrf(self.client, path=path)
+
+    def _clear_post(self, **kwargs):
+        data = kwargs.pop("data", {})
+        data.setdefault("csrf_token", self._csrf())
+        return self.client.post(
+            "/console/playlists/cache/clear", data=data, **kwargs
+        )
+
+    def test_01_playlists_page_renders_cache_card(self):
+        self._login()
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Playlist Cache", html)
+        self.assertIn("1.4 GiB", html)
+        self.assertIn("Artifacts", html)
+        self.assertIn("Clear Unused Cache", html)
+        self.assertIn("/console/playlists/cache/clear", html)
+        # internal filesystem paths are never exposed to the browser
+        self.assertNotIn("playlist-cache", html)
+
+    def test_02_empty_cache_renders_clean_zero_state_and_disabled_button(self):
+        self.app = self._make_app(cache_status=self.EMPTY_CACHE_STATUS)
+        self.client = self.app.test_client()
+        self._login()
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("0 B", html)
+        self.assertIn("disabled", html)
+
+    def test_03_get_cannot_trigger_clear(self):
+        self._login()
+        rv = self.client.get("/console/playlists/cache/clear")
+        self.assertEqual(rv.status_code, 405)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_04_clear_requires_authentication(self):
+        rv = self.client.post(
+            "/console/playlists/cache/clear",
+            data={"csrf_token": get_csrf(self.client)},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_05_clear_requires_csrf(self):
+        self._login()
+        rv = self.client.post(
+            "/console/playlists/cache/clear",
+            data={},
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_06_clear_success_reports_safe_message(self):
+        self._login()
+        self.engine.mutation_payloads[("playlist_cache_clear_unused",)] = {
+            "operation": "playlist_cache_clear_unused",
+            "freed_bytes": "817889280",
+            "freed_count": "3",
+        }
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/playlists", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls, [("playlist_cache_clear_unused",)]
+        )
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Cleared 780.0 MiB from the playlist cache (3 files).", html)
+
+    def test_07_clear_nothing_to_clear_message(self):
+        self._login()
+        # no mutation payload -> FakeEngine returns freed count 0
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls, [("playlist_cache_clear_unused",)]
+        )
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("No unused playlist cache files to clear.", html)
+
+    def test_08_clear_engine_failure_uses_safe_message(self):
+        self._login()
+        self.engine.mutation_payloads[("playlist_cache_clear_unused",)] = EngineError(
+            "privileged detail", code="CACHE_CLEAR_FAILED"
+        )
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Playlist cache could not be cleared safely.", html)
+        self.assertNotIn("privileged detail", html)
+        self.assertNotIn("Traceback", html)
+
+    def test_09_status_failure_does_not_break_page(self):
+        # FakeEngine without a playlist_cache_status payload raises EngineError
+        self.app = self._make_app(cache_status_payload=False)
+        self.client = self.app.test_client()
+        self._login()
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertEqual(html.count("Playlist Cache"), 1)
+        self.assertIn("temporarily unavailable", html)
+        self.assertIn("Create Playlist", html)
+
+    def test_10_status_values_are_normalized_to_ints(self):
+        self.assertEqual(
+            app_module._normalize_cache_status(self.CACHE_STATUS),
+            {
+                "total_bytes": 1468006400,
+                "artifact_count": 6,
+                "protected_bytes": 650117120,
+                "protected_count": 3,
+                "reclaimable_bytes": 817889280,
+                "reclaimable_count": 3,
+            },
+        )
+        self.assertEqual(app_module._normalize_cache_status(None), {})
+        self.assertEqual(
+            app_module._normalize_cache_status({"total_bytes": "junk"}),
+            {
+                "total_bytes": 0,
+                "artifact_count": 0,
+                "protected_bytes": 0,
+                "protected_count": 0,
+                "reclaimable_bytes": 0,
+                "reclaimable_count": 0,
+            },
+        )
 
 
 class Gui1dPlaylistWorkflowTests(unittest.TestCase):

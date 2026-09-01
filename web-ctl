@@ -38,9 +38,16 @@
 #
 #   web-ctl playlist_create <name> <mediafile...>
 #
-# The six lifecycle actions and the create/import operations above are the ONLY
-# write operations at any layer.  No configuration editing, deletion, or
-# user-management operations exist beyond these.
+# GUI-3A playlist cache management (fixed operations, NO browser-supplied path
+# or filename; operate ONLY on the fixed managed playlist cache root):
+#
+#   web-ctl playlist_cache_status          (read-only cache totals/protected)
+#   web-ctl playlist_cache_clear_unused    (delete only reclaimable artifacts)
+#
+# The six lifecycle actions, the create/import operations above, and the two
+# cache operations are the ONLY write operations at any layer.  No
+# configuration editing, deletion, or user-management operations exist beyond
+# these.
 #
 # Output contract:
 #   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
@@ -365,6 +372,39 @@ wc_op_playlist_create() {
 }
 
 # ---------------------------------------------------------------------------
+# GUI-3A: playlist cache visibility + conservative manual cleanup. Both
+# operations take NO arguments (dispatch enforces argc == 1), so no path or
+# filename can ever reach the privileged engine from the browser. The engine
+# derives the protected set internally from live systemd state + concat files.
+# ---------------------------------------------------------------------------
+wc_op_playlist_cache_status() {
+    if ! playlist_cache_scan status 2>/dev/null; then
+        wc_fail "playlist cache status is unavailable" "CACHE_STATUS_FAILED"
+    fi
+    {
+        printf 'total_bytes\0%d\0'        "$CACHE_TOTAL_BYTES"
+        printf 'artifact_count\0%d\0'     "$CACHE_ARTIFACT_COUNT"
+        printf 'protected_bytes\0%d\0'    "$CACHE_PROTECTED_BYTES"
+        printf 'protected_count\0%d\0'    "$CACHE_PROTECTED_COUNT"
+        printf 'reclaimable_bytes\0%d\0'  "$CACHE_RECLAIMABLE_BYTES"
+        printf 'reclaimable_count\0%d\0'  "$CACHE_RECLAIMABLE_COUNT"
+    } | wc_json object
+}
+
+wc_op_playlist_cache_clear_unused() {
+    # Holds the shared cache flock for the whole compute+delete inside
+    # playlist_cache_scan, so playlist preparation can never interleave.
+    if ! playlist_cache_scan clear 2>/dev/null; then
+        wc_fail "playlist cache could not be cleared safely" "CACHE_CLEAR_FAILED"
+    fi
+    {
+        printf 'operation\0%s\0'  "playlist_cache_clear_unused"
+        printf 'freed_bytes\0%d\0' "$CACHE_FREED_BYTES"
+        printf 'freed_count\0%d\0' "$CACHE_FREED_COUNT"
+    } | wc_json object
+}
+
+# ---------------------------------------------------------------------------
 # Controlled lifecycle operations (GUI-1B.1): exactly one validated target.
 # ---------------------------------------------------------------------------
 wc_op_lifecycle() {
@@ -425,6 +465,18 @@ wc_dispatch() {
             [ "$argcount" -eq 1 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
             wc_op_media_list
             ;;
+        playlist_cache_status|playlist_cache_clear_unused)
+            # GUI-3A: fixed operations with NO arguments (shell argv count == 1).
+            # No path or filename can ever reach the privileged engine.
+            if [ "$argcount" -ne 1 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            if [ "$operation" = "playlist_cache_status" ]; then
+                wc_op_playlist_cache_status
+            else
+                wc_op_playlist_cache_clear_unused
+            fi
+            ;;
         relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart)
             # Lifecycle operations accept EXACTLY operation + one target
             # (shell argv count == 2).  An explicitly empty third argument
@@ -476,7 +528,7 @@ wc_dispatch() {
             esac
             ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

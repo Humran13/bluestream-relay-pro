@@ -299,6 +299,31 @@ def _playlist_error_message(exc: EngineError, fallback: str) -> str:
     return fallback
 
 
+# GUI-3A: the web-ctl JSON helper serializes all values as strings; the console
+# normalizes the six cache-stat fields to ints before rendering/persisting.
+_CACHE_STATUS_FIELDS = (
+    "total_bytes",
+    "artifact_count",
+    "protected_bytes",
+    "protected_count",
+    "reclaimable_bytes",
+    "reclaimable_count",
+)
+
+
+def _cache_status_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_cache_status(status) -> dict:
+    if not isinstance(status, dict):
+        return {}
+    return {field: _cache_status_int(status.get(field)) for field in _CACHE_STATUS_FIELDS}
+
+
 def _parse_order(value) -> int | None:
     """Return a positive integer for a submitted order field, else None."""
     if not isinstance(value, str):
@@ -601,6 +626,7 @@ _NAV_SECTIONS = {
     "console.playlists": "playlists",
     "console.playlists_create": "playlists",
     "console.playlists_create_post": "playlists",
+    "console.playlists_cache_clear": "playlists",
 }
 
 
@@ -1048,10 +1074,22 @@ def _register_console_routes(app: Flask) -> None:
         for item in items:
             if isinstance(item, dict):
                 item["hls_url"] = playlist_hls_url(snapshot, item.get("name") or "")
+        # GUI-3A: playlist cache visibility. A status failure must never break
+        # the page - it renders a neutral unavailable state instead.
+        cache_status = {}
+        cache_unavailable = False
+        try:
+            cache_status = _normalize_cache_status(engine.playlist_cache_status())
+        except EngineError as exc:
+            current_app.logger.warning("engine playlist_cache_status unavailable: %s", exc)
+            cache_unavailable = True
         return render_template(
             "playlists.html",
             playlists=items,
             engine_unavailable=bool(errors),
+            cache_status=cache_status,
+            cache_unavailable=cache_unavailable,
+            human_size=human_size,
         )
 
     # ------------------------------------------------------------------
@@ -1105,6 +1143,36 @@ def _register_console_routes(app: Flask) -> None:
             "Playlist '%s' created. It is stopped - press Start to begin." % name,
             "success",
         )
+        return redirect(url_for("console.playlists"))
+
+    # ------------------------------------------------------------------
+    # GUI-3A: manual playlist-cache cleanup (POST only, auth + CSRF, PRG).
+    # The engine operation takes NO arguments, so the browser can never
+    # supply a path or filename to the privileged cleanup.
+    # ------------------------------------------------------------------
+    @console.route("/playlists/cache/clear", methods=["POST"])
+    def playlists_cache_clear():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            result = engine.playlist_cache_clear_unused()
+        except EngineError as exc:
+            current_app.logger.warning("playlist_cache_clear_unused failed: %s", exc)
+            flash("Playlist cache could not be cleared safely.", "error")
+            return redirect(url_for("console.playlists"))
+        freed_bytes = freed_count = 0
+        if isinstance(result, dict):
+            freed_bytes = _cache_status_int(result.get("freed_bytes"))
+            freed_count = _cache_status_int(result.get("freed_count"))
+        if freed_count > 0:
+            flash(
+                "Cleared %s from the playlist cache (%d files)."
+                % (human_size(freed_bytes), freed_count),
+                "success",
+            )
+        else:
+            flash("No unused playlist cache files to clear.", "success")
         return redirect(url_for("console.playlists"))
 
     app.register_blueprint(console)

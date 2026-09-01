@@ -53,4 +53,21 @@
   <p class="muted">No playlists yet. <a href="{{ url_for('console.playlists_create') }}">Create your first playlist</a>.</p>
 </section>
 {% endif %}
+
+<section class="card">
+  <h2>Playlist Cache</h2>
+  {% if cache_unavailable %}
+  <p class="muted">Playlist cache information is temporarily unavailable.</p>
+  {% else %}
+  <dl class="grid">
+    <dt>Cached media</dt><dd>{{ human_size(cache_status.get('total_bytes', 0)) }}</dd>
+    <dt>Artifacts</dt><dd>{{ cache_status.get('artifact_count', 0) }}</dd>
+    <dt>Reclaimable</dt><dd>{{ human_size(cache_status.get('reclaimable_bytes', 0)) }}</dd>
+  </dl>
+  <form method="post" action="{{ url_for('console.playlists_cache_clear') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn" {% if cache_status.get('reclaimable_count', 0) < 1 %}disabled{% endif %}>Clear Unused Cache</button>
+  </form>
+  {% endif %}
+</section>
 {% endblock %}

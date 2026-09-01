@@ -441,7 +441,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 for word in forbidden:
                     self.assertNotIn(word, lower)
 
-    def test_23_engineclient_operations_exactly_five(self):
+    def test_23_engineclient_operations_exactly_six(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -450,11 +450,18 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
         self.assertEqual(
             ALLOWED_OPERATIONS,
             frozenset(
-                {"version", "snapshot", "relay_list", "playlist_list", "media_list"}
+                {
+                    "version",
+                    "snapshot",
+                    "relay_list",
+                    "playlist_list",
+                    "media_list",
+                    "playlist_cache_status",
+                }
             ),
         )
 
-    def test_24_engineclient_mutation_operations_exactly_ten(self):
+    def test_24_engineclient_mutation_operations_exactly_eleven(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -469,6 +476,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "relay_create_url", "relay_create_media", "media_import_staged",
                     # GUI-1D.1: fixed-argv playlist creation
                     "playlist_create",
+                    # GUI-3A: manual playlist-cache cleanup (no arguments)
+                    "playlist_cache_clear_unused",
                 }
             ),
         )
@@ -477,7 +486,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
             "relay_create_url", "relay_create_media", "media_import_staged",
-            "playlist_create",
+            "playlist_create", "playlist_cache_clear_unused",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for name in (
@@ -781,6 +790,269 @@ printf '%s\\n' "$HEALTH_STATE"
         h = repo_text("lib/health.sh")
         self.assertIn('systemctl show -p Result --value "$unit"', h)
         self.assertIn('[ "$result" = "success" ]', h)
+
+
+class PlaylistCacheStaticTests(unittest.TestCase):
+    """GUI-3A static wiring: web-ctl fixed operations, argc guards, shared
+    flock serialization, and engine allowlist symmetry."""
+
+    def test_01_webctl_has_fixed_cache_operations(self):
+        w = repo_text("web-ctl")
+        self.assertIn("playlist_cache_status", w)
+        self.assertIn("playlist_cache_clear_unused", w)
+        # both cache operations reject any argument (dispatch argc == 1), so no
+        # browser-supplied path/filename can ever reach the privileged engine
+        self.assertIn('[ "$argcount" -ne 1 ]', w)
+        self.assertIn("unexpected extra argument", w)
+
+    def test_02_webctl_clear_takes_no_path_and_never_recurses(self):
+        w = repo_text("web-ctl")
+        self.assertIn("wc_op_playlist_cache_clear_unused", w)
+        self.assertIn("CACHE_CLEAR_FAILED", w)
+        self.assertNotIn("find ", w)
+        self.assertNotIn("rm -rf", w)
+
+    def test_03_playlist_sh_has_scan_and_artifact_validation(self):
+        p = repo_text("lib/playlist.sh")
+        self.assertIn("playlist_cache_scan", p)
+        self.assertIn("playlist_cache_protected_keys", p)
+        self.assertIn("bs_valid_cache_artifact", p)
+        # digits-only 64-hex validation: anything else is skipped, never deleted
+        self.assertIn("*[!0-9a-f]*", p)
+        self.assertIn('"${#n}" -eq 64', p)
+        self.assertIn('rm -f "$f" 2>/dev/null', p)
+
+    def test_04_clear_serializes_via_shared_flock(self):
+        p = repo_text("lib/playlist.sh")
+        r = repo_text("config/systemd/run-playlist.sh")
+        self.assertIn("playlist_cache_lock", p)
+        self.assertIn(".cache.lock", p)
+        self.assertIn("flock 9", p)
+        self.assertIn(".cache.lock", r)
+        self.assertIn("flock 9", r)
+
+    def test_05_scan_operates_only_on_fixed_cache_root(self):
+        p = repo_text("lib/playlist.sh")
+        self.assertIn('"$cache"/*.mp4', p)
+        self.assertIn("BLUESTREAM_PLAYLIST_CACHE_DIR", p)
+        # never deletes the cache directory itself or the media library
+        self.assertNotIn('rm -rf "$cache"', p)
+        self.assertNotIn("rm -rf \"$BLUESTREAM_MEDIA_DIR\"", p)
+
+    def test_06_engine_rejects_arguments_for_clear_unused(self):
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from webapp.engine import EngineClient, EngineError
+
+        client = EngineClient(production=True)
+        with self.assertRaises(EngineError):
+            client._validate_mutation_values("playlist_cache_clear_unused", ("x",))
+        self.assertEqual(
+            client._validate_mutation_values("playlist_cache_clear_unused", ()), []
+        )
+
+
+class PlaylistCacheManagementTests(unittest.TestCase):
+    """Behavioral tests for the GUI-3A playlist-cache scan/clear engine logic.
+
+    Runs the real bash playlist_cache_scan()/playlist_cache_protected_keys()
+    against a sandboxed temp tree (conf/media/cache/run) with a mocked
+    systemctl. The flock primitive is a util-linux host tool and is exercised
+    statically; here it is stubbed so the deterministic protected-set and
+    deletion logic is what is tested.
+    """
+
+    _FAKE_SYSTEMCTL = """#!/usr/bin/env bash
+case "$1" in
+    is-active)  printf '%s\\n' '__IS_ACTIVE__' ;;
+    is-enabled) printf '%s\\n' 'disabled' ;;
+    *) exit 0 ;;
+esac
+"""
+
+    _HARNESS = r"""#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+bin="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+scenario="$3"
+export PATH="$bin:$PATH"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+conf="$tmp/conf"
+media="$tmp/media"
+cache="$tmp/cache"
+run="$tmp/run"
+mkdir -p "$conf" "$media" "$cache" "$run"
+# shellcheck source=lib/common.sh
+. "$repo/lib/common.sh"
+# shellcheck source=lib/probe.sh
+. "$repo/lib/probe.sh"
+# shellcheck source=lib/playlist.sh
+. "$repo/lib/playlist.sh"
+BLUESTREAM_PLAYLIST_CONF_DIR="$conf"
+BLUESTREAM_MEDIA_DIR="$media"
+BLUESTREAM_PLAYLIST_CACHE_DIR="$cache"
+BLUESTREAM_RUN_DIR="$run"
+# flock is a util-linux host tool (always present with setpriv in production);
+# the lock is verified statically, so stub it here to exercise the scan/delete
+# logic in this sandbox.
+playlist_cache_lock() { return 0; }
+playlist_cache_unlock() { return 0; }
+
+printf 'A' > "$media/a.mp4"
+printf 'B' > "$media/b.mp4"
+printf 'C' > "$media/c.mp4"
+key_a="$(playlist_cache_key a.mp4)" || exit 1
+key_b="$(playlist_cache_key b.mp4)" || exit 1
+key_c="$(playlist_cache_key c.mp4)" || exit 1
+[ -n "$key_a" ] && [ -n "$key_b" ] && [ -n "$key_c" ] || exit 1
+
+case "$scenario" in
+    empty)
+        rmdir "$cache"
+        ;;
+    unused)
+        printf 'AA' > "$cache/$key_a.mp4"
+        printf 'BBBB' > "$cache/$key_b.mp4"
+        ;;
+    running|clear)
+        printf 'AA' > "$cache/$key_a.mp4"
+        printf 'BBBB' > "$cache/$key_b.mp4"
+        printf 'CCCCCC' > "$cache/$key_c.mp4"
+        printf 'NAME=loop\nENABLED=no\na.mp4\nb.mp4\n' > "$conf/loop.playlist"
+        printf "file '%s'\nfile '%s'\n" "$cache/$key_a.mp4" "$cache/$key_b.mp4" \
+            > "$run/loop.concat.txt"
+        # extras that must NEVER be counted or deleted
+        printf 'DD' > "$cache/nothex.mp4"
+        mkdir "$cache/dir.mp4"
+        printf 'target' > "$tmp/target"
+        ln -s "$tmp/target" "$cache/symlink.mp4" 2>/dev/null || true
+        printf 'temp' > "$cache/.tmp.stale.1.mp4"
+        ;;
+    preparing)
+        printf 'AA' > "$cache/$key_a.mp4"
+        printf 'BBBB' > "$cache/$key_b.mp4"
+        printf 'CCCCCC' > "$cache/$key_c.mp4"
+        printf 'NAME=loop\nENABLED=no\na.mp4\nb.mp4\n' > "$conf/loop.playlist"
+        : > "$run/loop.prepare"
+        ;;
+    clear_none)
+        printf 'AA' > "$cache/$key_a.mp4"
+        printf 'NAME=loop\nENABLED=no\na.mp4\nb.mp4\n' > "$conf/loop.playlist"
+        printf "file '%s'\n" "$cache/$key_a.mp4" > "$run/loop.concat.txt"
+        ;;
+    *) exit 1 ;;
+esac
+
+case "$scenario" in
+    empty|unused|running|preparing) mode=status ;;
+    *) mode=clear ;;
+esac
+playlist_cache_scan "$mode" || exit 1
+
+printf 'TOTAL=%s\n' "$CACHE_TOTAL_BYTES"
+printf 'ART_COUNT=%s\n' "$CACHE_ARTIFACT_COUNT"
+printf 'PROTECTED_BYTES=%s\n' "$CACHE_PROTECTED_BYTES"
+printf 'PROTECTED_COUNT=%s\n' "$CACHE_PROTECTED_COUNT"
+printf 'RECLAIMABLE_BYTES=%s\n' "$CACHE_RECLAIMABLE_BYTES"
+printf 'RECLAIMABLE_COUNT=%s\n' "$CACHE_RECLAIMABLE_COUNT"
+printf 'FREED_BYTES=%s\n' "$CACHE_FREED_BYTES"
+printf 'FREED_COUNT=%s\n' "$CACHE_FREED_COUNT"
+printf 'EXISTS_A=%s\n' "$([ -f "$cache/$key_a.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_B=%s\n' "$([ -f "$cache/$key_b.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_C=%s\n' "$([ -f "$cache/$key_c.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_MALFORMED=%s\n' "$([ -f "$cache/nothex.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_DIR=%s\n' "$([ -d "$cache/dir.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_SYMLINK=%s\n' "$([ -e "$cache/symlink.mp4" ] && echo yes || echo no)"
+printf 'EXISTS_TEMP=%s\n' "$([ -f "$cache/.tmp.stale.1.mp4" ] && echo yes || echo no)"
+printf 'MEDIA_A=%s\n' "$([ -f "$media/a.mp4" ] && echo yes || echo no)"
+printf 'CACHE_DIR=%s\n' "$([ -d "$cache" ] && echo yes || echo no)"
+"""
+
+
+    def _run(self, scenario, is_active="inactive"):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            bindir = tmpdir / "bin"
+            bindir.mkdir()
+            fake = bindir / "systemctl"
+            fake.write_text(
+                self._FAKE_SYSTEMCTL.replace("__IS_ACTIVE__", is_active),
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(bindir), scenario],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            out = {}
+            for line in proc.stdout.decode("utf-8").splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    out[k.strip()] = v.strip()
+            return out
+
+    def test_01_empty_cache_reports_zero_values(self):
+        out = self._run("empty")
+        self.assertEqual(out["TOTAL"], "0")
+        self.assertEqual(out["ART_COUNT"], "0")
+        self.assertEqual(out["RECLAIMABLE_COUNT"], "0")
+
+    def test_02_unused_artifacts_all_reclaimable(self):
+        out = self._run("unused")
+        self.assertEqual(out["TOTAL"], "6")
+        self.assertEqual(out["ART_COUNT"], "2")
+        self.assertEqual(out["PROTECTED_COUNT"], "0")
+        self.assertEqual(out["RECLAIMABLE_COUNT"], "2")
+        self.assertEqual(out["RECLAIMABLE_BYTES"], "6")
+
+    def test_03_running_playlist_artifacts_protected(self):
+        out = self._run("running", is_active="active")
+        self.assertEqual(out["ART_COUNT"], "3")
+        self.assertEqual(out["PROTECTED_COUNT"], "2")
+        self.assertEqual(out["PROTECTED_BYTES"], "6")
+        self.assertEqual(out["RECLAIMABLE_COUNT"], "1")
+        self.assertEqual(out["RECLAIMABLE_BYTES"], "6")
+
+    def test_04_preparing_playlist_artifacts_protected(self):
+        # unit inactive but a .prepare marker exists -> STARTING/preparing
+        out = self._run("preparing", is_active="inactive")
+        self.assertEqual(out["PROTECTED_COUNT"], "2")
+        self.assertEqual(out["RECLAIMABLE_COUNT"], "1")
+
+    def test_05_clear_removes_only_unused_regular_artifacts(self):
+        out = self._run("clear", is_active="active")
+        self.assertEqual(out["FREED_BYTES"], "6")
+        self.assertEqual(out["FREED_COUNT"], "1")
+        self.assertEqual(out["EXISTS_A"], "yes")
+        self.assertEqual(out["EXISTS_B"], "yes")
+        self.assertEqual(out["EXISTS_C"], "no")
+        # non-artifact entries are never counted or deleted
+        self.assertEqual(out["EXISTS_MALFORMED"], "yes")
+        self.assertEqual(out["EXISTS_DIR"], "yes")
+        self.assertEqual(out["EXISTS_SYMLINK"], "yes")
+        self.assertEqual(out["EXISTS_TEMP"], "yes")
+        # media originals and the cache directory itself remain intact
+        self.assertEqual(out["MEDIA_A"], "yes")
+        self.assertEqual(out["CACHE_DIR"], "yes")
+
+    def test_06_clear_nothing_to_clear(self):
+        out = self._run("clear_none", is_active="active")
+        self.assertEqual(out["FREED_BYTES"], "0")
+        self.assertEqual(out["FREED_COUNT"], "0")
+        self.assertEqual(out["EXISTS_A"], "yes")
 
 
 class Gui1cValidationTests(unittest.TestCase):

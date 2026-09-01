@@ -68,6 +68,12 @@ input[type="password"] {
   text-decoration: none;
 }
 
+/* GUI-3A: harmless disabled state for the manual cache-clear button. */
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .btn-sm {
   margin-top: 0;
   padding: 0.25rem 0.6rem;

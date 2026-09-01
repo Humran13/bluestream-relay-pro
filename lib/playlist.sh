@@ -398,6 +398,161 @@ playlist_cache_prune() {
 }
 
 # ---------------------------------------------------------------------------
+# Playlist cache visibility + conservative manual cleanup (GUI-3A)
+#
+# "Unused" definition (conservative):
+#   An artifact (a recognized <64-hex>.mp4 regular file in the managed cache)
+#   is reclaimable ONLY when no playlist that is currently RUNNING, STARTING,
+#   PREPARING, or otherwise not-definitively-stopped could read it.
+#
+#   Protected set = for every playlist whose systemd unit is NOT definitively
+#   stopped (is-active != inactive/failed) OR that carries a .prepare marker:
+#     * every artifact basename listed in its concat file (the exact files the
+#       running FFmpeg concat process reads), plus
+#     * every cache key derived from its current media entries (the artifacts a
+#       start/prepare in progress is about to use).
+#
+#   STOPPED playlists are never protected; their artifacts may be regenerated
+#   on the next start (normalization handles cache misses).
+#
+# Race safety: cleanup and playlist preparation serialize on a shared flock
+# ($BLUESTREAM_RUN_DIR/.cache.lock). run-playlist.sh holds the SAME lock for
+# its whole preparation phase (marker -> normalize -> concat write), so
+# cleanup can never delete an artifact mid-preparation. Running playlists are
+# additionally protected by their concat-file artifact set above.
+#
+# Cleanup is root-only, fixed-root, and conservative: it never follows
+# symlinks, never recurses, only deletes recognized regular artifacts inside
+# BLUESTREAM_PLAYLIST_CACHE_DIR, and never touches the cache directory itself
+# or /var/lib/bluestream/media.
+# ---------------------------------------------------------------------------
+
+# Recognized cache artifact basename: exactly "<64 lowercase hex>.mp4".
+# Everything else (temp files, symlinks, directories, malformed names) is NOT
+# a managed artifact and is skipped (never counted, never deleted).
+bs_valid_cache_artifact() {
+    local n="${1%.mp4}"
+    [ "${n}.mp4" = "$1" ] || return 1
+    case "$n" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    [ "${#n}" -eq 64 ] || return 1
+    return 0
+}
+
+# Acquire the shared playlist-cache lock (serializes cleanup vs preparation).
+# Returns 0 with FD 9 locked; returns 1 on any failure (fail closed).
+playlist_cache_lock() {
+    mkdir -p "$BLUESTREAM_RUN_DIR" 2>/dev/null || return 1
+    command -v flock >/dev/null 2>&1 || return 1
+    exec 9>>"$BLUESTREAM_RUN_DIR/.cache.lock" || return 1
+    flock 9 || { exec 9>&- 2>/dev/null || true; return 1; }
+    return 0
+}
+
+playlist_cache_unlock() {
+    flock -u 9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    return 0
+}
+
+# Compute the protected artifact-basename set into CACHE_PROTECTED_KEYS
+# (newline-separated). Reads only; never deletes.
+playlist_cache_protected_keys() {
+    CACHE_PROTECTED_KEYS=""
+    local name unit state concat key f needs_cache=0
+    for name in $(playlist_list_names 2>/dev/null); do
+        unit="$(bs_unit playlist "$name" 2>/dev/null)"
+        state="$(systemctl is-active "$unit" 2>/dev/null)"
+        needs_cache=0
+        case "$state" in
+            inactive|failed) needs_cache=0 ;;
+            *) needs_cache=1 ;;
+        esac
+        # A prepare marker (active preparation or a failed start) means this
+        # playlist may use its entry artifacts imminently.
+        [ -f "$BLUESTREAM_RUN_DIR/$name.prepare" ] && needs_cache=1
+        [ "$needs_cache" -eq 1 ] || continue
+
+        concat="$BLUESTREAM_RUN_DIR/$name.concat.txt"
+        if [ -f "$concat" ]; then
+            # Exact artifact set the running/starting concat process reads.
+            while IFS= read -r key || [ -n "$key" ]; do
+                [ -z "$key" ] && continue
+                bs_valid_cache_artifact "$key" || continue
+                CACHE_PROTECTED_KEYS="${CACHE_PROTECTED_KEYS}${key}"$'\n'
+            done < <(grep -oE '[0-9a-f]{64}\.mp4' "$concat" 2>/dev/null || true)
+        fi
+        # Entry-derived keys: the artifacts a prepare in progress is about to
+        # use (also covers the pre-concat window of a starting playlist).
+        if playlist_load_config "$name" 2>/dev/null; then
+            for f in "${PLAYLIST_FILES[@]}"; do
+                key="$(playlist_cache_key "$f" 2>/dev/null)" || continue
+                case "$key" in ''|*[!0-9a-f]*) continue ;; esac
+                CACHE_PROTECTED_KEYS="${CACHE_PROTECTED_KEYS}${key}.mp4"$'\n'
+            done
+        fi
+    done
+    return 0
+}
+
+# Scan the playlist cache. mode=status computes totals/protected/reclaimable;
+# mode=clear additionally deletes reclaimable artifacts. Populates globals:
+#   CACHE_TOTAL_BYTES, CACHE_ARTIFACT_COUNT, CACHE_PROTECTED_BYTES,
+#   CACHE_PROTECTED_COUNT, CACHE_RECLAIMABLE_BYTES, CACHE_RECLAIMABLE_COUNT,
+#   CACHE_FREED_BYTES, CACHE_FREED_COUNT (clear mode).
+# Returns 0 on success; 1 when cleanup could not be serialized safely.
+playlist_cache_scan() {
+    local mode="${1:-status}" cache="$BLUESTREAM_PLAYLIST_CACHE_DIR" held=0
+    CACHE_TOTAL_BYTES=0 CACHE_ARTIFACT_COUNT=0
+    CACHE_PROTECTED_BYTES=0 CACHE_PROTECTED_COUNT=0
+    CACHE_RECLAIMABLE_BYTES=0 CACHE_RECLAIMABLE_COUNT=0
+    CACHE_FREED_BYTES=0 CACHE_FREED_COUNT=0
+    [ -d "$cache" ] || return 0
+    if [ "$mode" = "clear" ]; then
+        playlist_cache_lock || return 1
+        held=1
+    fi
+    playlist_cache_protected_keys
+    local f key size in_use
+    shopt -s nullglob
+    for f in "$cache"/*.mp4; do
+        key="$(basename "$f")"
+        bs_valid_cache_artifact "$key" || continue
+        # Recognized regular files only; never symlinks or directories.
+        [ -f "$f" ] || continue
+        [ -L "$f" ] && continue
+        size="$(stat -c '%s' "$f" 2>/dev/null || printf '0')"
+        case "$size" in ''|*[!0-9]*) size=0 ;; esac
+        CACHE_TOTAL_BYTES=$(( CACHE_TOTAL_BYTES + size ))
+        CACHE_ARTIFACT_COUNT=$(( CACHE_ARTIFACT_COUNT + 1 ))
+        in_use=0
+        case "$CACHE_PROTECTED_KEYS" in
+            *"$key"*) in_use=1 ;;
+        esac
+        if [ "$in_use" -eq 1 ]; then
+            CACHE_PROTECTED_BYTES=$(( CACHE_PROTECTED_BYTES + size ))
+            CACHE_PROTECTED_COUNT=$(( CACHE_PROTECTED_COUNT + 1 ))
+        else
+            CACHE_RECLAIMABLE_BYTES=$(( CACHE_RECLAIMABLE_BYTES + size ))
+            CACHE_RECLAIMABLE_COUNT=$(( CACHE_RECLAIMABLE_COUNT + 1 ))
+            if [ "$mode" = "clear" ]; then
+                # rm -f of a fixed regular file path; no -r, no glob recursion.
+                if rm -f "$f" 2>/dev/null; then
+                    CACHE_FREED_BYTES=$(( CACHE_FREED_BYTES + size ))
+                    CACHE_FREED_COUNT=$(( CACHE_FREED_COUNT + 1 ))
+                fi
+            fi
+        fi
+    done
+    shopt -u nullglob
+    if [ "$held" -eq 1 ]; then
+        playlist_cache_unlock
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Concat file + ffmpeg argument construction
 #
 # The concat file lists ONLY prepared artifact paths (uniform baseline media),
