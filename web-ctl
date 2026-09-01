@@ -392,15 +392,21 @@ wc_op_playlist_cache_status() {
 }
 
 wc_op_playlist_cache_clear_unused() {
-    # Holds the shared cache flock for the whole compute+delete inside
-    # playlist_cache_scan, so playlist preparation can never interleave.
+    # Holds the shared cache flock for each authoritative scan/delete pass inside
+    # playlist_cache_scan (released between bounded settle-retries), so playlist
+    # preparation can never interleave with a delete and no deadlock is created.
     if ! playlist_cache_scan clear 2>/dev/null; then
         wc_fail "playlist cache could not be cleared safely" "CACHE_CLEAR_FAILED"
     fi
     {
-        printf 'operation\0%s\0'  "playlist_cache_clear_unused"
-        printf 'freed_bytes\0%d\0' "$CACHE_FREED_BYTES"
-        printf 'freed_count\0%d\0' "$CACHE_FREED_COUNT"
+        printf 'operation\0%s\0'         "playlist_cache_clear_unused"
+        printf 'freed_bytes\0%d\0'       "$CACHE_FREED_BYTES"
+        printf 'freed_count\0%d\0'       "$CACHE_FREED_COUNT"
+        printf 'reclaimable_bytes\0%d\0' "$CACHE_RECLAIMABLE_BYTES"
+        printf 'reclaimable_count\0%d\0' "$CACHE_RECLAIMABLE_COUNT"
+        # 1 when the only blocker was a settling systemd lifecycle transition
+        # that did not resolve within the bounded recheck window.
+        printf 'blocked\0%d\0'           "${CACHE_BLOCKED:-0}"
     } | wc_json object
 }
 

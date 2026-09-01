@@ -457,22 +457,35 @@ playlist_cache_unlock() {
 }
 
 # Compute the protected artifact-basename set into CACHE_PROTECTED_KEYS
-# (newline-separated). Reads only; never deletes.
+# (newline-separated). Reads only; never deletes. Also sets CACHE_BLOCKED=1
+# when at least one protecting playlist is in a settling systemd lifecycle
+# state (deactivating/reloading/unknown) - i.e. the artifacts are protected
+# only by a transition that may resolve on its own shortly.
 playlist_cache_protected_keys() {
     CACHE_PROTECTED_KEYS=""
-    local name unit state concat key f needs_cache=0
+    CACHE_BLOCKED=0
+    local name unit state concat key f needs_cache=0 transitional=0
     for name in $(playlist_list_names 2>/dev/null); do
         unit="$(bs_unit playlist "$name" 2>/dev/null)"
         state="$(systemctl is-active "$unit" 2>/dev/null)"
         needs_cache=0
+        transitional=0
         case "$state" in
             inactive|failed) needs_cache=0 ;;
-            *) needs_cache=1 ;;
+            # A definitively running/preparing playlist: real usage.
+            active|activating) needs_cache=1 ;;
+            # Settling transitions (stop/restart in progress) and any unknown/
+            # empty state: protect conservatively, and flag the transition so
+            # the clear operation can wait briefly and recheck.
+            deactivating|reloading) needs_cache=1; transitional=1 ;;
+            *) needs_cache=1; transitional=1 ;;
         esac
         # A prepare marker (active preparation or a failed start) means this
-        # playlist may use its entry artifacts imminently.
+        # playlist may use its entry artifacts imminently. This is real
+        # preparation - never treated as a settling transition.
         [ -f "$BLUESTREAM_RUN_DIR/$name.prepare" ] && needs_cache=1
         [ "$needs_cache" -eq 1 ] || continue
+        [ "$transitional" -eq 1 ] && CACHE_BLOCKED=1
 
         concat="$BLUESTREAM_RUN_DIR/$name.concat.txt"
         if [ -f "$concat" ]; then
@@ -496,14 +509,15 @@ playlist_cache_protected_keys() {
     return 0
 }
 
-# Scan the playlist cache. mode=status computes totals/protected/reclaimable;
-# mode=clear additionally deletes reclaimable artifacts. Populates globals:
-#   CACHE_TOTAL_BYTES, CACHE_ARTIFACT_COUNT, CACHE_PROTECTED_BYTES,
-#   CACHE_PROTECTED_COUNT, CACHE_RECLAIMABLE_BYTES, CACHE_RECLAIMABLE_COUNT,
-#   CACHE_FREED_BYTES, CACHE_FREED_COUNT (clear mode).
+# One authoritative scan pass (the exact logic shared by status AND clear):
+# compute totals/protected/reclaimable and, in clear mode, delete reclaimable
+# artifacts. Populates globals: CACHE_TOTAL_BYTES, CACHE_ARTIFACT_COUNT,
+# CACHE_PROTECTED_BYTES, CACHE_PROTECTED_COUNT, CACHE_RECLAIMABLE_BYTES,
+# CACHE_RECLAIMABLE_COUNT, CACHE_FREED_BYTES, CACHE_FREED_COUNT (clear mode),
+# CACHE_BLOCKED (1 when protected only by a settling lifecycle transition).
 # Returns 0 on success; 1 when cleanup could not be serialized safely.
-playlist_cache_scan() {
-    local mode="${1:-status}" cache="$BLUESTREAM_PLAYLIST_CACHE_DIR" held=0
+_playlist_cache_scan_once() {
+    local mode="$1" cache="$BLUESTREAM_PLAYLIST_CACHE_DIR" held=0
     CACHE_TOTAL_BYTES=0 CACHE_ARTIFACT_COUNT=0
     CACHE_PROTECTED_BYTES=0 CACHE_PROTECTED_COUNT=0
     CACHE_RECLAIMABLE_BYTES=0 CACHE_RECLAIMABLE_COUNT=0
@@ -550,6 +564,35 @@ playlist_cache_scan() {
         playlist_cache_unlock
     fi
     return 0
+}
+
+# Scan the playlist cache. mode=status returns after one pass; mode=clear
+# additionally handles a brief systemd lifecycle transition (e.g. a playlist
+# stopping right before the click) with a short bounded wait/recheck so the
+# web "Clear Unused Cache" action is reliable immediately after a stop.
+#
+# The lock is acquired per pass and released between passes (never held across
+# the sleep), so a playlist start/prepare can always progress; each recheck
+# observes the freshest authoritative state. Retries only happen while the
+# only blocker is a settling transition (CACHE_BLOCKED=1) and nothing was
+# freed; a genuinely running/preparing playlist is never retried into.
+# Bounded: at most MAX_CACHE_CLEAR_ATTEMPTS passes with a short interval,
+# so a single clear web request resolves within a few seconds.
+playlist_cache_scan() {
+    local mode="${1:-status}"
+    local attempt=1 max_attempts=4 settle_seconds=1
+    while :; do
+        _playlist_cache_scan_once "$mode" || return 1
+        if [ "$mode" != "clear" ]; then
+            return 0
+        fi
+        [ "${CACHE_FREED_COUNT:-0}" -gt 0 ] && return 0
+        [ "${CACHE_BLOCKED:-0}" -eq 1 ] || return 0
+        [ "${CACHE_ARTIFACT_COUNT:-0}" -gt 0 ] || return 0
+        [ "$attempt" -ge "$max_attempts" ] && return 0
+        sleep "$settle_seconds"
+        attempt=$((attempt + 1))
+    done
 }
 
 # ---------------------------------------------------------------------------

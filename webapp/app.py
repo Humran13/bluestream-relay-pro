@@ -1162,15 +1162,22 @@ def _register_console_routes(app: Flask) -> None:
             flash("Playlist cache could not be cleared safely.", "error")
             return redirect(url_for("console.playlists"))
         freed_bytes = freed_count = 0
+        blocked = 0
         if isinstance(result, dict):
             freed_bytes = _cache_status_int(result.get("freed_bytes"))
             freed_count = _cache_status_int(result.get("freed_count"))
+            # 1 when the privileged clear deferred deletion because a playlist
+            # unit was still settling (stopping/restarting); nothing was
+            # deleted and the artifacts are conservatively still protected.
+            blocked = _cache_status_int(result.get("blocked"))
         if freed_count > 0:
             flash(
                 "Cleared %s from the playlist cache (%d files)."
                 % (human_size(freed_bytes), freed_count),
                 "success",
             )
+        elif blocked:
+            flash("Playlist cache is still in use. Try again shortly.", "error")
         else:
             flash("No unused playlist cache files to clear.", "success")
         return redirect(url_for("console.playlists"))

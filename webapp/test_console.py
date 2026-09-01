@@ -2477,6 +2477,25 @@ class Gui3PlaylistCacheTests(unittest.TestCase):
             },
         )
 
+    def test_11_clear_blocked_by_transition_shows_accurate_message(self):
+        # The privileged operation deferred deletion because a playlist unit
+        # was still settling; the web layer must say so instead of falsely
+        # reporting "no unused playlist cache files to clear".
+        self._login()
+        self.engine.mutation_payloads[("playlist_cache_clear_unused",)] = {
+            "operation": "playlist_cache_clear_unused",
+            "freed_bytes": "0",
+            "freed_count": "0",
+            "reclaimable_bytes": "817889280",
+            "reclaimable_count": "3",
+            "blocked": "1",
+        }
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Playlist cache is still in use. Try again shortly.", html)
+        self.assertNotIn("No unused playlist cache files to clear.", html)
+
 
 class Gui1dPlaylistWorkflowTests(unittest.TestCase):
     """GUI-1D.1 playlist builder: friendly names, ordered media selection,

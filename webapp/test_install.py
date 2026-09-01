@@ -852,6 +852,42 @@ class PlaylistCacheStaticTests(unittest.TestCase):
             client._validate_mutation_values("playlist_cache_clear_unused", ()), []
         )
 
+    def test_07_clear_uses_bounded_settle_recheck_not_a_busy_loop(self):
+        p = repo_text("lib/playlist.sh")
+        # fixed small budget + fixed sleep interval; never an unbounded loop
+        self.assertIn("max_attempts=4", p)
+        self.assertIn("settle_seconds=1", p)
+        self.assertIn('sleep "$settle_seconds"', p)
+        # the transient-state flag is what drives the recheck
+        self.assertIn("CACHE_BLOCKED", p)
+        self.assertIn("deactivating|reloading", p)
+
+    def test_08_status_and_clear_share_one_protected_set_logic(self):
+        p = repo_text("lib/playlist.sh")
+        # both status and clear run through the SAME authoritative single-pass
+        # scan (status returns after pass 1; clear may bounded-recheck), so the
+        # page's "Reclaimable" value and the clear decision can never disagree
+        # about the same observed state.
+        self.assertIn("_playlist_cache_scan_once \"$mode\"", p)
+        self.assertIn("playlist_cache_protected_keys", p)
+        self.assertIn("if [ \"$mode\" != \"clear\" ]; then", p)
+
+    def test_09_lock_is_per_pass_not_held_across_retry_sleep(self):
+        p = repo_text("lib/playlist.sh")
+        # the lock is acquired/released inside each authoritative pass...
+        self.assertIn("playlist_cache_lock || return 1", p)
+        self.assertIn("playlist_cache_unlock", p)
+        # ...and the retry sleep sits in the outer retry wrapper (whose
+        # definition and the pass's unlock both come before the sleep), so a
+        # playlist start/prepare can always progress between passes - the lock
+        # is never held across the sleep (no deadlock, no blocked startup).
+        self.assertLess(
+            p.index("playlist_cache_scan() {"), p.index('sleep "$settle_seconds"')
+        )
+        self.assertLess(
+            p.index("playlist_cache_unlock"), p.index('sleep "$settle_seconds"')
+        )
+
 
 class PlaylistCacheManagementTests(unittest.TestCase):
     """Behavioral tests for the GUI-3A playlist-cache scan/clear engine logic.
@@ -864,8 +900,22 @@ class PlaylistCacheManagementTests(unittest.TestCase):
     """
 
     _FAKE_SYSTEMCTL = """#!/usr/bin/env bash
+# Fake systemctl for playlist-cache tests. Supports a state file so a scenario
+# can model a settling lifecycle transition (first is-active call reports one
+# state, subsequent calls report another).
 case "$1" in
-    is-active)  printf '%s\\n' '__IS_ACTIVE__' ;;
+    is-active)
+        if [ -n "${BS_FAKE_STATE_FILE:-}" ]; then
+            if [ -f "$BS_FAKE_STATE_FILE" ]; then
+                cat "$BS_FAKE_STATE_FILE"
+            else
+                printf '%s' '__IS_ACTIVE_1__'
+                printf '%s' '__IS_ACTIVE_2__' > "$BS_FAKE_STATE_FILE"
+            fi
+        else
+            printf '%s' '__IS_ACTIVE__'
+        fi
+        ;;
     is-enabled) printf '%s\\n' 'disabled' ;;
     *) exit 0 ;;
 esac
@@ -876,7 +926,11 @@ set -u
 repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
 bin="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
 scenario="$3"
+statefile="${4:-}"
 export PATH="$bin:$PATH"
+if [ -n "$statefile" ]; then
+    export BS_FAKE_STATE_FILE="$statefile"
+fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 conf="$tmp/conf"
@@ -942,6 +996,15 @@ case "$scenario" in
         printf 'NAME=loop\nENABLED=no\na.mp4\nb.mp4\n' > "$conf/loop.playlist"
         printf "file '%s'\n" "$cache/$key_a.mp4" > "$run/loop.concat.txt"
         ;;
+    transition)
+        # A playlist whose unit is transitioning (stopping/starting); its
+        # artifacts are protected by the concat file + entry keys.
+        printf 'AA' > "$cache/$key_a.mp4"
+        printf 'BBBB' > "$cache/$key_b.mp4"
+        printf 'NAME=loop\nENABLED=no\na.mp4\nb.mp4\n' > "$conf/loop.playlist"
+        printf "file '%s'\nfile '%s'\n" "$cache/$key_a.mp4" "$cache/$key_b.mp4" \
+            > "$run/loop.concat.txt"
+        ;;
     *) exit 1 ;;
 esac
 
@@ -959,6 +1022,7 @@ printf 'RECLAIMABLE_BYTES=%s\n' "$CACHE_RECLAIMABLE_BYTES"
 printf 'RECLAIMABLE_COUNT=%s\n' "$CACHE_RECLAIMABLE_COUNT"
 printf 'FREED_BYTES=%s\n' "$CACHE_FREED_BYTES"
 printf 'FREED_COUNT=%s\n' "$CACHE_FREED_COUNT"
+printf 'BLOCKED=%s\n' "${CACHE_BLOCKED:-0}"
 printf 'EXISTS_A=%s\n' "$([ -f "$cache/$key_a.mp4" ] && echo yes || echo no)"
 printf 'EXISTS_B=%s\n' "$([ -f "$cache/$key_b.mp4" ] && echo yes || echo no)"
 printf 'EXISTS_C=%s\n' "$([ -f "$cache/$key_c.mp4" ] && echo yes || echo no)"
@@ -971,7 +1035,7 @@ printf 'CACHE_DIR=%s\n' "$([ -d "$cache" ] && echo yes || echo no)"
 """
 
 
-    def _run(self, scenario, is_active="inactive"):
+    def _run(self, scenario, is_active="inactive", transition=None):
         import subprocess
         import tempfile
 
@@ -982,16 +1046,25 @@ printf 'CACHE_DIR=%s\n' "$([ -d "$cache" ] && echo yes || echo no)"
             bindir = tmpdir / "bin"
             bindir.mkdir()
             fake = bindir / "systemctl"
-            fake.write_text(
-                self._FAKE_SYSTEMCTL.replace("__IS_ACTIVE__", is_active),
-                encoding="utf-8",
-            )
+            fake_text = self._FAKE_SYSTEMCTL.replace("__IS_ACTIVE__", is_active)
+            if transition:
+                fake_text = (
+                    fake_text.replace("__IS_ACTIVE_1__", transition[0])
+                    .replace("__IS_ACTIVE_2__", transition[1])
+                    .replace("__IS_ACTIVE__", transition[1])
+                )
+            fake.write_text(fake_text, encoding="utf-8")
             fake.chmod(0o700)
             harness = tmpdir / "harness.sh"
             harness.write_text(self._HARNESS, encoding="utf-8")
             bash = engine_module.default_bash_path()
+            argv = [bash, str(harness), str(REPO_ROOT), str(bindir), scenario]
+            state_file = None
+            if transition:
+                state_file = tmpdir / "systemctl-state"
+                argv.append(str(state_file))
             proc = subprocess.run(
-                [bash, str(harness), str(REPO_ROOT), str(bindir), scenario],
+                argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=30,
@@ -1053,6 +1126,29 @@ printf 'CACHE_DIR=%s\n' "$([ -d "$cache" ] && echo yes || echo no)"
         self.assertEqual(out["FREED_BYTES"], "0")
         self.assertEqual(out["FREED_COUNT"], "0")
         self.assertEqual(out["EXISTS_A"], "yes")
+
+    def test_07_deactivating_artifacts_never_deleted_until_safe(self):
+        # A playlist stuck in 'deactivating' is protected on EVERY bounded
+        # recheck: nothing is deleted, and the operation reports the accurate
+        # blocked state instead of falsely claiming there is nothing to clear.
+        out = self._run("transition", is_active="deactivating")
+        self.assertEqual(out["FREED_COUNT"], "0")
+        self.assertEqual(out["FREED_BYTES"], "0")
+        self.assertEqual(out["BLOCKED"], "1")
+        self.assertEqual(out["EXISTS_A"], "yes")
+        self.assertEqual(out["EXISTS_B"], "yes")
+
+    def test_08_transition_settles_then_clear_succeeds(self):
+        # Reproduction of the live Phase 3 bug: the first observation sees the
+        # playlist still stopping ('deactivating'); shortly afterward it becomes
+        # 'inactive'. The bounded settle-recheck must clear the now-reclaimable
+        # artifacts instead of falsely reporting nothing to clear.
+        out = self._run("transition", transition=("deactivating", "inactive"))
+        self.assertEqual(out["FREED_COUNT"], "2")
+        self.assertEqual(out["FREED_BYTES"], "6")
+        self.assertEqual(out["BLOCKED"], "0")
+        self.assertEqual(out["EXISTS_A"], "no")
+        self.assertEqual(out["EXISTS_B"], "no")
 
 
 class Gui1cValidationTests(unittest.TestCase):
