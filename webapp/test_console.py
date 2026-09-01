@@ -2496,6 +2496,134 @@ class Gui3PlaylistCacheTests(unittest.TestCase):
         self.assertIn("Playlist cache is still in use. Try again shortly.", html)
         self.assertNotIn("No unused playlist cache files to clear.", html)
 
+    # ------------------------------------------------------------------
+    # Integration: drive the REAL EngineClient (production command + JSON
+    # parsing) with an envelope produced by the real web-ctl json_helper,
+    # then through the Flask clear route. This guards the exact subprocess
+    # envelope shape (all values serialized as strings) that the FakeEngine
+    # mocks cannot reproduce, so a parse/structure regression can never
+    # silently show the wrong flash message.
+    # ------------------------------------------------------------------
+    def _real_clear_engine(self, fields):
+        """Return a production EngineClient whose _run_argv yields a real
+        web-ctl-style envelope for each operation the page needs, and the
+        real json_helper envelope for playlist_cache_clear_unused. This lets
+        the actual EngineClient._mutation JSON parsing drive the clear route
+        while the surrounding page reads still render."""
+        tokens = []
+        for key, value in fields.items():
+            tokens.extend([key, value])
+        stream = ("\0".join(tokens) + "\0").encode("utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "webapp" / "json_helper.py"), "object"],
+            input=stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        clear_envelope = proc.stdout.decode("utf-8")
+        # The read operations the console page renders (mirrors web-ctl output).
+        status_data = {
+            "total_bytes": "8516825",
+            "artifact_count": "2",
+            "protected_bytes": "0",
+            "protected_count": "0",
+            "reclaimable_bytes": "8516825",
+            "reclaimable_count": "2",
+        }
+        envelopes = {
+            "playlist_list": json.dumps({"ok": True, "data": []}),
+            "relay_list": json.dumps(
+                {"ok": True, "data": DEFAULT_PAYLOADS["relay_list"]}
+            ),
+            "media_list": json.dumps({"ok": True, "data": []}),
+            "snapshot": json.dumps({"ok": True, "data": VALID_SNAPSHOT}),
+            "playlist_cache_status": json.dumps({"ok": True, "data": status_data}),
+            "playlist_cache_clear_unused": clear_envelope,
+        }
+        engine = EngineClient(production=True)
+        captured = {}
+
+        def fake_run_argv(argv, timeout=None):
+            op = argv[-1]
+            if op not in envelopes:
+                raise EngineError("unexpected operation in real-engine test: %r" % op)
+            if op == "playlist_cache_clear_unused":
+                captured["clear_argv"] = list(argv)
+            return 0, envelopes[op]
+
+        engine._run_argv = fake_run_argv
+        self._real_clear_argv = captured
+        return engine
+
+    def _real_clear(self, fields):
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self._real_clear_engine(fields),
+        )
+        self.client = self.app.test_client()
+        self._login()
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        return html
+
+    def test_12_real_envelope_clear_reports_success(self):
+        # The exact live envelope: fully stopped/reclaimable cache, freed 2.
+        html = self._real_clear(
+            {
+                "operation": "playlist_cache_clear_unused",
+                "freed_bytes": "8516825",
+                "freed_count": "2",
+                "reclaimable_bytes": "8516825",
+                "reclaimable_count": "2",
+                "blocked": "0",
+            }
+        )
+        self.assertEqual(
+            self._real_clear_argv["clear_argv"],
+            [
+                engine_module.SUDO_PATH,
+                "-n",
+                engine_module.INSTALLED_WEB_CTL,
+                "playlist_cache_clear_unused",
+            ],
+        )
+        self.assertIn("Cleared 8.1 MiB from the playlist cache (2 files).", html)
+        self.assertNotIn("No unused playlist cache files to clear.", html)
+
+    def test_13_real_envelope_nothing_reclaimable_shows_no_unused(self):
+        # freed_count=0, blocked=0: nothing was reclaimable. This is exactly
+        # the branch reached when a live browser request's privileged clear
+        # found every artifact protected (or an empty cache).
+        html = self._real_clear(
+            {
+                "operation": "playlist_cache_clear_unused",
+                "freed_bytes": "0",
+                "freed_count": "0",
+                "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+                "blocked": "0",
+            }
+        )
+        self.assertIn("No unused playlist cache files to clear.", html)
+        self.assertNotIn("Playlist cache is still in use.", html)
+
+    def test_14_real_envelope_blocked_shows_still_in_use(self):
+        # freed_count=0, blocked=1: deferred by a settling transition.
+        html = self._real_clear(
+            {
+                "operation": "playlist_cache_clear_unused",
+                "freed_bytes": "0",
+                "freed_count": "0",
+                "reclaimable_bytes": "8516825",
+                "reclaimable_count": "2",
+                "blocked": "1",
+            }
+        )
+        self.assertIn("Playlist cache is still in use. Try again shortly.", html)
+        self.assertNotIn("No unused playlist cache files to clear.", html)
+
 
 class Gui1dPlaylistWorkflowTests(unittest.TestCase):
     """GUI-1D.1 playlist builder: friendly names, ordered media selection,
