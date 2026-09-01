@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -85,9 +86,23 @@ PRODUCTION_STATE_DIR = "/var/lib/bluestream/web"
 # are imported into managed media by the root web-ctl bridge.
 PRODUCTION_UPLOAD_DIR = "/var/lib/bluestream/web/upload"
 
-# Default upload cap (matches client_max_body_size in the nginx console
-# location). Configurable via create_app(config={"MAX_UPLOAD_SIZE": N}).
-DEFAULT_MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1 GiB
+# GUI-2C: default maximum upload size. The SINGLE authoritative value for the
+# product lives in /etc/bluestream/server.conf as MAX_MEDIA_UPLOAD_MB (integer
+# MiB, default 10240). This Python default mirrors that value so local/dev mode
+# and installations without the setting behave identically; production reads
+# the installer-written web.conf `max_media_upload_mb` (derived from the same
+# authoritative server.conf value) so Flask and nginx can never drift.
+DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10 GiB
+
+# GUI-2C: conservative disk-space reserve. An upload is rejected (before the
+# expensive privileged import) unless the storage filesystem will still have at
+# least this much free space after the incoming media is published. Both staging
+# and managed media live under /var/lib/bluestream on the same filesystem.
+DEFAULT_DISK_RESERVE_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
+
+# Policy ceiling (512 GiB) shared with bs_valid_upload_mb in lib/common.sh.
+# Values above this are rejected/fall back to the default.
+MAX_UPLOAD_MB_CEILING = 512 * 1024  # 512 GiB in MiB
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +373,27 @@ def playlist_hls_url(snapshot, name: str) -> str | None:
 
 
 
+def _read_web_deployment_settings(state_dir) -> dict:
+    """Read the installer-written web.conf deployment settings (non-secret).
+
+    Written by root (nginx_sync_web_conf) from BlueStream's own SSL state and
+    server configuration; never trusted from request headers. Returns a dict of
+    stripped ``key=value`` pairs; missing/unreadable file yields {}.
+    """
+    settings = {}
+    try:
+        text = (Path(state_dir) / "web.conf").read_text(encoding="utf-8")
+    except OSError:
+        return settings
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        settings[key.strip()] = value.strip()
+    return settings
+
+
 def _read_secure_cookie_setting(state_dir) -> bool:
     """Read the installer-written secure_cookie deployment setting.
 
@@ -365,20 +401,27 @@ def _read_secure_cookie_setting(state_dir) -> bool:
     the web-side state dir as a non-secret flag. Never trusted from request
     headers. Missing/unreadable config fails SAFE (Secure cookies on).
     """
-    try:
-        text = (Path(state_dir) / "web.conf").read_text(encoding="utf-8")
-    except OSError:
+    value = _read_web_deployment_settings(state_dir).get("secure_cookie")
+    if value is None:
         return True  # fail-safe
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        if key.strip() == "secure_cookie":
-            # Fail-safe: only an explicit "no" disables Secure cookies;
-            # anything unrecognized keeps them ON.
-            return value.strip().lower() not in ("no", "false", "0", "off")
-    return True  # fail-safe
+    # Fail-safe: only an explicit "no" disables Secure cookies;
+    # anything unrecognized keeps them ON.
+    return value.lower() not in ("no", "false", "0", "off")
+
+
+def _max_upload_bytes_from_mb(mb_value) -> int | None:
+    """Parse a configured max media upload size (integer MiB) into bytes.
+
+    The value is parsed strictly as data: digits only. Anything else - empty,
+    non-numeric, zero, negative, or above the 512 GiB policy ceiling - is
+    rejected (returns None) so the caller applies the documented safe default.
+    Mirrors bs_valid_upload_mb in lib/common.sh.
+    """
+    if isinstance(mb_value, str) and mb_value.isdigit():
+        mb = int(mb_value)
+        if 1 <= mb <= MAX_UPLOAD_MB_CEILING:
+            return mb * 1024 * 1024
+    return None
 
 
 def create_app(state_dir=None, engine=None, config=None, production: bool = False) -> Flask:
@@ -416,15 +459,27 @@ def create_app(state_dir=None, engine=None, config=None, production: bool = Fals
         # (derived from BlueStream's own SSL state, never from request headers).
         SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
-        # GUI-1C.1: upload cap. Werkzeug rejects larger request bodies (nginx's
-        # console location enforces the same cap first); the upload route also
-        # checks Content-Length for a clean error.
+        # GUI-2C: upload cap (default 10 GiB). The authoritative value is
+        # MAX_MEDIA_UPLOAD_MB in server.conf, rendered into nginx and web.conf;
+        # Werkzeug rejects larger request bodies (nginx's console location
+        # enforces the same cap first), and the upload route checks both
+        # Content-Length and the actual staged size for a clean error.
         MAX_CONTENT_LENGTH=DEFAULT_MAX_UPLOAD_SIZE,
         MAX_UPLOAD_SIZE=DEFAULT_MAX_UPLOAD_SIZE,
         WEB_UPLOAD_DIR=PRODUCTION_UPLOAD_DIR,
     )
     if production:
+        # Installer-written non-secret deployment settings (secure_cookie +
+        # max_media_upload_mb, both derived from the root server configuration).
         app.config["SESSION_COOKIE_SECURE"] = _read_secure_cookie_setting(state_dir)
+        web_settings = _read_web_deployment_settings(state_dir)
+        upload_bytes = _max_upload_bytes_from_mb(web_settings.get("max_media_upload_mb"))
+        if upload_bytes is not None:
+            # GUI-2C: production honors the authoritative MAX_MEDIA_UPLOAD_MB
+            # value (rendered into web.conf by the installer), keeping Flask and
+            # nginx in sync. Invalid/absent values keep the 10 GiB default.
+            app.config["MAX_UPLOAD_SIZE"] = upload_bytes
+            app.config["MAX_CONTENT_LENGTH"] = upload_bytes
     if config:
         # Explicit call-site config wins over web.conf (tests, HTTP-only mode).
         app.config.update(config)
@@ -850,7 +905,8 @@ def _register_console_routes(app: Flask) -> None:
                 url_for("console.media_upload"),
             )
         try:
-            if staged.stat().st_size == 0:
+            staged_size = staged.stat().st_size
+            if staged_size == 0:
                 staged.unlink()
                 return _upload_respond(
                     "The uploaded file is empty.",
@@ -860,6 +916,45 @@ def _register_console_routes(app: Flask) -> None:
         except OSError:
             return _upload_respond(
                 "Upload could not be stored. Please try again.",
+                "error",
+                url_for("console.media_upload"),
+            )
+        # GUI-2C: the ACTUAL staged size is the authoritative bound. Clients may
+        # omit or misreport Content-Length (chunked/lying); nginx bounds the
+        # real stream at the same cap, and this closes the gap in-process so a
+        # missing/misreported Content-Length can never bypass the limit.
+        if staged_size > max_size:
+            try:
+                staged.unlink()
+            except OSError:
+                pass
+            return _upload_respond(
+                "File exceeds the upload size limit (%s)." % human_size(max_size),
+                "error",
+                url_for("console.media_upload"),
+            )
+        # GUI-2C: conservative disk-space safety guard, before the expensive
+        # privileged import. Reject unless the storage filesystem (staging and
+        # managed media live on the same root filesystem) keeps the reserved
+        # free space after the incoming media is published. Uses authoritative
+        # filesystem information; the browser can never report free space.
+        reserve = current_app.config.get(
+            "DISK_RESERVE_BYTES", DEFAULT_DISK_RESERVE_BYTES
+        )
+        try:
+            free_bytes = shutil.disk_usage(staged.parent).free
+        except OSError:
+            free_bytes = None
+            current_app.logger.warning(
+                "could not read free disk space for upload staging: %s", staged.parent
+            )
+        if free_bytes is not None and free_bytes < staged_size + reserve:
+            try:
+                staged.unlink()
+            except OSError:
+                pass
+            return _upload_respond(
+                "Not enough free storage for this upload.",
                 "error",
                 url_for("console.media_upload"),
             )

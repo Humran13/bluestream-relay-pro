@@ -99,6 +99,28 @@ class InstallerStaticTests(unittest.TestCase):
             self.assertNotIn("ufw allow 8080", text)
             self.assertNotIn("8080/tcp", text)
 
+    def test_19_server_conf_authoritative_upload_limit_default_10_gib(self):
+        common = repo_text("lib/common.sh")
+        # single authoritative value with the 10 GiB default
+        self.assertIn("DEFAULT_MAX_MEDIA_UPLOAD_MB=10240", common)
+        self.assertIn('BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$DEFAULT_MAX_MEDIA_UPLOAD_MB"', common)
+        # loaded from server.conf (whitelisted key) and written on save
+        self.assertIn("MAX_MEDIA_UPLOAD_MB)", common)
+        self.assertIn("printf 'MAX_MEDIA_UPLOAD_MB=%s\\n'", common)
+        # digits-only validation so the value can never inject shell/nginx syntax
+        self.assertIn("bs_valid_upload_mb", common)
+        self.assertIn("*[!0-9]*", common)
+        self.assertIn("524288", common)  # 512 GiB policy ceiling
+
+    def test_20_no_hardcoded_old_upload_cap_remains(self):
+        # the old fixed 1 GiB nginx boundary must be gone everywhere
+        for rel in ("config/nginx/console-location.conf", "lib/nginx.sh"):
+            self.assertNotIn("1g", repo_text(rel))
+        app_src = repo_text("webapp/app.py")
+        self.assertNotIn("DEFAULT_MAX_UPLOAD_SIZE = 1024 * 1024 * 1024", app_src)
+        self.assertNotIn("1 GiB", app_src)
+        self.assertIn("DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024", app_src)
+
 
 class NginxTemplateTests(unittest.TestCase):
     """console-location.conf + site/https templates."""
@@ -176,6 +198,26 @@ class NginxTemplateTests(unittest.TestCase):
         nginx = repo_text("lib/nginx.sh")
         self.assertIn("nginx_sync_web_conf", nginx)
         self.assertIn("secure_cookie=", nginx)
+
+    def test_upload_cap_is_rendered_placeholder_not_hardcoded(self):
+        # GUI-2C: the console location carries a placeholder, not a hard-coded
+        # limit, so nginx always matches the authoritative server.conf value.
+        self.assertIn("__CLIENT_MAX_BODY_SIZE__", self.console)
+        self.assertNotIn("client_max_body_size", self.console)
+
+    def test_nginx_gen_renders_authoritative_upload_cap(self):
+        nginx = repo_text("lib/nginx.sh")
+        self.assertIn("__CLIENT_MAX_BODY_SIZE__", nginx)
+        self.assertIn("client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;", nginx)
+        # the rendered value is validated digits-only before it ever reaches
+        # the sed substitution (no nginx directive injection possible)
+        self.assertIn("bs_valid_upload_mb", nginx)
+        self.assertIn("Invalid MAX_MEDIA_UPLOAD_MB", nginx)
+
+    def test_web_conf_syncs_max_media_upload_mb(self):
+        nginx = repo_text("lib/nginx.sh")
+        self.assertIn("max_media_upload_mb=%s", nginx)
+        self.assertIn("BLUESTREAM_MAX_MEDIA_UPLOAD_MB", nginx)
 
     def test_state_ownership_is_read_only_for_web_user(self):
         wc = repo_text("lib/webconsole.sh")

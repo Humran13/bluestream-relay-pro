@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -166,6 +167,15 @@ DEFAULT_PAYLOADS = {
     "playlist_list": [],
     "media_list": [],
 }
+
+
+class _DiskUsage:
+    """Minimal stand-in for the shutil.disk_usage named tuple (total/used/free)."""
+
+    def __init__(self, total=0, used=0, free=0):
+        self.total = total
+        self.used = used
+        self.free = free
 
 
 class ConsoleAuthTests(unittest.TestCase):
@@ -1393,6 +1403,50 @@ class ProductionModeTests(unittest.TestCase):
         )
         self.assertTrue(prod_app3.config["SESSION_COOKIE_SECURE"])
 
+    def test_production_max_upload_reads_web_conf(self):
+        # GUI-2C: production honors the authoritative MAX_MEDIA_UPLOAD_MB value
+        # rendered into web.conf, keeping Flask and nginx in sync.
+        state = Path(self._tmp.name) / "webconf-upload"
+        security.init_admin(state, "pw")
+        (state / "web.conf").write_text(
+            "secure_cookie=no\nmax_media_upload_mb=5120\n", encoding="utf-8"
+        )
+        prod_app = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertEqual(prod_app.config["MAX_UPLOAD_SIZE"], 5120 * 1024 * 1024)
+        self.assertEqual(
+            prod_app.config["MAX_CONTENT_LENGTH"], 5120 * 1024 * 1024
+        )
+        # invalid value falls back to the 10 GiB default (documented safe rule)
+        (state / "web.conf").write_text(
+            "secure_cookie=no\nmax_media_upload_mb=not-a-number\n", encoding="utf-8"
+        )
+        prod_app2 = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertEqual(
+            prod_app2.config["MAX_UPLOAD_SIZE"], app_module.DEFAULT_MAX_UPLOAD_SIZE
+        )
+        # existing installation without the setting gets the default
+        (state / "web.conf").write_text("secure_cookie=no\n", encoding="utf-8")
+        prod_app3 = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertEqual(
+            prod_app3.config["MAX_UPLOAD_SIZE"], app_module.DEFAULT_MAX_UPLOAD_SIZE
+        )
+        # oversized configured value (> 512 GiB ceiling) falls back to default
+        (state / "web.conf").write_text(
+            "secure_cookie=no\nmax_media_upload_mb=999999999999\n", encoding="utf-8"
+        )
+        prod_app4 = app_module.create_app(
+            state_dir=state, production=True, engine=FakeEngine(DEFAULT_PAYLOADS)
+        )
+        self.assertEqual(
+            prod_app4.config["MAX_UPLOAD_SIZE"], app_module.DEFAULT_MAX_UPLOAD_SIZE
+        )
+
     def test_local_cookie_secure_false_and_path_console(self):
         local_app = app_module.create_app(
             state_dir=self.state, engine=FakeEngine(DEFAULT_PAYLOADS)
@@ -2055,6 +2109,119 @@ class Gui1cWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(rv.status_code, 400)
         self.assertEqual(self.engine.mutation_calls, [])
+
+    # ------------------------------------------------------------------
+    # GUI-2C: configurable large uploads + disk safety (same pipeline).
+    # ------------------------------------------------------------------
+    def test_34_default_upload_max_is_10_gib(self):
+        self.assertEqual(
+            app_module.DEFAULT_MAX_UPLOAD_SIZE, 10 * 1024 * 1024 * 1024
+        )
+        # the upload page derives the displayed limit from the SAME config used
+        # for enforcement - no hard-coded presentation constant.
+        self._login()
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("10.0 GiB", html)
+
+    def test_35_upload_above_max_rejected_when_content_length_missing(self):
+        # A client that omits/misreports Content-Length (chunked/lying) must not
+        # bypass the cap: the ACTUAL staged size is enforced after save.
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+            config={"WEB_UPLOAD_DIR": str(self.upload_dir), "MAX_UPLOAD_SIZE": 10},
+        )
+        client = app.test_client()
+        login(client)
+        token = get_csrf(client, path="/console/media/upload")
+        rv = client.post(
+            "/console/media/upload",
+            data={"media": (io.BytesIO(b"x" * 100), "big.mp4"), "csrf_token": token},
+            content_type="multipart/form-data",
+            content_length=0,  # misreported Content-Length
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # no oversized staging artifact is left behind
+        self.assertFalse(list(self.upload_dir.iterdir()) if self.upload_dir.exists() else [])
+        html = client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("upload size limit", html)
+
+    def test_36_upload_rejected_when_free_space_insufficient(self):
+        self._login()
+        with mock.patch("webapp.app.shutil.disk_usage") as du:
+            du.return_value = _DiskUsage(free=1 * 1024 * 1024)  # below staged+reserve
+            rv = self.client.post(
+                "/console/media/upload",
+                data={
+                    "media": (io.BytesIO(b"video-data"), "promo.mp4"),
+                    "csrf_token": self._csrf(),
+                },
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(rv.status_code, 302)
+        # rejected BEFORE the privileged import; the staged file is cleaned up
+        self.assertEqual(self.engine.mutation_calls, [])
+        self.assertFalse(list(self.upload_dir.iterdir()) if self.upload_dir.exists() else [])
+        html = self.client.get("/console/media/upload").get_data(as_text=True)
+        self.assertIn("Not enough free storage for this upload.", html)
+        # no internal filesystem path is exposed
+        self.assertNotIn(str(self.upload_dir), html)
+
+    def test_37_upload_proceeds_when_free_space_sufficient(self):
+        self._login()
+        with mock.patch("webapp.app.shutil.disk_usage") as du:
+            du.return_value = _DiskUsage(free=100 * 1024 * 1024 * 1024)
+            rv = self.client.post(
+                "/console/media/upload",
+                data={
+                    "media": (io.BytesIO(b"video-data"), "promo.mp4"),
+                    "csrf_token": self._csrf(),
+                },
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls, [("media_import_staged", "promo.mp4")]
+        )
+
+    def test_38_upload_disk_error_returns_safe_json_message(self):
+        # The Phase 1 XHR progress UI keeps working: disk rejections come back
+        # as the same safe application message with no privileged detail.
+        self._login()
+        with mock.patch("webapp.app.shutil.disk_usage") as du:
+            du.return_value = _DiskUsage(free=1 * 1024 * 1024)
+            rv = self.client.post(
+                "/console/media/upload",
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                data={
+                    "media": (io.BytesIO(b"video-data"), "promo.mp4"),
+                    "csrf_token": self._csrf(),
+                },
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(rv.status_code, 200)
+        payload = json.loads(rv.get_data(as_text=True))
+        self.assertFalse(payload["ok"])
+        self.assertIn("Not enough free storage", payload["message"])
+        self.assertNotIn(str(self.upload_dir), rv.get_data(as_text=True))
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_39_max_upload_mb_parser_unit(self):
+        # Strict digits-only parsing; invalid/oversized values return None so
+        # the documented safe default is applied (mirrors bs_valid_upload_mb).
+        parse = app_module._max_upload_bytes_from_mb
+        self.assertEqual(parse("10240"), 10 * 1024 * 1024 * 1024)
+        self.assertEqual(parse("1"), 1 * 1024 * 1024)
+        self.assertEqual(
+            parse(str(app_module.MAX_UPLOAD_MB_CEILING)),
+            app_module.MAX_UPLOAD_MB_CEILING * 1024 * 1024,
+        )
+        for bad in ("0", "-1", "abc", "10m", "10;", "1 0", "", "   ", "999999999999"):
+            self.assertIsNone(parse(bad), bad)
+        self.assertIsNone(
+            parse(str(app_module.MAX_UPLOAD_MB_CEILING + 1))
+        )
 
 
 class Gui2NavigationTests(unittest.TestCase):

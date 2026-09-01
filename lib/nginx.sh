@@ -92,8 +92,15 @@ nginx_gen_config() {
     mv -f "$NGINX_SNIPPET_DIR/player-location.conf.tmp" "$NGINX_SNIPPET_DIR/player-location.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/hls-location.conf" "$NGINX_SNIPPET_DIR/player-location.conf"
 
-    # Web console reverse-proxy snippet (fixed loopback upstream; no placeholders).
-    cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" "$NGINX_SNIPPET_DIR/console-location.conf.tmp"
+    # Web console reverse-proxy snippet (fixed loopback upstream). The upload
+    # body cap is rendered from the SINGLE authoritative MAX_MEDIA_UPLOAD_MB
+    # value (validated digits-only, so it can never inject nginx directives).
+    if ! bs_valid_upload_mb "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"; then
+        bs_error "Invalid MAX_MEDIA_UPLOAD_MB in server.conf: $BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
+        return 1
+    fi
+    sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
+        "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" > "$NGINX_SNIPPET_DIR/console-location.conf.tmp"
     mv -f "$NGINX_SNIPPET_DIR/console-location.conf.tmp" "$NGINX_SNIPPET_DIR/console-location.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/console-location.conf"
 
@@ -102,7 +109,8 @@ nginx_gen_config() {
     if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then
         cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-redirect-http.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
     else
-        cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
+        sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
+            "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" > "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
     fi
     mv -f "$NGINX_SNIPPET_DIR/console-http.conf.tmp" "$NGINX_SNIPPET_DIR/console-http.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/console-http.conf"
@@ -138,8 +146,10 @@ nginx_gen_config() {
     bs_ok "Nginx site configuration written: $dest"
 }
 
-# Write /var/lib/bluestream/web/web.conf (secure_cookie=yes|no) from the
-# current SSL state. Root-only write; the web user gets read-only access.
+# Write /var/lib/bluestream/web/web.conf (secure_cookie=yes|no and the
+# max_media_upload_mb deployment setting) from the current root config. Root-only
+# write; the web user gets read-only access. The web process never reads
+# /etc/bluestream/server.conf directly.
 nginx_sync_web_conf() {
     local web_state="/var/lib/bluestream/web" sc="no"
     id bluestream-web >/dev/null 2>&1 || return 0  # web console not installed
@@ -149,8 +159,9 @@ nginx_sync_web_conf() {
     mkdir -p "$web_state"
     {
         printf '# BlueStream Relay Pro web console deployment settings (non-secret).\n'
-        printf '# Regenerated from the current BlueStream SSL state.\n'
+        printf '# Regenerated from the current BlueStream SSL state and server config.\n'
         printf 'secure_cookie=%s\n' "$sc"
+        printf 'max_media_upload_mb=%s\n' "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
     } > "$web_state/web.conf.tmp"
     chown root:bluestream-web "$web_state/web.conf.tmp"
     chmod 0640 "$web_state/web.conf.tmp"

@@ -146,12 +146,34 @@ bs_version() {
 # ---------------------------------------------------------------------------
 # Server configuration (safe key=value parsing, whitelist only)
 # ---------------------------------------------------------------------------
+# GUI-2C: maximum size (in MiB) of a single uploaded media file. This is the
+# SINGLE authoritative value that drives BOTH the Flask/application cap and the
+# nginx `client_max_body_size` for the /console location (rendered at install/
+# update time). Default 10240 MiB = 10 GiB. Stored as plain integer MB/MiB so
+# it can never carry shell or nginx directive syntax. Invalid values fall back
+# to this default (documented safe rule). A 512 GiB policy ceiling prevents
+# absurd values; the disk-reserve guard protects actual free space.
+DEFAULT_MAX_MEDIA_UPLOAD_MB=10240
+BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$DEFAULT_MAX_MEDIA_UPLOAD_MB"
+
+# Digits only, >= 1 MiB, <= 512 GiB policy ceiling. Returns 1 for anything
+# that could be interpreted as a directive/shell fragment.
+bs_valid_upload_mb() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] || return 1
+    [ "$1" -le 524288 ] || return 1
+    return 0
+}
+
 bs_load_server_conf() {
     BLUESTREAM_DOMAIN=""
     BLUESTREAM_ADMIN_EMAIL=""
     BLUESTREAM_SSL_ENABLED="no"
     BLUESTREAM_FIREWALL="none"
     BLUESTREAM_NGINX_USER="www-data"
+    BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$DEFAULT_MAX_MEDIA_UPLOAD_MB"
 
     [ -r "$BLUESTREAM_SERVER_CONF" ] || return 0
     local key val
@@ -169,6 +191,8 @@ bs_load_server_conf() {
             SSL_ENABLED)   case "$val" in yes|no) BLUESTREAM_SSL_ENABLED="$val" ;; esac ;;
             FIREWALL)      case "$val" in none|ufw) BLUESTREAM_FIREWALL="$val" ;; esac ;;
             NGINX_USER)    case "$val" in [a-z][a-z0-9_.-]*) BLUESTREAM_NGINX_USER="$val" ;; esac ;;
+            MAX_MEDIA_UPLOAD_MB)
+                if bs_valid_upload_mb "$val"; then BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$val"; fi ;;
         esac
     done < "$BLUESTREAM_SERVER_CONF"
     return 0
@@ -179,11 +203,14 @@ bs_save_server_conf() {
     local tmp="$BLUESTREAM_ETC_DIR/.server.conf.tmp.$$"
     {
         printf '# BlueStream Relay Pro server configuration (root-only)\n'
+        printf '# MAX_MEDIA_UPLOAD_MB = max size (MiB) of one uploaded media\n'
+        printf '# file; drives both the web console and nginx (default 10240 = 10 GiB).\n'
         printf 'DOMAIN=%s\n' "$BLUESTREAM_DOMAIN"
         printf 'ADMIN_EMAIL=%s\n' "$BLUESTREAM_ADMIN_EMAIL"
         printf 'SSL_ENABLED=%s\n' "$BLUESTREAM_SSL_ENABLED"
         printf 'FIREWALL=%s\n' "$BLUESTREAM_FIREWALL"
         printf 'NGINX_USER=%s\n' "$BLUESTREAM_NGINX_USER"
+        printf 'MAX_MEDIA_UPLOAD_MB=%s\n' "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
     } > "$tmp"
     chmod 0600 "$tmp"
     chown root:root "$tmp" 2>/dev/null || true

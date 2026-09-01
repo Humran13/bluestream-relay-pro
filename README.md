@@ -203,7 +203,7 @@ Security properties:
   Post/Redirect/Get (no mutation on refresh).
 - Source URLs, stream names and media names are validated against the engine's
   own rules (and again by the engine) before any bridge call.
-- Uploads are capped (1 GiB default, mirrored in nginx) and restricted to
+- Uploads are capped (10 GiB default, configurable via server.conf and mirrored in nginx) and restricted to
   common media extensions; the web process can only write the upload staging
   directory, never managed media.
 
