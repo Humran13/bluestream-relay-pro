@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Destinations - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Destinations</h1>
+<p><a class="btn" href="{{ url_for('console.destinations_create') }}">+ Add Destination</a></p>
+<p class="muted">Destinations are target publishing points for future multistreaming. Nothing is pushed from this page yet.</p>
+
+{% if engine_unavailable %}
+<p class="error">Destination information is temporarily unavailable.</p>
+{% endif %}
+
+{% if destinations %}
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Platform</th><th>Server</th><th>Stream Key</th><th>Enabled</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for d in destinations %}
+      <tr>
+        <td>{{ d.display_name }}{% if d.display_name != d.name %} <span class="muted">({{ d.name }})</span>{% endif %}</td>
+        <td>{{ d.platform_label }}</td>
+        <td class="source" title="{{ d.server_url }}">{{ d.server_url }}</td>
+        <td class="key-mask">{% if d.has_stream_key %}&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;{% else %}&mdash;{% endif %}</td>
+        <td>{% if d.enabled %}<span class="badge badge-healthy">Enabled</span>{% else %}<span class="badge badge-stopped">Disabled</span>{% endif %}</td>
+        <td class="actions">
+          {% if d.enabled %}
+          <form method="post" action="{{ url_for('console.destinations_disable', name=d.name) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Disable</button>
+          </form>
+          {% else %}
+          <form method="post" action="{{ url_for('console.destinations_enable', name=d.name) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Enable</button>
+          </form>
+          {% endif %}
+          <form method="post" action="{{ url_for('console.destinations_delete', name=d.name) }}"
+                onsubmit="return confirm('Delete destination \'{{ d.name }}\'? This cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<section class="card">
+  <p class="muted">No streaming destinations configured yet. <a href="{{ url_for('console.destinations_create') }}">Add your first destination</a>.</p>
+</section>
+{% endif %}
+{% endblock %}

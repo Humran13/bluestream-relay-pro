@@ -31,6 +31,9 @@ ALLOWED_OPERATIONS = frozenset(
         "media_list",
         # GUI-3A: read-only playlist cache statistics (no arguments).
         "playlist_cache_status",
+        # GUI-4 Phase 1A: destination list (never returns the stored stream
+        # key - only a has_stream_key flag).
+        "destination_list",
     }
 )
 
@@ -52,6 +55,15 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         # GUI-3A: conservative manual playlist-cache cleanup. Takes NO
         # arguments; the privileged engine derives the protected set itself.
         "playlist_cache_clear_unused",
+        # GUI-4 Phase 1A: destination management foundation. Each operation is
+        # fixed; create takes five non-secret argv values and receives the
+        # stream key through STDIN (never argv/env), enable/disable/delete
+        # take exactly one validated destination ID. No generic
+        # path/file-write/execute operation exists.
+        "destination_create",
+        "destination_enable",
+        "destination_disable",
+        "destination_delete",
     }
 )
 
@@ -106,6 +118,73 @@ def valid_source_url(url) -> bool:
     if any(ch in url for ch in '`"\\<>{}[]'):
         return False
     return True
+
+
+# GUI-4 Phase 1A: destination platform identifiers (stable internal values).
+# These are organisation/display values only - never authoritative platform
+# endpoints.  Mirrors DEST_PLATFORM_ALLOW in lib/destinations.sh.
+ALLOWED_PLATFORMS = frozenset(
+    {"youtube", "facebook", "twitch", "rumble", "instagram", "custom"}
+)
+
+# Destination field bounds (mirror lib/destinations.sh DEST_*_MAX).
+DEST_DISPLAY_MAX = 64
+DEST_SERVER_URL_MAX = 4096
+DEST_STREAM_KEY_MAX = 256
+
+# Destination publish URLs accept ONLY rtmp:// and rtmps://.
+_DEST_URL_SCHEMES = ("rtmp://", "rtmps://")
+
+# Stream keys are opaque secret data: bounded, printable, no control chars.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def valid_dest_platform(platform) -> bool:
+    """True only for a supported internal platform identifier."""
+    return isinstance(platform, str) and platform in ALLOWED_PLATFORMS
+
+
+def valid_dest_url(url) -> bool:
+    """True only for a bounded, data-only RTMP/RTMPS publish URL.
+
+    Mirrors ``bs_valid_dest_url`` in lib/destinations.sh: rtmp(s) scheme only
+    (never http/https/file/ftp/ssh/rtsp/local paths), no whitespace/control or
+    shell-hostile characters. Never executed.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    if len(url) > DEST_SERVER_URL_MAX:
+        return False
+    if not url.startswith(_DEST_URL_SCHEMES):
+        return False
+    # Mirrors bs_valid_dest_url: reject whitespace (including plain spaces),
+    # control characters and shell-hostile characters.
+    if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in url):
+        return False
+    if any(ch in url for ch in '`"\\<>{}[]'):
+        return False
+    return True
+
+
+def valid_dest_stream_key(key) -> bool:
+    """True for an opaque, bounded stream key (data only, never executed)."""
+    if not isinstance(key, str) or not key:
+        return False
+    if len(key) > DEST_STREAM_KEY_MAX:
+        return False
+    return not _CTRL_RE.search(key)
+
+
+def valid_dest_display(display) -> bool:
+    """True for a printable, bounded friendly display name (no newlines)."""
+    if not isinstance(display, str):
+        return False
+    display = display.strip()
+    if not display:
+        return False
+    if len(display) > DEST_DISPLAY_MAX:
+        return False
+    return not _CTRL_RE.search(display)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -187,17 +266,19 @@ class EngineClient:
     def is_production(self) -> bool:
         return self._production
 
-    def _run_argv(self, argv, timeout: float | None = None) -> tuple[int, str]:
+    def _run_argv(
+        self, argv, timeout: float | None = None, stdin_data: bytes | None = None
+    ) -> tuple[int, str]:
         """Run one web-ctl argv list with ``shell=False``; return (rc, stdout).
 
-        Timeout and missing-executable failures become :class:`EngineError`.
-        The caller interprets the exit status and stdout (read-only operations
-        fail on any non-zero exit; lifecycle operations parse the JSON envelope
-        that web-ctl emits on stdout for both success and failure).
+        ``stdin_data`` (bytes, optional) is written to the child's stdin. It is
+        used ONLY for the destination_create secret transport; secrets never
+        appear in the argv list or environment.
         """
         try:
             proc = subprocess.run(
                 argv,
+                input=stdin_data,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout if timeout is not None else self.timeout,
@@ -239,15 +320,24 @@ class EngineClient:
             raise EngineError("engine returned an invalid response envelope")
         return doc["data"]
 
-    def _mutation(self, operation: str, *values, timeout: float | None = None):
+    def _mutation(
+        self,
+        operation: str,
+        *values,
+        timeout: float | None = None,
+        stdin_data: str | bytes | None = None,
+    ):
         """Run one controlled lifecycle/creation operation against validated values.
 
         ``operation`` is fixed by the calling explicit method (never by browser
         input) and must be in ALLOWED_MUTATION_OPERATIONS.  Values are validated
         per operation (stream name, media name, or source URL) before any
-        subprocess is started.  web-ctl emits a JSON envelope on stdout for both
-        success and failure; a non-zero exit or an ``ok: false`` envelope becomes
-        a controlled :class:`EngineError` carrying the bridge's message/code.
+        subprocess is started.  ``stdin_data`` is the optional secret for
+        destination_create and is delivered ONLY through the child's stdin -
+        never as an argv element or environment variable.  web-ctl emits a JSON
+        envelope on stdout for both success and failure; a non-zero exit or an
+        ``ok: false`` envelope becomes a controlled :class:`EngineError`
+        carrying the bridge's message/code.
         """
         if operation not in ALLOWED_MUTATION_OPERATIONS:
             raise EngineError("unsupported operation: %r" % operation)
@@ -258,7 +348,9 @@ class EngineClient:
             if not self._web_ctl.is_file():
                 raise EngineError("engine bridge not found")
             cmd = [self._bash, str(self._web_ctl), operation, *validated]
-        rc, text = self._run_argv(cmd, timeout)
+        if isinstance(stdin_data, str):
+            stdin_data = stdin_data.encode("utf-8")
+        rc, text = self._run_argv(cmd, timeout, stdin_data=stdin_data)
         try:
             doc = json.loads(text)
         except ValueError as exc:
@@ -347,6 +439,39 @@ class EngineClient:
                     code="TOO_MANY_ARGUMENTS",
                 )
             return []
+        if operation in (
+            "destination_enable",
+            "destination_disable",
+            "destination_delete",
+        ):
+            # GUI-4 Phase 1A: exactly one validated destination ID. No path,
+            # extra argument or wildcard can ever reach web-ctl.
+            if len(values) != 1 or not valid_target_name(values[0]):
+                raise EngineError("invalid destination name", code="INVALID_NAME")
+            return list(values)
+        if operation == "destination_create":
+            # GUI-4 Phase 1A: EXACTLY five fixed NON-SECRET argv values (id,
+            # display, platform, rtmp(s) url, enabled). The stream key is NOT
+            # part of the argv: it is validated separately and delivered to
+            # web-ctl through stdin only.
+            if len(values) != 5:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, display, platform, url, enabled = values
+            if not valid_target_name(name):
+                raise EngineError("invalid destination name", code="INVALID_NAME")
+            if not valid_dest_display(display):
+                raise EngineError(
+                    "invalid destination display name", code="INVALID_DISPLAY"
+                )
+            if not valid_dest_platform(platform):
+                raise EngineError("unknown platform", code="UNKNOWN_PLATFORM")
+            if not valid_dest_url(url):
+                raise EngineError(
+                    "unsupported or malformed server URL", code="INVALID_URL"
+                )
+            if enabled not in ("yes", "no"):
+                raise EngineError("invalid enabled value", code="INVALID_ENABLED")
+            return [name, display, platform, url, enabled]
         raise EngineError("unsupported operation: %r" % operation)
 
     # ------------------------------------------------------------------
@@ -405,3 +530,39 @@ class EngineClient:
     def playlist_cache_clear_unused(self):
         """Delete reclaimable playlist-cache artifacts; return freed bytes/count."""
         return self._mutation("playlist_cache_clear_unused")
+
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1A: destination management foundation. Create + list +
+    # enable/disable + delete. No outgoing RTMP worker is started. The list
+    # never returns the stored stream key (only a has_stream_key flag).
+    # ------------------------------------------------------------------
+    def destination_list(self):
+        """Return destination summaries (never the stored stream keys)."""
+        return self.call("destination_list")
+
+    def destination_create(
+        self, name: str, display: str, platform: str, url: str, key: str, enabled: str
+    ):
+        """Create a destination. Non-secret fields travel in argv; the stream
+        key is validated here and delivered to web-ctl through STDIN only, so
+        it never appears in any process argv or environment."""
+        if not valid_dest_stream_key(key):
+            raise EngineError("invalid stream key", code="INVALID_STREAM_KEY")
+        return self._mutation(
+            "destination_create",
+            name,
+            display,
+            platform,
+            url,
+            enabled,
+            stdin_data=key,
+        )
+
+    def destination_enable(self, name: str):
+        return self._mutation("destination_enable", name)
+
+    def destination_disable(self, name: str):
+        return self._mutation("destination_disable", name)
+
+    def destination_delete(self, name: str):
+        return self._mutation("destination_delete", name)

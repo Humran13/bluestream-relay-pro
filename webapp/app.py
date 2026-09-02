@@ -57,10 +57,15 @@ from flask import (
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from webapp.engine import (
+    ALLOWED_PLATFORMS,
     ALLOWED_UPLOAD_EXTENSIONS,
     MAX_PLAYLIST_ITEMS,
     EngineClient,
     EngineError,
+    valid_dest_display,
+    valid_dest_platform,
+    valid_dest_stream_key,
+    valid_dest_url,
     valid_media_name,
     valid_source_url,
     valid_target_name,
@@ -211,6 +216,17 @@ TYPE_LABELS = {
     "rtsp": "RTSP",
 }
 
+# GUI-4 Phase 1A: display labels for the stable internal platform values.
+# These are organisation/display only - never authoritative platform endpoints.
+PLATFORM_LABELS = {
+    "youtube": "YouTube",
+    "facebook": "Facebook",
+    "twitch": "Twitch",
+    "rumble": "Rumble",
+    "instagram": "Instagram",
+    "custom": "Custom RTMP",
+}
+
 _CREATE_ERROR_MESSAGES = {
     "INVALID_NAME": "Invalid stream name. Use [a-z0-9_-], start with a letter or digit, max 48 chars.",
     "INVALID_URL": "Unsupported or malformed source URL.",
@@ -298,6 +314,59 @@ def _playlist_error_message(exc: EngineError, fallback: str) -> str:
     if isinstance(exc, EngineError) and exc.code in _PLAYLIST_ERROR_MESSAGES:
         return _PLAYLIST_ERROR_MESSAGES[exc.code]
     return fallback
+
+
+# ---------------------------------------------------------------------------
+# GUI-4 Phase 1A: destination helpers. The stored stream key is a secret: it
+# never reaches templates, flash messages, logs, URLs or list payloads. The
+# page only ever receives a has_stream_key flag and renders a fixed mask.
+# ---------------------------------------------------------------------------
+_DEST_ERROR_MESSAGES = {
+    "INVALID_NAME": "Invalid destination name. Use lowercase letters, digits, '-' and '_'.",
+    "INVALID_DISPLAY": "Please enter a destination name between 1 and 64 characters.",
+    "UNKNOWN_PLATFORM": "Unsupported platform selected.",
+    "INVALID_URL": "Server URL must start with rtmp:// or rtmps:// and contain no spaces or control characters.",
+    "INVALID_STREAM_KEY": "Stream key must be 1-256 printable characters.",
+    "MISSING_STREAM_KEY": "A stream key is required.",
+    "ALREADY_EXISTS": "A destination with that name already exists.",
+    "CREATION_FAILED": "Destination creation failed. Please try again.",
+}
+
+
+def _destination_error_message(exc: EngineError, fallback: str) -> str:
+    if isinstance(exc, EngineError) and exc.code in _DEST_ERROR_MESSAGES:
+        return _DEST_ERROR_MESSAGES[exc.code]
+    return fallback
+
+
+_DEST_STATE_MESSAGES = {
+    "enable": "Destination enabled.",
+    "disable": "Destination disabled.",
+    "delete": "Destination deleted.",
+}
+
+
+def _present_destination(item) -> dict | None:
+    """Shape one safe engine destination record for the listing template.
+
+    Never includes the stream key - only a boolean ``has_stream_key``.
+    """
+    if not isinstance(item, dict):
+        return None
+    name = (item.get("name") or "").strip()
+    if not name:
+        return None
+    display = (item.get("display_name") or "").strip() or name
+    platform = item.get("platform") or ""
+    return {
+        "name": name,
+        "display_name": display,
+        "platform": platform,
+        "platform_label": PLATFORM_LABELS.get(platform, platform),
+        "server_url": item.get("server_url") or "",
+        "enabled": item.get("enabled") == "yes",
+        "has_stream_key": item.get("has_stream_key") == "yes",
+    }
 
 
 # GUI-3A: the web-ctl JSON helper serializes all values as strings; the console
@@ -666,6 +735,10 @@ _NAV_SECTIONS = {
     "console.playlists_create": "playlists",
     "console.playlists_create_post": "playlists",
     "console.playlists_cache_clear": "playlists",
+    # GUI-4 Phase 1A: destinations section (listing + create pages).
+    "console.destinations": "destinations",
+    "console.destinations_create": "destinations",
+    "console.destinations_create_post": "destinations",
 }
 
 
@@ -1266,6 +1339,137 @@ def _register_console_routes(app: Flask) -> None:
         else:
             flash("No unused playlist cache files to clear.", "success")
         return redirect(url_for("console.playlists"))
+
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1A: Destinations manager foundation. Create + list +
+    # enable/disable + delete. No outgoing RTMP push is started in this phase.
+    # Every mutation is POST + CSRF (enforced globally) + authenticated, the
+    # operation is fixed by the route, and the stored stream key never reaches
+    # the HTML, flash, logs, query strings or list payloads.
+    # ------------------------------------------------------------------
+    @console.route("/destinations", methods=["GET"])
+    def destinations():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        engine = current_app.extensions["bluestream_engine"]
+        items = []
+        errors = []
+        try:
+            items = engine.destination_list() or []
+        except EngineError as exc:
+            current_app.logger.warning(
+                "engine destination_list unavailable: %s", exc
+            )
+            errors.append("destination_list")
+        destinations = [
+            presented
+            for presented in (_present_destination(item) for item in items)
+            if presented is not None
+        ]
+        return render_template(
+            "destinations.html",
+            destinations=destinations,
+            engine_unavailable=bool(errors),
+        )
+
+    @console.route("/destinations/create", methods=["GET"])
+    def destinations_create():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return render_template(
+            "destinations_create.html",
+            platforms=PLATFORM_LABELS,
+            enabled_default=False,
+        )
+
+    @console.route("/destinations/create", methods=["POST"])
+    def destinations_create_post():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        display = (request.form.get("display") or "").strip()
+        platform = (request.form.get("platform") or "").strip().lower()
+        url = (request.form.get("server_url") or "").strip()
+        key = request.form.get("stream_key") or ""
+        enabled = "yes" if request.form.get("enabled") == "on" else "no"
+        # Friendly display name -> safe internal ID at the web boundary; the
+        # privileged bridge only ever receives the validated ID.
+        name = normalize_stream_name(display)
+        if not valid_dest_display(display) or name is None:
+            flash(
+                "Please enter a destination name (1-64 characters) made of "
+                "letters, digits, spaces, '-' and '_'.",
+                "error",
+            )
+            return redirect(url_for("console.destinations_create"))
+        if not valid_dest_platform(platform):
+            flash("Unsupported platform selected.", "error")
+            return redirect(url_for("console.destinations_create"))
+        if not valid_dest_url(url):
+            flash(
+                "Server URL must start with rtmp:// or rtmps:// and contain "
+                "no spaces or control characters.",
+                "error",
+            )
+            return redirect(url_for("console.destinations_create"))
+        if not valid_dest_stream_key(key):
+            flash("Stream key is required (1-256 printable characters).", "error")
+            return redirect(url_for("console.destinations_create"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.destination_create(name, display, platform, url, key, enabled)
+        except EngineError as exc:
+            # Never log form data; the engine error carries no key material.
+            current_app.logger.warning("destination_create '%s' failed: %s", name, exc)
+            flash(
+                _destination_error_message(exc, "Destination creation failed."),
+                "error",
+            )
+            return redirect(url_for("console.destinations_create"))
+        flash(
+            "Destination '%s' created. It is ready for future multistream "
+            "phases." % display,
+            "success",
+        )
+        return redirect(url_for("console.destinations"))
+
+    def _destination_state(kind: str, name: str):
+        """Run one authenticated enable/disable/delete action (PRG)."""
+        if not valid_target_name(name):
+            current_app.logger.warning(
+                "destination %s rejected invalid name", kind
+            )
+            flash("Invalid destination name.", "error")
+            return redirect(url_for("console.destinations"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            method = getattr(engine, "destination_%s" % kind)
+            method(name)
+        except EngineError as exc:
+            current_app.logger.warning(
+                "destination_%s '%s' failed: %s", kind, name, exc
+            )
+            flash("Destination operation failed.", "error")
+        else:
+            flash(_DEST_STATE_MESSAGES[kind], "success")
+        return redirect(url_for("console.destinations"))
+
+    @console.route("/destinations/<name>/enable", methods=["POST"])
+    def destinations_enable(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _destination_state("enable", name)
+
+    @console.route("/destinations/<name>/disable", methods=["POST"])
+    def destinations_disable(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _destination_state("disable", name)
+
+    @console.route("/destinations/<name>/delete", methods=["POST"])
+    def destinations_delete(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _destination_state("delete", name)
 
     app.register_blueprint(console)
 

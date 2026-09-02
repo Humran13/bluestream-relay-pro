@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Add Destination - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<h1>Add Destination</h1>
+<section class="card">
+  <form method="post" action="{{ url_for('console.destinations_create_post') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="display">Destination Name</label>
+    <input type="text" id="display" name="display" required maxlength="64" placeholder="e.g. Main YouTube">
+    <p class="muted">A friendly name you will recognise - spaces and punctuation become a safe internal ID automatically (e.g. &quot;Main YouTube&quot; becomes &quot;main-youtube&quot;).</p>
+    <label for="platform">Platform</label>
+    <select id="platform" name="platform">
+      {% for value, label in platforms.items() %}
+      <option value="{{ value }}">{{ label }}</option>
+      {% endfor %}
+    </select>
+    <p class="muted">Used to organise your destinations. You supply the actual server URL and stream key below.</p>
+    <label for="server_url">Server URL</label>
+    <input type="text" id="server_url" name="server_url" required maxlength="4096" placeholder="rtmps://a.rtmp.youtube.com/live2">
+    <p class="muted">Must start with rtmp:// or rtmps://. Stored as data only and never executed by the server.</p>
+    <label for="stream_key">Stream Key</label>
+    <input type="password" id="stream_key" name="stream_key" required maxlength="256" autocomplete="off" placeholder="Paste your stream / publish key">
+    <label class="checkbox"><input type="checkbox" id="enabled" name="enabled"{% if enabled_default %} checked{% endif %}> Enabled (available for future multistreaming)</label>
+    <button type="submit" class="btn">Create Destination</button>
+  </form>
+</section>
+<p><a href="{{ url_for('console.destinations') }}">&laquo; Back to Destinations</a></p>
+{% endblock %}

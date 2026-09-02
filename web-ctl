@@ -44,6 +44,20 @@
 #   web-ctl playlist_cache_status          (read-only cache totals/protected)
 #   web-ctl playlist_cache_clear_unused    (delete only reclaimable artifacts)
 #
+# GUI-4 destination management foundation (Phase 1A). Read-only list never
+# returns the stored stream key - only a has_stream_key flag.  Mutations take
+# a fixed, validated destination ID plus (for create) bounded non-secret data
+# values; the stream key is delivered to destination_create through STDIN -
+# never argv, environment, files, or command substitution - and is NEVER
+# echoed or returned.  No outgoing RTMP worker or service is created:
+#
+#   web-ctl destination_list
+#   web-ctl destination_create <id> <display> <platform> <url> <yes|no>
+#       (the stream key is read from STDIN - never an argv element)
+#   web-ctl destination_enable  <id>
+#   web-ctl destination_disable <id>
+#   web-ctl destination_delete  <id>
+#
 # The six lifecycle actions, the create/import operations above, and the two
 # cache operations are the ONLY write operations at any layer.  No
 # configuration editing, deletion, or user-management operations exist beyond
@@ -112,7 +126,7 @@ fi
 # business logic (version, config parsing, discovery, service state, health)
 # stays in these libraries; Python is used only for JSON serialization.
 # ---------------------------------------------------------------------------
-for _bs_lib in common health probe relay playlist media; do
+for _bs_lib in common health probe relay playlist media destinations; do
     # shellcheck source=lib/common.sh
     . "$BS_ROOT/lib/$_bs_lib.sh" || {
         printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
@@ -456,6 +470,100 @@ wc_op_lifecycle() {
 }
 
 # ---------------------------------------------------------------------------
+# GUI-4 Phase 1A: destination management. destination_list NEVER emits the
+# stored stream key - only a has_stream_key flag. destination_create reads
+# exactly one secret value from STDIN (never argv/env); enable/disable/delete
+# take exactly one validated destination ID. No outgoing RTMP process/service
+# is started.
+# ---------------------------------------------------------------------------
+wc_op_destination_list() {
+    local name display platform url enabled haskey
+    for name in $(dest_list_names 2>/dev/null); do
+        # Names come from validated destination config discovery ([a-z0-9_-]);
+        # the for-loop word split is therefore safe.
+        display=""; platform=""; url=""; enabled="no"; haskey="no"
+        if dest_load_config "$name" 2>/dev/null; then
+            display="$DEST_DISPLAY"
+            platform="$DEST_PLATFORM"
+            url="$(bs_redact_url "$DEST_SERVER_URL")"
+            enabled="$DEST_ENABLED"
+            if [ -n "$DEST_STREAM_KEY" ]; then haskey="yes"; fi
+        fi
+        {
+            printf '\0'
+            printf 'name\0%s\0'            "$name"
+            printf 'display_name\0%s\0'    "$display"
+            printf 'platform\0%s\0'        "$platform"
+            printf 'server_url\0%s\0'      "$url"
+            printf 'enabled\0%s\0'         "$enabled"
+            printf 'has_stream_key\0%s\0'  "$haskey"
+        }
+    done | wc_json array
+}
+
+wc_op_destination_create() {
+    local name="${1:-}" display="${2:-}" platform="${3:-}" url="${4:-}"
+    local enabled="${5:-}" key="" rc
+    bs_valid_name "$name" || wc_fail "invalid destination name" "INVALID_NAME"
+    bs_valid_dest_display "$display" || wc_fail "invalid destination display name" "INVALID_DISPLAY"
+    bs_valid_platform "$platform" || wc_fail "unknown platform" "UNKNOWN_PLATFORM"
+    [ -n "$url" ] || wc_fail "missing server URL" "MISSING_URL"
+    bs_valid_dest_url "$url" || wc_fail "unsupported or malformed server URL" "INVALID_URL"
+    case "$enabled" in yes|no) ;; *) wc_fail "invalid enabled value" "INVALID_ENABLED" ;; esac
+    # The stream key is NEVER an argv element or environment variable: read
+    # exactly one secret value from stdin. IFS= preserves leading/trailing
+    # spaces and other permitted printable characters; `read` strips only the
+    # terminating newline, so a key can never contain a newline. Any further
+    # stdin content after the first line is intentionally ignored.
+    key=""
+    IFS= read -r key || true
+    [ -n "$key" ] || wc_fail "missing stream key" "MISSING_STREAM_KEY"
+    bs_valid_stream_key "$key" || wc_fail "invalid stream key" "INVALID_STREAM_KEY"
+    dest_exists "$name" && wc_fail "a destination named '$name' already exists" "ALREADY_EXISTS"
+    ( dest_create "$name" "$display" "$platform" "$url" "$key" "$enabled" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid destination name" "INVALID_NAME" ;;
+        2) wc_fail "invalid destination display name" "INVALID_DISPLAY" ;;
+        3) wc_fail "unknown platform" "UNKNOWN_PLATFORM" ;;
+        4) wc_fail "unsupported or malformed server URL" "INVALID_URL" ;;
+        5) wc_fail "invalid stream key" "INVALID_STREAM_KEY" ;;
+        6) wc_fail "invalid enabled value" "INVALID_ENABLED" ;;
+        7) wc_fail "a destination named '$name' already exists" "ALREADY_EXISTS" ;;
+        *) wc_fail "destination creation failed" "CREATION_FAILED" ;;
+    esac
+    # Never echo the stream key back to stdout.
+    printf 'operation\0%s\0name\0%s\0display_name\0%s\0platform\0%s\0' \
+        "destination_create" "$name" "$display" "$platform" | wc_json object
+}
+
+wc_op_destination_state() {
+    local op="$1" name="${2:-}" enabled="" rc
+    case "$op" in
+        destination_enable)  enabled="yes" ;;
+        destination_disable) enabled="no" ;;
+        *) wc_fail "unsupported destination state operation: $op" "UNKNOWN_OPERATION" ;;
+    esac
+    bs_valid_name "$name" || wc_fail "invalid destination name" "INVALID_NAME"
+    dest_exists "$name" || wc_fail "destination not found: $name" "NOT_FOUND"
+    ( dest_set_enabled "$name" "$enabled" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "destination $enabled operation failed" "OPERATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0' "$op" "$name" | wc_json object
+}
+
+wc_op_destination_delete() {
+    local name="${1:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid destination name" "INVALID_NAME"
+    dest_exists "$name" || wc_fail "destination not found: $name" "NOT_FOUND"
+    ( dest_delete "$name" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "destination deletion failed" "OPERATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0' "destination_delete" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch: hard-coded allowlist, fail closed.  No dynamic execution.
 # ---------------------------------------------------------------------------
 wc_dispatch() {
@@ -520,6 +628,39 @@ wc_dispatch() {
             shift 2  # drop operation + name; remaining "$@" are the media items
             wc_op_playlist_create "$name" "$@"
             ;;
+        destination_list)
+            # Read-only destination list; NO stream key is ever emitted.
+            if [ "$argcount" -ne 1 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            wc_op_destination_list
+            ;;
+        destination_create)
+            # EXACTLY operation + 5 fixed NON-SECRET values (id display
+            # platform url enabled); shell argv count == 6. The stream key is
+            # read from STDIN, never from argv.
+            if [ "$argcount" -lt 6 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt 6 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            shift 1  # drop operation; remaining "$@" are the 5 fixed values
+            wc_op_destination_create "$@"
+            ;;
+        destination_enable|destination_disable|destination_delete)
+            # EXACTLY operation + one validated destination ID (argv == 2).
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing destination name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                destination_delete) wc_op_destination_delete "$name" ;;
+                *) wc_op_destination_state "$operation" "$name" ;;
+            esac
+            ;;
         relay_create_url|relay_create_media)
             # EXACTLY operation + two arguments (shell argv count == 3).
             if [ "$argcount" -lt 3 ]; then
@@ -534,7 +675,7 @@ wc_dispatch() {
             esac
             ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

@@ -436,12 +436,21 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 "enable", "disable",
                 "nginx", "ssl", "firewall",
             )
+            # GUI-4 Phase 1A: exactly these fixed destination actions are
+            # allowlisted; every other mutation word stays forbidden.
+            allowed_action_endpoints = {
+                "console.destinations_enable",
+                "console.destinations_disable",
+                "console.destinations_delete",
+            }
             for rule in app.url_map.iter_rules():
+                if rule.endpoint in allowed_action_endpoints:
+                    continue
                 lower = rule.endpoint.lower()
                 for word in forbidden:
                     self.assertNotIn(word, lower)
 
-    def test_23_engineclient_operations_exactly_six(self):
+    def test_23_engineclient_operations_exactly_seven(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -457,11 +466,13 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "playlist_list",
                     "media_list",
                     "playlist_cache_status",
+                    # GUI-4 Phase 1A: read-only destination list (no stream key)
+                    "destination_list",
                 }
             ),
         )
 
-    def test_24_engineclient_mutation_operations_exactly_eleven(self):
+    def test_24_engineclient_mutation_operations_exactly_fifteen(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
@@ -478,6 +489,11 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "playlist_create",
                     # GUI-3A: manual playlist-cache cleanup (no arguments)
                     "playlist_cache_clear_unused",
+                    # GUI-4 Phase 1A: destination management foundation
+                    "destination_create",
+                    "destination_enable",
+                    "destination_disable",
+                    "destination_delete",
                 }
             ),
         )
@@ -487,11 +503,16 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "playlist_start", "playlist_stop", "playlist_restart",
             "relay_create_url", "relay_create_media", "media_import_staged",
             "playlist_create", "playlist_cache_clear_unused",
+            "destination_list", "destination_create",
+            "destination_enable", "destination_disable", "destination_delete",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for name in (
             "relay_edit", "relay_delete", "playlist_edit", "playlist_delete",
             "media_remove", "media_delete",
+            "destination_edit", "destination_exec", "destination_execute",
+            "destination_write", "destination_write_file",
+            "destination_delete_path", "destination_remove_path",
         ):
             self.assertFalse(hasattr(client, name), name)
 
@@ -501,6 +522,9 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "version", "snapshot", "relay_list", "playlist_list",
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
+            # GUI-4 Phase 1A destination operations
+            "destination_list", "destination_create",
+            "destination_enable", "destination_disable", "destination_delete",
         ):
             self.assertIn(op, w)
         # no shell code-execution constructs in the bridge
@@ -514,6 +538,9 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_delete", "relay_edit", "relay_remove",
             "playlist_delete", "playlist_edit", "playlist_remove",
             "media_delete", "media_remove", "restore", "firewall",
+            "destination_exec", "destination_execute",
+            "destination_write", "destination_write_file",
+            "destination_delete_path", "destination_remove_path",
         ):
             self.assertNotIn(op, w)
 
@@ -1921,6 +1948,167 @@ chown() { return 0; }
             "echo TMP_COUNT=$(ls -1 \"$BLUESTREAM_PLAYLIST_CONF_DIR\" 2>/dev/null | wc -l)\n"
         )
         self.assertEqual(out, ["RC=8", "CONF=no", "TMP_COUNT=0"])
+
+
+class DestinationFoundationTests(unittest.TestCase):
+    """GUI-4 Phase 1A deployment wiring: config dir/permissions, lib safety,
+    web-ctl dispatch, systemd namespace, and no-outgoing-worker guarantees."""
+
+    def test_01_install_creates_rootonly_destinations_dir(self):
+        s = repo_text("install.sh")
+        self.assertIn('"$BLUESTREAM_DEST_CONF_DIR"', s)
+        self.assertIn(
+            "chmod 0700 \"$BLUESTREAM_ETC_DIR\" \"$BLUESTREAM_RELAY_CONF_DIR\" "
+            "\"$BLUESTREAM_PLAYLIST_CONF_DIR\" \"$BLUESTREAM_DEST_CONF_DIR\"",
+            s,
+        )
+        self.assertIn(
+            "chown root:root \"$BLUESTREAM_ETC_DIR\" \"$BLUESTREAM_RELAY_CONF_DIR\" "
+            "\"$BLUESTREAM_PLAYLIST_CONF_DIR\" \"$BLUESTREAM_DEST_CONF_DIR\"",
+            s,
+        )
+
+    def test_02_destinations_lib_config_permissions_are_restrictive(self):
+        d = repo_text("lib/destinations.sh")
+        # Config files land at root:root 0600 inside a root:root 0700 dir.
+        self.assertIn("chmod 0600 \"$tmp\"", d)
+        self.assertIn("chown root:root \"$tmp\"", d)
+        self.assertIn("chmod 0600 \"$dest\"", d)
+        # delete removes ONLY the fixed validated config file (no generic path)
+        self.assertIn('rm -f "$BLUESTREAM_DEST_CONF_DIR/$name.conf"', d)
+        self.assertNotIn("rm -rf", d)
+
+    def test_03_destinations_lib_starts_no_worker(self):
+        d = repo_text("lib/destinations.sh")
+        # No systemd/service/process control exists in the destinations lib.
+        self.assertNotIn("systemctl", d)
+        self.assertNotIn("dest_start", d)
+        self.assertNotIn("eval ", d)
+        self.assertNotIn("lscpu", d)
+        # list/load never emits the secret key as a config record line
+        self.assertNotIn("printf 'stream_key\\0", d)
+
+    def test_04_service_readwrite_includes_destinations(self):
+        s = repo_text("config/systemd/bluestream-web.service")
+        self.assertIn("/etc/bluestream/destinations", s)
+
+    def test_05_no_destination_systemd_unit_was_added(self):
+        units = [p.name for p in (REPO_ROOT / "config" / "systemd").glob("*destination*")]
+        self.assertEqual(units, [])
+        # no reference to a destination unit anywhere in web-ctl or engine
+        for rel in ("web-ctl", "webapp/engine.py", "webapp/app.py"):
+            text = repo_text(rel)
+            self.assertNotIn("bluestream-destination@", text)
+            self.assertNotIn("destination@.service", text)
+
+    def test_06_web_ctl_sources_destinations_library(self):
+        w = repo_text("web-ctl")
+        self.assertIn("media destinations;", w)
+        # the read-only list only reports a has_stream_key flag; it never emits
+        # a record for the stored key itself
+        self.assertIn("has_stream_key", w)
+        self.assertNotIn("'stream_key\\0", w)
+
+    def test_07_platform_allowlist_is_bounded(self):
+        d = repo_text("lib/destinations.sh")
+        self.assertIn('DEST_PLATFORM_ALLOW="youtube facebook twitch rumble instagram custom"', d)
+
+    def test_08_no_env_or_temp_file_secret_transport(self):
+        # The secret is transported over stdin only - never via an environment
+        # variable assignment, an export, or a temporary plaintext file.
+        w = repo_text("web-ctl")
+        e = repo_text("webapp/engine.py")
+        d = repo_text("lib/destinations.sh")
+        for text in (w, e):
+            self.assertNotIn("STREAM_KEY=", text)
+            self.assertNotIn("os.environ", text)
+        self.assertNotIn("export STREAM_KEY", w)
+        self.assertNotIn("env STREAM_KEY", w)
+        self.assertNotIn("mktemp", w)
+        # the only STREAM_KEY= write is the root-owned config file itself
+        self.assertIn("printf 'STREAM_KEY=%s\\n'", d)
+
+class DestinationEngineStorageTests(unittest.TestCase):
+    """GUI-4 Phase 1A: sandboxed destinations.sh behavior - the engine stores
+    the exact stream key (spaces preserved) in the root-controlled config, and
+    load/delete round-trip correctly. The web-ctl layer feeds the key read
+    from stdin into dest_create; storage correctness is proven here."""
+
+    _HARNESS = """#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+tmp="$(cygpath -u "$3" 2>/dev/null || printf '%s' "$3")"
+. "$repo/lib/common.sh"
+. "$repo/lib/destinations.sh"
+BLUESTREAM_DEST_CONF_DIR="$tmp/dest-conf"
+mkdir -p "$BLUESTREAM_DEST_CONF_DIR"
+# Unit-test isolation: engine ops require root; stub it so the tests exercise
+# the pure config logic only. chown is a no-op here (non-root).
+bs_require_root() { return 0; }
+chown() { return 0; }
+. "$scenario"
+"""
+
+    def _run(self, scenario_text):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            scenario = tmpdir / "scenario.sh"
+            scenario.write_text(scenario_text, encoding="utf-8")
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(scenario), tmp],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            return proc.stdout.decode("utf-8").strip().splitlines()
+
+    def test_01_dest_create_stores_exact_stream_key(self):
+        key = "my stream key  with spaces _-:="
+        out = self._run(
+            "dest_create 'main-youtube' 'Main YouTube' 'youtube' "
+            "'rtmps://a.rtmp.youtube.com/live2' "
+            "'%s' 'yes'\n" % key
+            + "echo RC=$?\n"
+            + "dest_load_config 'main-youtube'\n"
+            + "echo LOADED=$?\n"
+            + "echo NAME=$DEST_NAME\n"
+            + "echo DISPLAY=$DEST_DISPLAY\n"
+            + "echo PLATFORM=$DEST_PLATFORM\n"
+            + "echo URL=$DEST_SERVER_URL\n"
+            + "echo \"KEY=$DEST_STREAM_KEY\"\n"
+            + "echo ENABLED=$DEST_ENABLED\n"
+        )
+        self.assertEqual(out[0], "RC=0")
+        self.assertEqual(out[1], "LOADED=0")
+        self.assertEqual(out[2], "NAME=main-youtube")
+        self.assertEqual(out[3], "DISPLAY=Main YouTube")
+        self.assertEqual(out[4], "PLATFORM=youtube")
+        self.assertEqual(out[5], "URL=rtmps://a.rtmp.youtube.com/live2")
+        self.assertEqual(out[6], "KEY=%s" % key)
+        self.assertEqual(out[7], "ENABLED=yes")
+
+    def test_02_dest_delete_removes_only_that_config(self):
+        out = self._run(
+            "dest_create 'one' 'One' 'youtube' 'rtmps://x/one' 'key-1' 'no'\n"
+            "dest_create 'two' 'Two' 'custom' 'rtmp://x/two' 'key-2' 'no'\n"
+            "dest_delete 'one'\n"
+            "echo DEL_RC=$?\n"
+            "echo ONE=$([ -e \"$BLUESTREAM_DEST_CONF_DIR/one.conf\" ] && echo present || echo gone)\n"
+            "echo TWO=$([ -e \"$BLUESTREAM_DEST_CONF_DIR/two.conf\" ] && echo present || echo gone)\n"
+        )
+        self.assertEqual(out, ["DEL_RC=0", "ONE=gone", "TWO=present"])
+
+
 
 
 if __name__ == "__main__":

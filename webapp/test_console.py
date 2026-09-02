@@ -33,6 +33,10 @@ from webapp.engine import (
     ALLOWED_OPERATIONS,
     EngineClient,
     EngineError,
+    valid_dest_display,
+    valid_dest_platform,
+    valid_dest_stream_key,
+    valid_dest_url,
     valid_target_name,
 )
 from flask import request, url_for
@@ -110,6 +114,23 @@ class FakeEngine:
 
     def playlist_cache_clear_unused(self):
         return self._mutation("playlist_cache_clear_unused")
+
+    def destination_list(self):
+        return self.call("destination_list")
+
+    def destination_create(self, name, display, platform, url, key, enabled):
+        return self._mutation(
+            "destination_create", name, display, platform, url, key, enabled
+        )
+
+    def destination_enable(self, name):
+        return self._mutation("destination_enable", name)
+
+    def destination_disable(self, name):
+        return self._mutation("destination_disable", name)
+
+    def destination_delete(self, name):
+        return self._mutation("destination_delete", name)
 
 
 def make_state(tmpdir, password=ADMIN_PASSWORD):
@@ -414,15 +435,24 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
     def test_21_route_surface_only_allowed_endpoints(self):
         # GUI-1B.1/GUI-1C.1 add the lifecycle, create-stream and media endpoints;
         # everything else that mutates (edit/delete/remove/restore/...) stays
-        # forbidden. The exact-set assertion below is the real guard.
+        # forbidden. The exact-set assertion below is the real guard. GUI-4
+        # Phase 1A allowlists exactly the fixed destination enable/disable/
+        # delete action routes; every other mutation word stays forbidden.
         forbidden = (
             "edit", "delete", "remove", "restore",
             "enable", "disable",
             "nginx", "ssl", "firewall",
         )
+        allowed_action_endpoints = {
+            "console.destinations_enable",
+            "console.destinations_disable",
+            "console.destinations_delete",
+        }
         endpoints = set()
         for rule in self.app.url_map.iter_rules():
             endpoints.add(rule.endpoint)
+            if rule.endpoint in allowed_action_endpoints:
+                continue
             lower = rule.endpoint.lower()
             for word in forbidden:
                 self.assertNotIn(word, lower)
@@ -455,6 +485,12 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.playlists_create_post",
                 "console.playlists_cache_clear",
                 "console.system_metrics",
+                "console.destinations",
+                "console.destinations_create",
+                "console.destinations_create_post",
+                "console.destinations_enable",
+                "console.destinations_disable",
+                "console.destinations_delete",
             },
         )
         # only the expected HTTP methods
@@ -638,6 +674,7 @@ class EngineClientTests(unittest.TestCase):
                     "playlist_list",
                     "media_list",
                     "playlist_cache_status",
+                    "destination_list",
                 }
             ),
         )
@@ -754,12 +791,22 @@ class EngineClientTests(unittest.TestCase):
             "media_import_staged",
             # GUI-1D.1: fixed-argv playlist creation
             "playlist_create",
+            # GUI-4 Phase 1A: destination management foundation
+            "destination_list",
+            "destination_create",
+            "destination_enable",
+            "destination_disable",
+            "destination_delete",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for forbidden in (
             "relay_edit", "relay_delete",
             "playlist_edit", "playlist_delete",
             "media_remove", "media_delete",
+            # GUI-4: no generic destination operations may exist
+            "destination_edit", "destination_exec", "destination_execute",
+            "destination_write", "destination_write_file",
+            "destination_delete_path", "destination_remove_path",
         ):
             self.assertFalse(hasattr(client, forbidden), forbidden)
         self.assertEqual(
@@ -777,6 +824,10 @@ class EngineClientTests(unittest.TestCase):
                     "media_import_staged",
                     "playlist_create",
                     "playlist_cache_clear_unused",
+                    "destination_create",
+                    "destination_enable",
+                    "destination_disable",
+                    "destination_delete",
                 }
             ),
         )
@@ -1043,6 +1094,114 @@ class EngineClientTests(unittest.TestCase):
         self.assertIs(calls["kwargs"]["shell"], False)
 
 
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1A security follow-up: the destination stream key must
+    # NEVER appear in process argv - it travels through stdin only.
+    # ------------------------------------------------------------------
+    def test_31_destination_create_local_argv_excludes_key_and_uses_stdin(self):
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["stdin"] = kwargs.get("input")
+            calls["shell"] = kwargs.get("shell")
+
+            class Result:
+                returncode = 0
+                stdout = b'{"ok": true, "data": {"operation": "destination_create"}}\n'
+                stderr = b""
+
+            return Result()
+
+        fake = Path(self._tmp.name) / "web-ctl"
+        fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        key = "secret key with spaces-123"
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(web_ctl=fake, bash="/bin/bash")
+            client.destination_create(
+                "main-youtube", "Main YouTube", "youtube",
+                "rtmps://a.rtmp.youtube.com/live2", key, "yes",
+            )
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(
+            calls["cmd"],
+            [
+                "/bin/bash", str(fake), "destination_create",
+                "main-youtube", "Main YouTube", "youtube",
+                "rtmps://a.rtmp.youtube.com/live2", "yes",
+            ],
+        )
+        self.assertEqual(calls["stdin"], key.encode("utf-8"))
+        self.assertIs(calls["shell"], False)
+        for token in calls["cmd"]:
+            self.assertNotIn(key, token)
+        self.assertNotIn(key, " ".join(calls["cmd"]))
+
+    def test_32_destination_create_production_argv_excludes_key_and_uses_stdin(self):
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["stdin"] = kwargs.get("input")
+            calls["shell"] = kwargs.get("shell")
+
+            class Result:
+                returncode = 0
+                stdout = b'{"ok": true, "data": {}}\n'
+                stderr = b""
+
+            return Result()
+
+        key = "SUPER-TOP-SECRET-key"
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(production=True)
+            client.destination_create(
+                "twitch-main", "Main Twitch", "twitch", "rtmp://live.twitch.tv/app",
+                key, "no",
+            )
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(
+            calls["cmd"],
+            [
+                "/usr/bin/sudo", "-n", "/usr/local/lib/bluestream/web-ctl",
+                "destination_create", "twitch-main", "Main Twitch", "twitch",
+                "rtmp://live.twitch.tv/app", "no",
+            ],
+        )
+        self.assertEqual(calls["stdin"], key.encode("utf-8"))
+        self.assertIs(calls["shell"], False)
+        self.assertNotIn(key, " ".join(calls["cmd"]))
+
+    def test_33_destination_create_invalid_key_rejected_before_subprocess(self):
+        called = []
+
+        def fake_run(cmd, **kwargs):
+            called.append(cmd)
+            raise AssertionError("subprocess must not be executed")
+
+        original = engine_module.subprocess.run
+        engine_module.subprocess.run = fake_run
+        try:
+            client = EngineClient(
+                web_ctl=Path(self._tmp.name) / "web-ctl", bash="/bin/bash"
+            )
+            for bad_key in ("", "a\nb", "k" * 257, "ctl\x1b"):
+                with self.assertRaises(EngineError, msg=repr(bad_key)):
+                    client.destination_create(
+                        "main-youtube", "Main YouTube", "youtube",
+                        "rtmps://x", bad_key, "yes",
+                    )
+        finally:
+            engine_module.subprocess.run = original
+        self.assertEqual(called, [])
+
+
 class WebCtlArgvBoundaryTests(unittest.TestCase):
     """GUI-1B.1: lifecycle operations accept EXACTLY two argv items.
 
@@ -1065,6 +1224,20 @@ class WebCtlArgvBoundaryTests(unittest.TestCase):
         bash = engine_module.default_bash_path()
         proc = subprocess.run(
             [bash, str(REPO_ROOT / "web-ctl"), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            cwd=str(REPO_ROOT),
+        )
+        doc = json.loads(proc.stdout.decode("utf-8"))
+        return proc.returncode, doc
+
+    def _run_stdin(self, data, *args):
+        """Run web-ctl with ``data`` written to its stdin (utf-8)."""
+        bash = engine_module.default_bash_path()
+        proc = subprocess.run(
+            [bash, str(REPO_ROOT / "web-ctl"), *args],
+            input=data.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=20,
@@ -1229,6 +1402,94 @@ class WebCtlArgvBoundaryTests(unittest.TestCase):
         rc, doc = self._run("playlist_create", "zz-playlist-probe", "a.mp4", "b.mp4")
         self.assertEqual(rc, 1)
         self.assertEqual(doc["code"], "MEDIA_NOT_FOUND")
+
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1A: destination operation argv cardinality + allowlist.
+    # ------------------------------------------------------------------
+    def test_37_destination_state_argv_cardinality(self):
+        for op in ("destination_enable", "destination_disable", "destination_delete"):
+            rc, doc = self._run(op)
+            self.assertEqual(rc, 1, op)
+            self.assertEqual(doc["code"], "MISSING_TARGET", op)
+        for op in ("destination_enable", "destination_delete"):
+            rc, doc = self._run(op, "goodname", "extra")
+            self.assertEqual(rc, 1, op)
+            self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS", op)
+
+    def test_38_destination_state_valid_name_reaches_existence(self):
+        # The exact-2 form progresses past dispatch + name validation to the
+        # existence check, which fails closed in a dev checkout.
+        for op in ("destination_enable", "destination_disable", "destination_delete"):
+            rc, doc = self._run(op, "zz-destination-probe")
+            self.assertEqual(rc, 1, op)
+            self.assertEqual(doc["code"], "NOT_FOUND", op)
+            self.assertNotIn(
+                doc["code"],
+                ("MISSING_TARGET", "TOO_MANY_ARGUMENTS", "INVALID_NAME",
+                 "UNKNOWN_OPERATION"),
+                op,
+            )
+
+    def test_39_destination_create_argc_and_platform_allowlist(self):
+        # Too few fixed values -> MISSING_ARGUMENT; extra -> TOO_MANY_ARGUMENTS.
+        # The argv form carries only NON-SECRET values; a secret-looking extra
+        # argv element is rejected, never read as the key.
+        rc, doc = self._run("destination_create", "only-name")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_ARGUMENT")
+        rc, doc = self._run(
+            "destination_create", "a", "A", "youtube", "rtmps://x",
+            "yes", "KEY-IN-ARGV",
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+        # Unknown platform rejected before any write, never executed.
+        rc, doc = self._run(
+            "destination_create", "a", "A", "not-a-platform", "rtmps://x", "no"
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "UNKNOWN_PLATFORM")
+
+    def test_40_destination_list_readonly_and_no_extra_args(self):
+        rc, doc = self._run("destination_list")
+        self.assertEqual(rc, 0, doc)
+        self.assertIs(doc["ok"], True)
+        self.assertEqual(doc["data"], [])  # empty in a dev checkout
+        rc, doc = self._run("destination_list", "extra")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "TOO_MANY_ARGUMENTS")
+
+    def test_41_destination_create_reads_secret_from_stdin(self):
+        # The non-secret argv is accepted; the secret must come from stdin.
+        args = ("destination_create", "a", "A", "youtube", "rtmps://x", "no")
+        # Missing stdin (empty) -> MISSING_STREAM_KEY.
+        rc, doc = self._run_stdin("", *args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_STREAM_KEY")
+        # Blank line -> MISSING_STREAM_KEY.
+        rc, doc = self._run_stdin("\n", *args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_STREAM_KEY")
+
+    def test_42_destination_create_stdin_secret_validation(self):
+        args = ("destination_create", "a", "A", "youtube", "rtmps://x", "no")
+        # Control character (CR) is invalid.
+        rc, doc = self._run_stdin("ab\r", *args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_STREAM_KEY")
+        # Oversized key is invalid.
+        rc, doc = self._run_stdin("k" * 257 + "\n", *args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_STREAM_KEY")
+        # A valid key with spaces is ACCEPTED (passes validation; in a dev
+        # checkout it then fails closed at the root-required engine write).
+        rc, doc = self._run_stdin("my secret  key-123\n", *args)
+        self.assertEqual(rc, 1)
+        self.assertNotIn(
+            doc["code"],
+            ("MISSING_STREAM_KEY", "INVALID_STREAM_KEY", "TOO_MANY_ARGUMENTS"),
+            doc,
+        )
 
 
 class SecurityTests(unittest.TestCase):
@@ -1499,7 +1760,18 @@ class ProductionModeTests(unittest.TestCase):
 
     def test_production_has_no_mutation_routes(self):
         prod_app = self._prod_app()
+        # GUI-4 Phase 1A: exactly these fixed destination action endpoints are
+        # the only allowlisted mutation-word routes (enable/disable/delete of a
+        # strictly-validated destination). Every other mutation word stays
+        # forbidden.
+        allowed_action_endpoints = {
+            "console.destinations_enable",
+            "console.destinations_disable",
+            "console.destinations_delete",
+        }
         for rule in prod_app.url_map.iter_rules():
+            if rule.endpoint in allowed_action_endpoints:
+                continue
             lower = rule.endpoint.lower()
             for word in self.FORBIDDEN:
                 self.assertNotIn(word, lower)
@@ -3854,6 +4126,407 @@ class DashboardUtilitiesTests(unittest.TestCase):
         self.assertIn("600.0 MiB / 8.0 GiB", ram_card)
         self.assertNotIn("KiB", ram_card)
 
+
+class DestinationsWorkflowTests(unittest.TestCase):
+    """GUI-4 Phase 1A: Destinations manager foundation (create/list/toggle/
+    delete). No outgoing RTMP push exists yet, and the stored stream key never
+    reaches the HTML, flash, list payloads, logs or URLs."""
+
+    SECRET = "test-stream-key-NEVER-REAL-1234567890"
+    PAYLOADS = {
+        "snapshot": VALID_SNAPSHOT,
+        "relay_list": [
+            {
+                "name": "news",
+                "type": "remote-hls",
+                "source": "https://source.example.com/live/index.m3u8",
+                "active": "no",
+                "enabled": "yes",
+                "health": "STOPPED",
+            }
+        ],
+        "destination_list": [
+            {
+                "name": "main-youtube",
+                "display_name": "Main YouTube",
+                "platform": "youtube",
+                "server_url": "rtmps://a.rtmp.youtube.com/live2",
+                "enabled": "no",
+                "has_stream_key": "yes",
+            }
+        ],
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.engine = FakeEngine(dict(self.PAYLOADS))
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=self.engine
+        )
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _create_data(self, **overrides):
+        data = {
+            "display": "Main YouTube",
+            "platform": "youtube",
+            "server_url": "rtmps://a.rtmp.youtube.com/live2",
+            "stream_key": self.SECRET,
+            "enabled": "on",
+        }
+        data.update(overrides)
+        return data
+
+    def _post_create(self, data):
+        token = get_csrf(self.client, path="/console/destinations/create")
+        return self.client.post(
+            "/console/destinations/create", data=dict(data, csrf_token=token)
+        )
+
+    def _list_html(self):
+        return self.client.get("/console/destinations").get_data(as_text=True)
+
+    # ------------------------------------------------------------------
+    # Auth + navigation
+    # ------------------------------------------------------------------
+    def test_01_destinations_requires_authentication(self):
+        anon = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=self.engine
+        ).test_client()
+        for path in ("/console/destinations", "/console/destinations/create"):
+            rv = anon.get(path, follow_redirects=False)
+            self.assertEqual(rv.status_code, 302, path)
+            self.assertIn("/console/login", rv.headers["Location"], path)
+
+    def test_02_navigation_item_renders_and_is_active(self):
+        html = self.client.get("/console/destinations").get_data(as_text=True)
+        self.assertIn(">Destinations</a>", html)
+        self.assertIn('href="/console/destinations"', html)
+        active = re.search(
+            r'<a href="([^"]+)"[^>]*aria-current="page"[^>]*>Destinations', html
+        )
+        self.assertIsNotNone(active)
+        self.assertTrue(active.group(1).endswith("/console/destinations"))
+
+    def test_03_destinations_nav_active_on_create_page(self):
+        html = self.client.get("/console/destinations/create").get_data(as_text=True)
+        self.assertRegex(
+            html, r'href="[^"]*destinations[^"]*"[^>]*aria-current="page"'
+        )
+
+
+    # ------------------------------------------------------------------
+    # Listing page
+    # ------------------------------------------------------------------
+    def test_04_empty_state_and_populated_listing_render(self):
+        empty = FakeEngine({"destination_list": []})
+        app2 = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=empty
+        )
+        client2 = app2.test_client()
+        login(client2)
+        html = client2.get("/console/destinations").get_data(as_text=True)
+        self.assertIn("No streaming destinations configured yet.", html)
+        self.assertIn("+ Add Destination", html)
+
+        html = self._list_html()
+        self.assertIn("Main YouTube", html)
+        self.assertIn("main-youtube", html)
+        self.assertIn("YouTube", html)
+        self.assertIn("rtmps://a.rtmp.youtube.com/live2", html)
+        self.assertIn("&bull;", html)  # masked key indicator
+        self.assertIn("Disabled", html)
+
+    def test_05_list_never_contains_stream_key(self):
+        html = self._list_html()
+        self.assertNotIn(self.SECRET, html)
+        # the safe per-destination presentation has no stream_key field
+        record = app_module._present_destination(self.PAYLOADS["destination_list"][0])
+        self.assertIsNotNone(record)
+        self.assertNotIn("stream_key", record)
+
+    def test_06_no_stream_key_copy_button(self):
+        html = self._list_html()
+        self.assertEqual(html.count('class="btn btn-sm copy-btn"'), 0)
+
+    # ------------------------------------------------------------------
+    # Create form + POST safety
+    # ------------------------------------------------------------------
+    def test_07_create_form_renders_fields(self):
+        html = self.client.get("/console/destinations/create").get_data(as_text=True)
+        self.assertIn("Create Destination", html)
+        self.assertIn('name="display"', html)
+        self.assertIn('name="platform"', html)
+        for label in ("YouTube", "Facebook", "Twitch", "Rumble", "Instagram", "Custom RTMP"):
+            self.assertIn(label, html)
+        self.assertIn('name="server_url"', html)
+        self.assertIn('name="stream_key"', html)
+        self.assertIn('type="password"', html)
+        self.assertIn('name="enabled"', html)
+
+    def test_08_create_requires_csrf_and_is_post_only(self):
+        rv = self.client.post(
+            "/console/destinations/create", data=self._create_data()
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # GET on a mutation action route is not allowed
+        rv = self.client.get("/console/destinations/main-youtube/enable")
+        self.assertEqual(rv.status_code, 405)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_09_anonymous_create_cannot_mutate(self):
+        anon = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=self.engine
+        ).test_client()
+        token = get_csrf(anon)  # anonymous CSRF from the login page
+        rv = anon.post(
+            "/console/destinations/create",
+            data=dict(self._create_data(), csrf_token=token),
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    # ------------------------------------------------------------------
+    # Create validation
+    # ------------------------------------------------------------------
+    def test_10_create_success_normalizes_friendly_name(self):
+        rv = self._post_create(self._create_data())
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/destinations", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [
+                (
+                    "destination_create",
+                    "main-youtube",
+                    "Main YouTube",
+                    "youtube",
+                    "rtmps://a.rtmp.youtube.com/live2",
+                    self.SECRET,
+                    "yes",
+                )
+            ],
+        )
+        # flash mentions the friendly name only, never the key
+        html = self.client.get("/console/destinations").get_data(as_text=True)
+        self.assertIn("Main YouTube", html)
+        self.assertNotIn(self.SECRET, html)
+
+    def test_11_duplicate_destination_rejected_safely(self):
+        args = (
+            "main-youtube",
+            "Main YouTube",
+            "youtube",
+            "rtmps://a.rtmp.youtube.com/live2",
+            self.SECRET,
+            "yes",
+        )
+        self.engine.mutation_payloads[("destination_create",) + args] = EngineError(
+            "a destination named 'main-youtube' already exists",
+            code="ALREADY_EXISTS",
+        )
+        rv = self._post_create(self._create_data())
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/destinations/create").get_data(as_text=True)
+        self.assertIn("already exists", html)
+        self.assertNotIn(self.SECRET, html)
+
+    def test_12_supported_platform_labels_accepted(self):
+        for platform in ("youtube", "facebook", "twitch", "rumble", "instagram", "custom"):
+            self.engine.mutation_calls = []
+            rv = self._post_create(
+                self._create_data(platform=platform, display="Dest " + platform)
+            )
+            self.assertEqual(rv.status_code, 302, platform)
+            self.assertEqual(len(self.engine.mutation_calls), 1, platform)
+
+    def test_13_unknown_platform_rejected(self):
+        rv = self._post_create(self._create_data(platform="youtube-extra"))
+        self.assertEqual(rv.status_code, 302)
+        html = self.client.get("/console/destinations/create").get_data(as_text=True)
+        self.assertIn("Unsupported platform", html)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+
+    # ------------------------------------------------------------------
+    # URL / stream-key validation
+    # ------------------------------------------------------------------
+    def test_14_rtmp_and_rtmps_urls_accepted(self):
+        for url in ("rtmp://ingest.example.com/live", "rtmps://live.example.com/x"):
+            self.engine.mutation_calls = []
+            rv = self._post_create(self._create_data(server_url=url))
+            self.assertEqual(rv.status_code, 302, url)
+            self.assertEqual(len(self.engine.mutation_calls), 1, url)
+
+    def test_15_unsupported_or_malformed_urls_rejected(self):
+        for url in (
+            "http://ingest.example.com/live",
+            "https://ingest.example.com/live",
+            "rtsp://ingest.example.com/live",
+            "file:///etc/passwd",
+            "ftp://x",
+            "/etc/passwd",
+            "rtmp://has space.example.com/x",
+            "rtmps://bad\nexample.com/x",
+            "rtmps://ctl\x1b.example.com/x",
+            "rtmps://q\"uote.example.com/x",
+            "",
+        ):
+            self.engine.mutation_calls = []
+            rv = self._post_create(self._create_data(server_url=url))
+            self.assertEqual(rv.status_code, 302, url)
+            self.assertEqual(self.engine.mutation_calls, [], url)
+            html = self.client.get("/console/destinations/create").get_data(as_text=True)
+            self.assertIn("Server URL", html)
+
+    def test_16_empty_stream_key_rejected(self):
+        rv = self._post_create(self._create_data(stream_key=""))
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/destinations/create").get_data(as_text=True)
+        self.assertIn("Stream key is required", html)
+
+    def test_17_stream_key_control_characters_rejected(self):
+        for key in ("line1\nline2", "ctl\x00key", "ctl\x1bkey", "tab\tkey"):
+            self.engine.mutation_calls = []
+            rv = self._post_create(self._create_data(stream_key=key))
+            self.assertEqual(rv.status_code, 302, repr(key))
+            self.assertEqual(self.engine.mutation_calls, [], repr(key))
+
+    def test_18_stream_key_length_bound_enforced(self):
+        self.engine.mutation_calls = []
+        rv = self._post_create(self._create_data(stream_key="k" * 257))
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # a 256-char printable key is accepted (opaque data)
+        self.engine.mutation_calls = []
+        rv = self._post_create(self._create_data(stream_key="k" * 256))
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(len(self.engine.mutation_calls), 1)
+
+    # ------------------------------------------------------------------
+    # Enable / disable / delete (POST + auth + CSRF, fixed target)
+    # ------------------------------------------------------------------
+    def test_19_enable_and_disable_require_post_auth_csrf(self):
+        # missing CSRF -> 400, nothing executed
+        rv = self.client.post("/console/destinations/main-youtube/enable")
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # anonymous -> redirect, nothing executed
+        anon = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=self.engine
+        ).test_client()
+        token = get_csrf(anon)
+        rv = anon.post(
+            "/console/destinations/main-youtube/enable", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [])
+        # authenticated + CSRF succeeds and calls the fixed engine method
+        token = get_csrf(self.client, path="/console/destinations")
+        rv = self.client.post(
+            "/console/destinations/main-youtube/enable", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("destination_enable", "main-youtube")])
+        self.engine.mutation_calls = []
+        rv = self.client.post(
+            "/console/destinations/main-youtube/disable", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("destination_disable", "main-youtube")])
+
+    def test_20_delete_requires_post_auth_csrf_and_validates_target(self):
+        # GET cannot delete
+        rv = self.client.get("/console/destinations/main-youtube/delete")
+        self.assertEqual(rv.status_code, 405)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # missing CSRF -> 400
+        rv = self.client.post("/console/destinations/main-youtube/delete")
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+        # invalid/traversal target never reaches the engine
+        token = get_csrf(self.client, path="/console/destinations")
+        for hostile in ("..%2Fetc%2Fdelete", "x%3Brm%20-rf%20%2F"):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/destinations/" + hostile, data={"csrf_token": token}
+            )
+            self.assertIn(rv.status_code, (302, 404), hostile)
+            self.assertEqual(self.engine.mutation_calls, [], hostile)
+        # authenticated + CSRF on a valid id deletes it
+        rv = self.client.post(
+            "/console/destinations/main-youtube/delete", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("destination_delete", "main-youtube")])
+
+
+    # ------------------------------------------------------------------
+    # Engine-level safety + regression guards
+    # ------------------------------------------------------------------
+    def test_21_engine_rejects_arbitrary_path_for_delete(self):
+        client = EngineClient(
+            web_ctl=Path(self._tmp.name) / "web-ctl", bash="/bin/bash"
+        )
+        for bad in ("../x", "/etc/passwd", "x;rm", "x y", ".."):
+            with self.assertRaises(EngineError, msg=bad):
+                client._validate_mutation_values("destination_delete", (bad,))
+        # destination_create argv carries NO secret: exactly five non-secret
+        # values (id display platform url enabled), all validated pre-subprocess.
+        with self.assertRaises(EngineError):
+            client._validate_mutation_values(
+                "destination_create",
+                ("ok", "display\nname", "youtube", "rtmps://x", "yes"),
+            )
+        with self.assertRaises(EngineError):
+            client._validate_mutation_values(
+                "destination_create",
+                ("../ok", "Name", "youtube", "rtmps://x", "yes"),
+            )
+        # the stream key itself is rejected at the method boundary before any
+        # subprocess runs (never reaching argv or stdin)
+        with self.assertRaises(EngineError):
+            client.destination_create(
+                "ok", "Name", "youtube", "rtmps://x", "key\nwith newline", "yes"
+            )
+
+    def test_22_engine_destination_validators_unit(self):
+        for good in ("youtube", "facebook", "twitch", "rumble", "instagram", "custom"):
+            self.assertTrue(valid_dest_platform(good), good)
+        self.assertFalse(valid_dest_platform("youtube-extra"))
+        self.assertTrue(valid_dest_url("rtmp://host/live"))
+        self.assertTrue(valid_dest_url("rtmps://host/app?key=1"))
+        for bad in (
+            "http://x", "https://x", "rtsp://x", "file:///etc/passwd",
+            "rtmp://a b", "rtmps://a\nb", "", "rtmp://`x`",
+        ):
+            self.assertFalse(valid_dest_url(bad), bad)
+        self.assertTrue(valid_dest_stream_key("abc-123_XYZ:key/with=chars"))
+        self.assertFalse(valid_dest_stream_key(""))
+        self.assertFalse(valid_dest_stream_key("a\nb"))
+        self.assertFalse(valid_dest_stream_key("k" * 257))
+        self.assertTrue(valid_dest_display("Main YouTube"))
+        self.assertFalse(valid_dest_display("bad\nname"))
+
+    def test_23_existing_navigation_and_links_untouched(self):
+        html = self.client.get("/console/destinations").get_data(as_text=True)
+        for label in ("Dashboard", "Streams", "Media Library", "Playlists", "Destinations"):
+            self.assertIn(">" + label + "</a>", html)
+        # streams page still renders copy controls unchanged
+        streams = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn('class="btn btn-sm copy-btn"', streams)
+        self.assertIn("http://example.com/hls/relay/news/index.m3u8", streams)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()

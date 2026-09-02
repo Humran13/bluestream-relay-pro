@@ -158,6 +158,31 @@ input[type="number"] {
 
 input[type="file"] { display: block; margin: 0.25rem 0 0.75rem; }
 
+/* GUI-4 Phase 1A: destination form/list controls. */
+select {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.95rem;
+  background: #fff;
+  color: var(--text);
+}
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 1rem 0 0;
+  font-size: 0.9rem;
+}
+.checkbox input { width: auto; margin: 0; }
+.key-mask {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 /* GUI-2A: real upload progress (percentages come from browser upload events) */
 .upload-progress { margin-top: 1rem; max-width: 30rem; }
 .upload-progress-track {

@@ -16,6 +16,7 @@
         <a href="{{ url_for('console.streams') }}"{% if active_section == 'streams' %} class="nav-active" aria-current="page"{% endif %}>Streams</a>
         <a href="{{ url_for('console.media') }}"{% if active_section == 'media' %} class="nav-active" aria-current="page"{% endif %}>Media Library</a>
         <a href="{{ url_for('console.playlists') }}"{% if active_section == 'playlists' %} class="nav-active" aria-current="page"{% endif %}>Playlists</a>
+        <a href="{{ url_for('console.destinations') }}"{% if active_section == 'destinations' %} class="nav-active" aria-current="page"{% endif %}>Destinations</a>
       </nav>
       {% endif %}
     </div>
