@@ -3291,6 +3291,7 @@ class DashboardUtilitiesTests(unittest.TestCase):
 
     FULL_METRICS = {
         "cpu_percent": 18.4,
+        "cpu_count": 8,
         "ram_percent": 37.2,
         "ram_used_bytes": 3000000000,
         "ram_total_bytes": 8000000000,
@@ -3390,15 +3391,21 @@ class DashboardUtilitiesTests(unittest.TestCase):
     def test_07_ram_uses_memavailable(self):
         # used must be MemTotal - MemAvailable, NOT MemTotal - MemFree.
         # MemFree (1,000,000) + Buffers + Cached are present but must NOT be
-        # treated as permanently used RAM.
+        # treated as permanently used RAM. meminfo reports KiB, so the byte
+        # fields must reflect the ×1024 conversion.
         metrics = metrics_module.ram_metrics(self.MEMINFO)
         self.assertIsNotNone(metrics)
-        self.assertEqual(metrics["ram_used_bytes"], 8000000 - 3000000)
+        self.assertEqual(
+            metrics["ram_used_bytes"], (8000000 - 3000000) * 1024
+        )
+        self.assertEqual(metrics["ram_total_bytes"], 8000000 * 1024)
 
     def test_08_ram_used_bytes_calculated_correctly(self):
         metrics = metrics_module.ram_metrics(self.MEMINFO)
-        self.assertEqual(metrics["ram_used_bytes"], 5000000)
-        self.assertEqual(metrics["ram_total_bytes"], 8000000)
+        # MemTotal 8,000,000 KiB -> 8,192,000,000 bytes; used 5,000,000 KiB
+        # -> 5,120,000,000 bytes. Fields ending in _bytes are true bytes.
+        self.assertEqual(metrics["ram_used_bytes"], 5000000 * 1024)
+        self.assertEqual(metrics["ram_total_bytes"], 8000000 * 1024)
 
     def test_09_ram_percentage_correct(self):
         metrics = metrics_module.ram_metrics(self.MEMINFO)
@@ -3424,6 +3431,7 @@ class DashboardUtilitiesTests(unittest.TestCase):
         self.assertEqual(rv.status_code, 302)
         self.assertIn("/console/login", rv.headers["Location"])
         self.assertNotIn("cpu_percent", rv.get_data(as_text=True))
+        self.assertNotIn("cpu_count", rv.get_data(as_text=True))
 
     def test_12_authenticated_metrics_endpoint_returns_structured_json(self):
         with mock.patch.object(
@@ -3437,6 +3445,7 @@ class DashboardUtilitiesTests(unittest.TestCase):
             payload,
             {
                 "cpu_percent": 18.4,
+                "cpu_count": 8,
                 "ram_percent": 37.2,
                 "ram_used_bytes": 3000000000,
                 "ram_total_bytes": 8000000000,
@@ -3650,7 +3659,6 @@ class DashboardUtilitiesTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
         self.assertFalse(hasattr(metrics_module, "subprocess"))
-        self.assertFalse(hasattr(metrics_module, "os"))
 
     def test_24_existing_dashboard_functionality_intact(self):
         html = self._dashboard_html()
@@ -3755,6 +3763,96 @@ class DashboardUtilitiesTests(unittest.TestCase):
         self.assertNotIn("last updated", html)
         self.assertNotIn("refreshes automatically", html)
         self.assertNotIn("metric-status", html)
+
+    # ------------------------------------------------------------------
+    # Dashboard Utilities polish: true RAM bytes (KiB -> bytes) and the
+    # logical CPU core count.
+    # ------------------------------------------------------------------
+    def test_30_cpu_count_uses_safe_stdlib_and_returns_integer(self):
+        # os.cpu_count() is the only mechanism - no subprocess/shell tools.
+        source = Path(__file__).resolve().parent.joinpath("metrics.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("os.cpu_count()", source)
+        self.assertFalse(hasattr(metrics_module, "subprocess"))
+        with mock.patch.object(metrics_module.os, "cpu_count", return_value=8):
+            self.assertEqual(metrics_module._collect_cpu_count(), 8)
+        with mock.patch.object(metrics_module.os, "cpu_count", return_value=1):
+            self.assertEqual(metrics_module._collect_cpu_count(), 1)
+
+    def test_31_cpu_count_unavailable_or_invalid_returns_none(self):
+        for bad in (None, 0, -2):
+            with mock.patch.object(metrics_module.os, "cpu_count", return_value=bad):
+                self.assertIsNone(metrics_module._collect_cpu_count())
+        with mock.patch.object(
+            metrics_module.os, "cpu_count", side_effect=OSError("no sysfs")
+        ):
+            self.assertIsNone(metrics_module._collect_cpu_count())
+        # collect_metrics() surfaces the same safe None.
+        with mock.patch.object(metrics_module.os, "cpu_count", return_value=None):
+            collected = metrics_module.collect_metrics(
+                stat_path=str(Path(self._tmp.name) / "missing"),
+                meminfo_path=str(Path(self._tmp.name) / "missing"),
+                storage_path=None,
+                sample_interval=0,
+            )
+        self.assertIsNone(collected["cpu_count"])
+
+    def test_32_metrics_endpoint_includes_cpu_count(self):
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=self.FULL_METRICS
+        ):
+            payload = self.client.get("/console/system-metrics").get_json()
+        self.assertEqual(payload["cpu_count"], 8)
+        # an unavailable count serializes as JSON null, never an error
+        unavailable = dict(self.FULL_METRICS)
+        unavailable["cpu_count"] = None
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=unavailable
+        ):
+            payload = self.client.get("/console/system-metrics").get_json()
+        self.assertIsNone(payload["cpu_count"])
+
+    def test_33_cpu_card_renders_core_count(self):
+        payload = dict(self.FULL_METRICS)
+        payload["cpu_count"] = 8
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=payload
+        ):
+            html = self.client.get("/console/").get_data(as_text=True)
+        cpu_card = html[html.index('data-metric="cpu"') : html.index('data-metric="ram"')]
+        self.assertIn("8 cores", cpu_card)
+        self.assertIn('data-metric-cores', cpu_card)
+        self.assertIn("updateCores(\"cpu\", data.cpu_count);", html)
+        # singular wording when exactly one core is reported
+        payload["cpu_count"] = 1
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=payload
+        ):
+            html1 = self.client.get("/console/").get_data(as_text=True)
+        cpu_card1 = html1[html1.index('data-metric="cpu"') : html1.index('data-metric="ram"')]
+        self.assertIn("1 core", cpu_card1)
+
+    def test_34_dashboard_ram_display_uses_server_byte_units(self):
+        # ~8 GiB VPS with ~600 MiB used: human_size() must show MiB/GiB, never
+        # the old raw-KiB-as-bytes KiB/MiB scale.
+        payload = {
+            "cpu_percent": 18.4,
+            "cpu_count": 8,
+            "ram_percent": 7.3,
+            "ram_used_bytes": 600 * 1024 * 1024,       # 600 MiB
+            "ram_total_bytes": 8 * 1024 * 1024 * 1024, # 8 GiB
+            "storage_percent": 4.1,
+            "storage_used_bytes": 3200000000,
+            "storage_total_bytes": 96000000000,
+        }
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=payload
+        ):
+            html = self.client.get("/console/").get_data(as_text=True)
+        ram_card = html[html.index('data-metric="ram"') : html.index('data-metric="storage"')]
+        self.assertIn("600.0 MiB / 8.0 GiB", ram_card)
+        self.assertNotIn("KiB", ram_card)
 
 
 if __name__ == "__main__":

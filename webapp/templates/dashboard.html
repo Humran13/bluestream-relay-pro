@@ -21,6 +21,7 @@
         </div>
       </div>
       <p class="metric-detail">Server CPU usage</p>
+      <p class="muted metric-cores" data-metric-cores>{% if system_metrics.cpu_count is not none %}{{ system_metrics.cpu_count }} core{% if system_metrics.cpu_count != 1 %}s{% endif %}{% else %}&mdash;{% endif %}</p>
     </div>
     <div class="metric-card" data-metric="ram">
       <h3>RAM</h3>
@@ -198,9 +199,22 @@
     }
   }
 
+  function updateCores(name, count) {
+    var card = cards[name];
+    if (!card) { return; }
+    var el = card.querySelector("[data-metric-cores]");
+    if (!el) { return; }
+    if (typeof count === "number" && isFinite(count) && count >= 1) {
+      el.textContent = count + (count === 1 ? " core" : " cores");
+    } else {
+      el.textContent = "—";
+    }
+  }
+
   function applyMetrics(data) {
     if (!data || typeof data !== "object") { return; }
     updateCard("cpu", data.cpu_percent, null);
+    updateCores("cpu", data.cpu_count);
     updateCard("ram", data.ram_percent, { used: data.ram_used_bytes, total: data.ram_total_bytes });
     updateCard("storage", data.storage_percent, { used: data.storage_used_bytes, total: data.storage_total_bytes });
   }

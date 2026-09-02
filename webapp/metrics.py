@@ -6,8 +6,11 @@ shell command:
 
 * CPU     - aggregate counters from ``/proc/stat`` sampled twice with a short
             bounded pause (no background sampler, no threads).
+* CPU     - logical core count from ``os.cpu_count()`` (count only, never
+            model/vendor/flags).
 * RAM     - ``/proc/meminfo`` ``MemTotal`` / ``MemAvailable`` (used is defined
-            as ``MemTotal - MemAvailable`` so cache/buffers stay available).
+            as ``MemTotal - MemAvailable`` so cache/buffers stay available;
+            KiB values from meminfo are converted to bytes with ``* 1024``).
 * Storage - ``shutil.disk_usage()`` on the filesystem that hosts BlueStream's
             persistent media/state (see app.py's WEB_UPLOAD_DIR).
 
@@ -18,6 +21,7 @@ browser-supplied value ever influences a measurement.
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -29,6 +33,7 @@ CPU_SAMPLE_INTERVAL_SECONDS = 0.2
 # Exact JSON keys returned by collect_metrics() / the console endpoint.
 METRIC_KEYS = (
     "cpu_percent",
+    "cpu_count",
     "ram_percent",
     "ram_used_bytes",
     "ram_total_bytes",
@@ -150,6 +155,21 @@ def _collect_cpu(stat_path, sample_interval) -> float | None:
     return cpu_percent(first, second)
 
 
+def _collect_cpu_count() -> int | None:
+    """Logical CPU core count via the safe stdlib ``os.cpu_count()``.
+
+    Returns an integer >= 1 when available; None for any unusable result
+    (``None``, ``0``, non-integer, or a read error). No subprocess/shell.
+    """
+    try:
+        count = os.cpu_count()
+    except (OSError, ValueError):
+        return None
+    if isinstance(count, int) and count >= 1:
+        return count
+    return None
+
+
 # ---------------------------------------------------------------------------
 # RAM (Linux /proc/meminfo)
 # ---------------------------------------------------------------------------
@@ -175,24 +195,28 @@ def _parse_meminfo(text: str) -> dict | None:
 def ram_metrics(meminfo_text: str) -> dict | None:
     """Return {ram_percent, ram_used_bytes, ram_total_bytes} from meminfo.
 
-    ``used = MemTotal - MemAvailable`` so cache/buffers are NOT counted as
-    permanently used RAM. Returns None for missing or malformed data (e.g. a
-    kernel without MemAvailable), never raises.
+    ``/proc/meminfo`` reports memory in KiB, so every parsed value is
+    converted to real bytes with ``bytes = meminfo_kib * 1024`` before it is
+    exposed. ``used = MemTotal - MemAvailable`` so cache/buffers are NOT
+    counted as permanently used RAM. Returns None for missing or malformed
+    data (e.g. a kernel without MemAvailable), never raises.
     """
     values = _parse_meminfo(meminfo_text)
     if not values:
         return None
-    total = values.get("MemTotal")
-    available = values.get("MemAvailable")
-    if not isinstance(total, int) or total <= 0:
+    total_kib = values.get("MemTotal")
+    available_kib = values.get("MemAvailable")
+    if not isinstance(total_kib, int) or total_kib <= 0:
         return None
-    if not isinstance(available, int) or available < 0:
+    if not isinstance(available_kib, int) or available_kib < 0:
         return None
-    used = max(total - available, 0)
+    total_bytes = total_kib * 1024
+    available_bytes = available_kib * 1024
+    used_bytes = max(total_bytes - available_bytes, 0)
     return {
-        "ram_percent": _clamp_percent((used / total) * 100.0),
-        "ram_used_bytes": used,
-        "ram_total_bytes": total,
+        "ram_percent": _clamp_percent((used_bytes / total_bytes) * 100.0),
+        "ram_used_bytes": used_bytes,
+        "ram_total_bytes": total_bytes,
     }
 
 
@@ -262,6 +286,7 @@ def collect_metrics(
     cpu = _collect_cpu(stat_path, sample_interval)
     if cpu is not None:
         metrics["cpu_percent"] = round(_clamp_percent(cpu), 1)
+    metrics["cpu_count"] = _collect_cpu_count()
     ram = _collect_ram(meminfo_path)
     if ram is not None:
         metrics["ram_percent"] = round(_clamp_percent(ram.get("ram_percent")), 1)
