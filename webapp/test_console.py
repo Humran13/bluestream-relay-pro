@@ -3058,5 +3058,215 @@ class Gui1dPlaylistWorkflowTests(unittest.TestCase):
         self.assertNotIn("FAILED", html)
 
 
+class GuiStreamPlaylistLinkTests(unittest.TestCase):
+    """GUI-2C/1D: copyable public M3U8 + Web Player links for streams and
+    playlists, derived from the engine's trusted server config (never the Host
+    header).  No source/private URL copy control, no embed/multistreaming, no
+    hard-coded production domain, and HTTPS follows existing SSL config.
+    """
+
+    SNAPSHOT_HTTPS = {
+        "version": "0.1.0",
+        "hostname": "testhost",
+        "uptime": "up 1 day",
+        "domain": "example.com",
+        "https_configured": "yes",
+        "nginx_active": "no",
+        "ffmpeg_available": "yes",
+        "ffprobe_available": "yes",
+        "relay_count": "1",
+        "playlist_count": "1",
+    }
+    PAYLOADS = {
+        "snapshot": SNAPSHOT_HTTPS,
+        "relay_list": [
+            {
+                "name": "news",
+                "type": "remote-hls",
+                "source": "https://source.example.com/live/index.m3u8",
+                "active": "no",
+                "enabled": "yes",
+                "health": "STOPPED",
+            }
+        ],
+        "playlist_list": [
+            {
+                "name": "evening-promo-loop",
+                "active": "no",
+                "enabled": "no",
+                "items": "2",
+                "health": "STOPPED",
+            }
+        ],
+        "media_list": [{"name": "intro.mp4", "size": "1000", "extension": "mp4"}],
+        "playlist_cache_status": {
+            "total_bytes": "0",
+            "artifact_count": "0",
+            "protected_bytes": "0",
+            "protected_count": "0",
+            "reclaimable_bytes": "0",
+            "reclaimable_count": "0",
+        },
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.engine = FakeEngine(self.PAYLOADS)
+        self.app = app_module.create_app(
+            state_dir=make_state(self._tmp.name),
+            engine=self.engine,
+        )
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _streams(self):
+        return self.client.get("/console/streams").get_data(as_text=True)
+
+    def _playlists(self):
+        return self.client.get("/console/playlists").get_data(as_text=True)
+
+    def test_01_stream_m3u8_url_rendered(self):
+        self.assertIn("https://example.com/hls/relay/news/index.m3u8", self._streams())
+
+    def test_02_stream_player_url_rendered(self):
+        self.assertIn("https://example.com/player/?relay=news", self._streams())
+
+    def test_03_playlist_m3u8_url_rendered(self):
+        self.assertIn(
+            "https://example.com/hls/playlist/evening-promo-loop/index.m3u8",
+            self._playlists(),
+        )
+
+    def test_04_playlist_player_url_rendered(self):
+        self.assertIn(
+            "https://example.com/player/?playlist=evening-promo-loop", self._playlists()
+        )
+
+    def test_05_uses_configured_domain_not_hardcoded(self):
+        for html in (self._streams(), self._playlists()):
+            self.assertIn("example.com", html)
+            self.assertNotIn("stream.therealworldboosts.com", html)
+
+    def test_06_https_respected_from_config(self):
+        self.assertIn("https://example.com/hls/relay/news/index.m3u8", self._streams())
+        payloads = dict(self.PAYLOADS)
+        payloads["snapshot"] = dict(self.SNAPSHOT_HTTPS, https_configured="no")
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=FakeEngine(payloads)
+        )
+        client = app.test_client()
+        login(client)
+        html = client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("http://example.com/hls/relay/news/index.m3u8", html)
+        self.assertNotIn("https://example.com/hls/relay/news/index.m3u8", html)
+
+    def test_07_stream_url_uses_relay_path(self):
+        self.assertIn("/hls/relay/news/index.m3u8", self._streams())
+
+    def test_08_playlist_url_uses_playlist_path(self):
+        self.assertIn("/hls/playlist/evening-promo-loop/index.m3u8", self._playlists())
+
+    def test_09_player_stream_query_is_relay(self):
+        self.assertIn("?relay=news", self._streams())
+
+    def test_10_player_playlist_query_is_playlist(self):
+        self.assertIn("?playlist=evening-promo-loop", self._playlists())
+
+    def test_11_stream_copy_controls_present(self):
+        html = self._streams()
+        self.assertEqual(html.count('class="btn btn-sm copy-btn"'), 2)
+        self.assertIn("M3U8", html)
+        self.assertIn("Web Player", html)
+        self.assertIn('class="link-url"', html)
+
+    def test_12_playlist_copy_controls_present(self):
+        html = self._playlists()
+        self.assertEqual(html.count('class="btn btn-sm copy-btn"'), 2)
+        self.assertIn("M3U8", html)
+        self.assertIn("Web Player", html)
+        self.assertIn('class="link-url"', html)
+
+    def test_13_stream_lifecycle_controls_render(self):
+        html = self._streams()
+        self.assertIn("/console/relays/news/start", html)
+        self.assertIn("/console/relays/news/stop", html)
+        self.assertIn("/console/relays/news/restart", html)
+
+    def test_14_playlist_lifecycle_controls_render(self):
+        html = self._playlists()
+        self.assertIn("/console/playlists/evening-promo-loop/start", html)
+        self.assertIn("/console/playlists/evening-promo-loop/stop", html)
+        self.assertIn("/console/playlists/evening-promo-loop/restart", html)
+
+    def test_15_playlist_cache_ui_still_renders(self):
+        html = self._playlists()
+        self.assertIn("Playlist Cache", html)
+        self.assertIn("Clear Unused Cache", html)
+
+    def test_16_no_source_private_url_copy_control(self):
+        html = self._streams()
+        # the private/authenticated source URL stays a plain read-only table
+        # cell - never a copyable link input, never near a Copy button.
+        self.assertIn("https://source.example.com/live/index.m3u8", html)
+        self.assertIn('class="source"', html)
+        self.assertNotIn('value="https://source.example.com/live/index.m3u8"', html)
+
+    def test_17_url_values_are_escaped(self):
+        payloads = dict(self.PAYLOADS)
+        payloads["relay_list"] = [
+            {
+                "name": '"><script>alert(1)</script>',
+                "type": "remote-hls",
+                "source": "https://src.example.com/x",
+                "active": "no",
+                "enabled": "no",
+                "health": "STOPPED",
+            }
+        ]
+        app = app_module.create_app(
+            state_dir=make_state(self._tmp.name), engine=FakeEngine(payloads)
+        )
+        client = app.test_client()
+        login(client)
+        html = client.get("/console/streams").get_data(as_text=True)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn('value="https://example.com/hls/relay/">', html)
+
+    def test_18_active_navigation_unchanged(self):
+        streams_html = self._streams()
+        playlists_html = self._playlists()
+        self.assertRegex(
+            streams_html, r'href="[^"]*streams[^"]*"[^>]*aria-current="page"'
+        )
+        self.assertRegex(
+            playlists_html, r'href="[^"]*playlists[^"]*"[^>]*aria-current="page"'
+        )
+
+    def test_19_url_helper_units(self):
+        snap = {"domain": "example.com", "https_configured": "yes"}
+        self.assertEqual(
+            app_module.relay_hls_url(snap, "news"),
+            "https://example.com/hls/relay/news/index.m3u8",
+        )
+        self.assertEqual(
+            app_module.relay_player_url(snap, "news"),
+            "https://example.com/player/?relay=news",
+        )
+        self.assertEqual(
+            app_module.playlist_player_url(snap, "evening-promo-loop"),
+            "https://example.com/player/?playlist=evening-promo-loop",
+        )
+        self.assertEqual(
+            app_module._public_base({"domain": "x.com", "https_configured": "no"}),
+            "http://x.com",
+        )
+        self.assertIsNone(app_module._public_base({}))
+        self.assertIsNone(app_module.relay_hls_url(None, "news"))
+
+
 if __name__ == "__main__":
     unittest.main()

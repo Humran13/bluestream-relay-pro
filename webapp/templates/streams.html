@@ -12,7 +12,7 @@
 <section class="card">
   <table>
     <thead>
-      <tr><th>Name</th><th>Source Type</th><th>Source</th><th>Active</th><th>Enabled</th><th>Health</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Source Type</th><th>Source</th><th>Active</th><th>Enabled</th><th>Health</th><th>Links</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for relay in relays %}
@@ -23,6 +23,23 @@
         <td>{{ relay.get('active') }}</td>
         <td>{{ relay.get('enabled') }}</td>
         <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span></td>
+        <td class="links">
+          {% if relay.get('hls_url') %}
+          <div class="link-row">
+            <span class="link-label">M3U8</span>
+            <input class="link-url" type="text" value="{{ relay.get('hls_url') }}" readonly onclick="this.select()" title="M3U8 URL" aria-label="M3U8 URL">
+            <button type="button" class="btn btn-sm copy-btn">Copy</button>
+          </div>
+          {% endif %}
+          {% if relay.get('player_url') %}
+          <div class="link-row">
+            <span class="link-label">Web Player</span>
+            <input class="link-url" type="text" value="{{ relay.get('player_url') }}" readonly onclick="this.select()" title="Web Player URL" aria-label="Web Player URL">
+            <button type="button" class="btn btn-sm copy-btn">Copy</button>
+          </div>
+          {% endif %}
+          {% if not relay.get('hls_url') and not relay.get('player_url') %}<span class="muted">-</span>{% endif %}
+        </td>
         <td class="actions">
           <form method="post" action="{{ url_for('console.relay_start', name=relay.get('name')) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

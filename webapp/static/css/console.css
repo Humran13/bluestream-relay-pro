@@ -115,6 +115,27 @@ input[type="password"] {
 
 .source { word-break: break-all; max-width: 22rem; }
 
+/* GUI-2C/1D: copyable public M3U8 + Web Player links (streams and playlists) */
+.links { white-space: nowrap; }
+.link-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.2rem 0; }
+.link-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #57606a;
+  min-width: 4.7rem;
+}
+.link-url {
+  width: 15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fafbfc;
+  color: var(--text);
+}
+.copy-btn { min-width: 5.4rem; }
+
 /* GUI-1D.1: copyable HLS URL in the playlists table */
 .hls-url {
   width: 22rem;

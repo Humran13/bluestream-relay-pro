@@ -38,5 +38,51 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+  (function () {
+    "use strict";
+    function fallbackCopy(text) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text).then(function () {
+          return true;
+        }, function () {
+          return fallbackCopy(text);
+        });
+      }
+      return Promise.resolve(fallbackCopy(text));
+    }
+    // One delegated listener: any .copy-btn copies its sibling .link-url value
+    // and shows brief feedback, then reverts. No page reload, no framework.
+    document.addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest ? event.target.closest(".copy-btn") : null;
+      if (!btn) { return; }
+      var row = btn.closest(".link-row");
+      var input = row ? row.querySelector(".link-url") : null;
+      if (!input) { return; }
+      var original = btn.textContent;
+      btn.disabled = true;
+      copyText(input.value).then(function (ok) {
+        btn.textContent = ok ? "Copied!" : "Copy failed";
+        window.setTimeout(function () {
+          btn.textContent = original;
+          btn.disabled = false;
+        }, 1500);
+      });
+    });
+  })();
+  </script>
 </body>
 </html>

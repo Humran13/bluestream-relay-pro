@@ -383,6 +383,20 @@ def _validate_playlist_items(form) -> tuple:
     return True, [name for _, name in entries], None
 
 
+def _public_base(snapshot) -> str | None:
+    """Trusted ``scheme://domain`` base from the engine's server config.
+
+    ``snapshot`` is the root-derived web-ctl snapshot (``domain`` +
+    ``https_configured`` read from /etc/bluestream/server.conf); the Host
+    header is never trusted.  Mirrors ``bs_public_base`` in the engine.
+    """
+    domain = ((snapshot or {}).get("domain") or "").strip()
+    if not domain:
+        return None
+    scheme = "https" if (snapshot or {}).get("https_configured") == "yes" else "http"
+    return "%s://%s" % (scheme, domain)
+
+
 def playlist_hls_url(snapshot, name: str) -> str | None:
     """Public playlist HLS URL derived from the engine's trusted server config.
 
@@ -390,11 +404,35 @@ def playlist_hls_url(snapshot, name: str) -> str | None:
     ``https_configured`` read from /etc/bluestream/server.conf); the Host
     header is never trusted.  Mirrors ``bs_playlist_m3u8_url`` in the engine.
     """
-    domain = ((snapshot or {}).get("domain") or "").strip()
-    if not domain:
+    base = _public_base(snapshot)
+    if base is None:
         return None
-    scheme = "https" if (snapshot or {}).get("https_configured") == "yes" else "http"
-    return "%s://%s/hls/playlist/%s/index.m3u8" % (scheme, domain, name)
+    return "%s/hls/playlist/%s/index.m3u8" % (base, name)
+
+
+def relay_hls_url(snapshot, name: str) -> str | None:
+    """Public relay HLS URL. Mirrors ``bs_relay_m3u8_url`` in the engine."""
+    base = _public_base(snapshot)
+    if base is None:
+        return None
+    return "%s/hls/relay/%s/index.m3u8" % (base, name)
+
+
+def relay_player_url(snapshot, name: str) -> str | None:
+    """Browser-friendly web player URL for a relay (``?relay=<name>``)."""
+    base = _public_base(snapshot)
+    if base is None:
+        return None
+    return "%s/player/?relay=%s" % (base, name)
+
+
+def playlist_player_url(snapshot, name: str) -> str | None:
+    """Browser-friendly web player URL for a playlist (``?playlist=<name>``)."""
+    base = _public_base(snapshot)
+    if base is None:
+        return None
+    return "%s/player/?playlist=%s" % (base, name)
+
 
 
 
@@ -802,11 +840,23 @@ def _register_console_routes(app: Flask) -> None:
         engine = current_app.extensions["bluestream_engine"]
         relays = []
         errors = []
+        snapshot = {}
+        try:
+            snapshot = engine.call("snapshot") or {}
+        except EngineError as exc:
+            current_app.logger.warning("engine snapshot unavailable: %s", exc)
         try:
             relays = engine.call("relay_list") or []
         except EngineError as exc:
             current_app.logger.warning("engine relay_list unavailable: %s", exc)
             errors.append("relay_list")
+        # Public M3U8 + Web Player links derived from the engine's trusted
+        # server config (never from the Host header).
+        for relay in relays:
+            if isinstance(relay, dict):
+                name = relay.get("name") or ""
+                relay["hls_url"] = relay_hls_url(snapshot, name)
+                relay["player_url"] = relay_player_url(snapshot, name)
         return render_template(
             "streams.html",
             relays=relays,
@@ -1069,11 +1119,14 @@ def _register_console_routes(app: Flask) -> None:
         except EngineError as exc:
             current_app.logger.warning("engine playlist_list unavailable: %s", exc)
             errors.append("playlist_list")
-        # GUI-1D.1: public HLS URL derived from the engine's trusted server
-        # config (never from the Host header).  Rendered as a copyable value.
+        # GUI-1D.1: public M3U8 + Web Player links derived from the engine's
+        # trusted server config (never from the Host header).  Rendered as
+        # copyable values.
         for item in items:
             if isinstance(item, dict):
-                item["hls_url"] = playlist_hls_url(snapshot, item.get("name") or "")
+                name = item.get("name") or ""
+                item["hls_url"] = playlist_hls_url(snapshot, name)
+                item["player_url"] = playlist_player_url(snapshot, name)
         # GUI-3A: playlist cache visibility. A status failure must never break
         # the page - it renders a neutral unavailable state instead.
         cache_status = {}
