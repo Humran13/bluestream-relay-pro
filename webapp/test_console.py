@@ -3326,8 +3326,8 @@ class DashboardUtilitiesTests(unittest.TestCase):
     def test_02_dashboard_renders_ram_card(self):
         html = self._dashboard_html()
         self.assertIn('data-metric="ram"', html)
-        self.assertIn("RAM", html)
-        self.assertIn("Updates every 5", html)
+        self.assertIn('<h3>RAM</h3>', html)
+        self.assertIn('class="metric-detail"', html)
 
     def test_03_dashboard_renders_storage_card(self):
         html = self._dashboard_html()
@@ -3621,12 +3621,12 @@ class DashboardUtilitiesTests(unittest.TestCase):
         self.assertIn("fetch(METRICS_ENDPOINT", html)
         self.assertIn("window.setInterval(refresh, METRICS_REFRESH_MS)", html)
 
-    def test_22_refresh_interval_is_not_excessive(self):
+    def test_22_refresh_interval_is_exactly_3000ms(self):
         html = self._dashboard_html()
         match = re.search(r"var METRICS_REFRESH_MS = (\d+);", html)
         self.assertIsNotNone(match, "refresh interval constant missing")
         interval = int(match.group(1))
-        self.assertGreaterEqual(interval, 5000)
+        self.assertEqual(interval, 3000)
 
     def test_23_no_sudo_or_webctl_operation_added_for_metrics(self):
         # The engine bridge is untouched: no new privileged operation exists.
@@ -3720,6 +3720,41 @@ class DashboardUtilitiesTests(unittest.TestCase):
         self.assertIn("M3U8", playlists_html)
         self.assertIn("Web Player", playlists_html)
         self.assertIn("http://example.com/hls/playlist/loop/index.m3u8", playlists_html)
+
+    # ------------------------------------------------------------------
+    # GUI-4 layout polish: live/action content first, static info lower,
+    # and a silent 3-second metrics refresh (no visible interval text).
+    # ------------------------------------------------------------------
+    def test_27_dashboard_shows_live_content_before_static_info(self):
+        html = self._dashboard_html()
+        utilities = html.index("<h2>Server Utilities</h2>")
+        quick = html.index("<h2>Quick actions</h2>")
+        relays = html.index("<h2>Relays</h2>")
+        playlists = html.index("<h2>Playlists</h2>")
+        server_info = html.index("<h2>Server</h2>")
+        self.assertLess(utilities, quick, "Server Utilities should lead the page")
+        self.assertLess(quick, relays, "Quick actions should precede Relays")
+        self.assertLess(relays, playlists, "Relays should precede Playlists")
+        self.assertLess(
+            playlists, server_info, "static Server info should be lower"
+        )
+
+    def test_28_metrics_initial_fetch_and_single_repeating_timer(self):
+        html = self._dashboard_html()
+        # the immediate fetch on page load is still there
+        self.assertIn("refresh();", html)
+        self.assertIn("fetch(METRICS_ENDPOINT", html)
+        # exactly ONE repeating interval timer is registered
+        self.assertEqual(
+            html.count("window.setInterval(refresh, METRICS_REFRESH_MS)"), 1
+        )
+
+    def test_29_no_visible_refresh_status_text(self):
+        html = self._dashboard_html()
+        self.assertNotIn("Updates every", html)
+        self.assertNotIn("last updated", html)
+        self.assertNotIn("refreshes automatically", html)
+        self.assertNotIn("metric-status", html)
 
 
 if __name__ == "__main__":

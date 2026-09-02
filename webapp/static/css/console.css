@@ -264,14 +264,6 @@ h1 { margin: 0.25rem 0 1rem; font-size: 1.4rem; }
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
-.metric-status {
-  margin: 0;
-  font-size: 0.75rem;
-}
-.metric-note {
-  margin: 0.9rem 0 0;
-  font-size: 0.78rem;
-}
 
 /* Smaller screens: cards stack naturally (grid auto-fit above). */
 @media (max-width: 30rem) {

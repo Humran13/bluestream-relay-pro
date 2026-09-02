@@ -7,31 +7,6 @@
 <p class="error">BlueStream engine information is temporarily unavailable.</p>
 {% endif %}
 
-{% set snap = data.get('snapshot') %}
-{% if snap %}
-<section class="card">
-  <h2>Server</h2>
-  <dl class="grid">
-    <dt>Version</dt><dd>{{ snap.get('version') }}</dd>
-    <dt>Hostname</dt><dd>{{ snap.get('hostname') }}</dd>
-    <dt>Uptime</dt><dd>{{ snap.get('uptime') }}</dd>
-    <dt>Domain</dt><dd>{{ snap.get('domain') or 'not set' }}</dd>
-  </dl>
-  <h2>Engine</h2>
-  <dl class="grid">
-    <dt>Nginx</dt><dd>{{ snap.get('nginx_active') }}</dd>
-    <dt>FFmpeg</dt><dd>{{ snap.get('ffmpeg_available') }}</dd>
-    <dt>ffprobe</dt><dd>{{ snap.get('ffprobe_available') }}</dd>
-    <dt>HTTPS</dt><dd>{{ snap.get('https_configured') }}</dd>
-  </dl>
-  <h2>Counts</h2>
-  <dl class="grid">
-    <dt>Streams</dt><dd>{{ snap.get('relay_count') }}</dd>
-    <dt>Playlists</dt><dd>{{ snap.get('playlist_count') }}</dd>
-  </dl>
-</section>
-{% endif %}
-
 {% if system_metrics %}
 <section class="card">
   <h2>Server Utilities</h2>
@@ -46,7 +21,6 @@
         </div>
       </div>
       <p class="metric-detail">Server CPU usage</p>
-      <p class="muted metric-status">Updates every 5&nbsp;s</p>
     </div>
     <div class="metric-card" data-metric="ram">
       <h3>RAM</h3>
@@ -58,7 +32,6 @@
         </div>
       </div>
       <p class="metric-detail">{% if system_metrics.ram_used_bytes is not none %}{{ human_size(system_metrics.ram_used_bytes) }} / {{ human_size(system_metrics.ram_total_bytes) }}{% else %}&mdash;{% endif %}</p>
-      <p class="muted metric-status">Updates every 5&nbsp;s</p>
     </div>
     <div class="metric-card" data-metric="storage">
       <h3>Storage</h3>
@@ -70,10 +43,8 @@
         </div>
       </div>
       <p class="metric-detail">{% if system_metrics.storage_used_bytes is not none %}{{ human_size(system_metrics.storage_used_bytes) }} / {{ human_size(system_metrics.storage_total_bytes) }}{% else %}&mdash;{% endif %}</p>
-      <p class="muted metric-status">Updates every 5&nbsp;s</p>
     </div>
   </div>
-  <p class="muted metric-note">System usage refreshes automatically every 5 seconds while this page is open.</p>
 </section>
 {% endif %}
 
@@ -137,6 +108,31 @@
   {% endif %}
 </section>
 {% endif %}
+
+{% set snap = data.get('snapshot') %}
+{% if snap %}
+<section class="card">
+  <h2>Server</h2>
+  <dl class="grid">
+    <dt>Version</dt><dd>{{ snap.get('version') }}</dd>
+    <dt>Hostname</dt><dd>{{ snap.get('hostname') }}</dd>
+    <dt>Uptime</dt><dd>{{ snap.get('uptime') }}</dd>
+    <dt>Domain</dt><dd>{{ snap.get('domain') or 'not set' }}</dd>
+  </dl>
+  <h2>Engine</h2>
+  <dl class="grid">
+    <dt>Nginx</dt><dd>{{ snap.get('nginx_active') }}</dd>
+    <dt>FFmpeg</dt><dd>{{ snap.get('ffmpeg_available') }}</dd>
+    <dt>ffprobe</dt><dd>{{ snap.get('ffprobe_available') }}</dd>
+    <dt>HTTPS</dt><dd>{{ snap.get('https_configured') }}</dd>
+  </dl>
+  <h2>Counts</h2>
+  <dl class="grid">
+    <dt>Streams</dt><dd>{{ snap.get('relay_count') }}</dd>
+    <dt>Playlists</dt><dd>{{ snap.get('playlist_count') }}</dd>
+  </dl>
+</section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -145,7 +141,7 @@
   "use strict";
   // GUI-4: Dashboard Server Utilities auto-refresh. Minimal vanilla fetch;
   // no WebSockets, no SSE, no framework, no background work server-side.
-  var METRICS_REFRESH_MS = 5000;
+  var METRICS_REFRESH_MS = 3000;
   var METRICS_ENDPOINT = "{{ url_for('console.system_metrics') }}";
   var cards = {
     cpu: document.querySelector(".metric-card[data-metric=\"cpu\"]"),
