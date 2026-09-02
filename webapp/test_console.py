@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from webapp import app as app_module
+from webapp import metrics as metrics_module
 from webapp import security
 from webapp.engine import (
     ALLOWED_MUTATION_OPERATIONS,
@@ -453,6 +454,7 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.playlists_create",
                 "console.playlists_create_post",
                 "console.playlists_cache_clear",
+                "console.system_metrics",
             },
         )
         # only the expected HTTP methods
@@ -3266,6 +3268,458 @@ class GuiStreamPlaylistLinkTests(unittest.TestCase):
         )
         self.assertIsNone(app_module._public_base({}))
         self.assertIsNone(app_module.relay_hls_url(None, "news"))
+
+
+class DashboardUtilitiesTests(unittest.TestCase):
+    """GUI-4: CPU / RAM / Storage dashboard gauges + /console/system-metrics.
+
+    All metrics are mocked or use non-existent paths so the suite never
+    depends on the local machine having Linux /proc.
+    """
+
+    MEMINFO = (
+        "MemTotal:        8000000 kB\n"
+        "MemFree:         1000000 kB\n"
+        "MemAvailable:    3000000 kB\n"
+        "Buffers:          200000 kB\n"
+        "Cached:          1500000 kB\n"
+        "SwapTotal:       2000000 kB\n"
+        "SwapFree:        2000000 kB\n"
+    )
+    STAT_SAMPLE_1 = (100, 50, 80, 1000, 100, 0, 0, 0)
+    STAT_SAMPLE_2 = (120, 70, 100, 1180, 120, 0, 0, 0)
+
+    FULL_METRICS = {
+        "cpu_percent": 18.4,
+        "ram_percent": 37.2,
+        "ram_used_bytes": 3000000000,
+        "ram_total_bytes": 8000000000,
+        "storage_percent": 4.1,
+        "storage_used_bytes": 3200000000,
+        "storage_total_bytes": 96000000000,
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = make_state(self._tmp.name)
+        self.engine = FakeEngine(DEFAULT_PAYLOADS)
+        self.app = app_module.create_app(state_dir=self.state, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _dashboard_html(self):
+        return self.client.get("/console/").get_data(as_text=True)
+
+    # ------------------------------------------------------------------
+    # Cards render
+    # ------------------------------------------------------------------
+    def test_01_dashboard_renders_cpu_card(self):
+        html = self._dashboard_html()
+        self.assertIn("Server Utilities", html)
+        self.assertIn('data-metric="cpu"', html)
+        self.assertIn("CPU", html)
+        self.assertIn("Server CPU usage", html)
+
+    def test_02_dashboard_renders_ram_card(self):
+        html = self._dashboard_html()
+        self.assertIn('data-metric="ram"', html)
+        self.assertIn("RAM", html)
+        self.assertIn("Updates every 5", html)
+
+    def test_03_dashboard_renders_storage_card(self):
+        html = self._dashboard_html()
+        self.assertIn('data-metric="storage"', html)
+        self.assertIn("Storage", html)
+
+    # ------------------------------------------------------------------
+    # CPU calculation units (mocked /proc/stat data)
+    # ------------------------------------------------------------------
+    def test_04_cpu_percent_calculation_from_mocked_stat(self):
+        parsed = metrics_module.cpu_counters(
+            "cpu  100 50 80 1000 100 0 0 0 0 0"
+        )
+        self.assertEqual(parsed, self.STAT_SAMPLE_1)
+        # busy = 60, total delta = 260  ->  23.0769%
+        pct = metrics_module.cpu_percent(self.STAT_SAMPLE_1, self.STAT_SAMPLE_2)
+        self.assertAlmostEqual(pct, 60.0 / 260.0 * 100.0, places=5)
+        # _read_stat_cpu parses the aggregate line from a fake /proc/stat file
+        stat_file = Path(self._tmp.name) / "procstat"
+        stat_file.write_text(
+            "cpu  " + " ".join(str(v) for v in self.STAT_SAMPLE_1)
+            + " 0 0\nintr 123\nctxt 456\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(metrics_module._read_stat_cpu(stat_file), self.STAT_SAMPLE_1)
+
+    def test_05_cpu_calculation_cannot_divide_by_zero(self):
+        # Identical samples (zero delta) must yield 0.0, never a ZeroDivisionError.
+        self.assertEqual(
+            metrics_module.cpu_percent(self.STAT_SAMPLE_1, self.STAT_SAMPLE_1), 0.0
+        )
+        self.assertEqual(
+            metrics_module.cpu_percent((1, 2, 3, 4), (1, 2, 3, 4)), 0.0
+        )
+        self.assertIsNone(metrics_module.cpu_percent(None, None))
+        self.assertIsNone(metrics_module.cpu_percent(self.STAT_SAMPLE_1, None))
+        self.assertIsNone(metrics_module.cpu_counters("not a stat line"))
+        self.assertIsNone(metrics_module.cpu_counters("cpu0 1 2 3 4 5"))
+
+    def test_06_cpu_result_clamped_to_0_100(self):
+        # idle shrank while total grew -> raw 300% clamps to 100.0
+        a = (0, 0, 0, 1000, 0, 0, 0, 0)
+        b = (600, 0, 0, 600, 0, 0, 0, 0)
+        self.assertEqual(metrics_module.cpu_percent(a, b), 100.0)
+        # idle grew more than total -> raw negative clamps to 0.0
+        a2 = (100, 0, 0, 500, 0, 0, 0, 0)
+        b2 = (50, 0, 0, 1200, 0, 0, 0, 0)
+        self.assertEqual(metrics_module.cpu_percent(a2, b2), 0.0)
+        # the shared clamp is a hard 0-100 wall for any input
+        self.assertEqual(metrics_module._clamp_percent(150), 100.0)
+        self.assertEqual(metrics_module._clamp_percent(-5), 0.0)
+        self.assertEqual(metrics_module._clamp_percent("garbage"), 0.0)
+        self.assertEqual(metrics_module._clamp_percent(42.5), 42.5)
+
+
+
+    # ------------------------------------------------------------------
+    # RAM calculation units (mocked /proc/meminfo data)
+    # ------------------------------------------------------------------
+    def test_07_ram_uses_memavailable(self):
+        # used must be MemTotal - MemAvailable, NOT MemTotal - MemFree.
+        # MemFree (1,000,000) + Buffers + Cached are present but must NOT be
+        # treated as permanently used RAM.
+        metrics = metrics_module.ram_metrics(self.MEMINFO)
+        self.assertIsNotNone(metrics)
+        self.assertEqual(metrics["ram_used_bytes"], 8000000 - 3000000)
+
+    def test_08_ram_used_bytes_calculated_correctly(self):
+        metrics = metrics_module.ram_metrics(self.MEMINFO)
+        self.assertEqual(metrics["ram_used_bytes"], 5000000)
+        self.assertEqual(metrics["ram_total_bytes"], 8000000)
+
+    def test_09_ram_percentage_correct(self):
+        metrics = metrics_module.ram_metrics(self.MEMINFO)
+        self.assertAlmostEqual(metrics["ram_percent"], 62.5, places=6)
+
+    def test_10_storage_used_total_percent_correct(self):
+        result = metrics_module.storage_metrics(
+            "/var/lib/bluestream/web/upload",
+            disk_usage=lambda p: _DiskUsage(
+                total=96 * 1024 ** 3, used=3 * 1024 ** 3, free=93 * 1024 ** 3
+            ),
+        )
+        self.assertEqual(result["storage_total_bytes"], 96 * 1024 ** 3)
+        self.assertEqual(result["storage_used_bytes"], 3 * 1024 ** 3)
+        self.assertAlmostEqual(result["storage_percent"], 3.125, places=6)
+
+    # ------------------------------------------------------------------
+    # JSON endpoint: authentication + structured, bounded response
+    # ------------------------------------------------------------------
+    def test_11_metrics_endpoint_requires_auth(self):
+        anon = app_module.create_app(state_dir=self.state, engine=self.engine)
+        rv = anon.test_client().get("/console/system-metrics")
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+        self.assertNotIn("cpu_percent", rv.get_data(as_text=True))
+
+    def test_12_authenticated_metrics_endpoint_returns_structured_json(self):
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=self.FULL_METRICS
+        ):
+            rv = self.client.get("/console/system-metrics")
+        self.assertEqual(rv.status_code, 200)
+        self.assertIn("application/json", rv.headers.get("Content-Type", ""))
+        payload = rv.get_json()
+        self.assertEqual(
+            payload,
+            {
+                "cpu_percent": 18.4,
+                "ram_percent": 37.2,
+                "ram_used_bytes": 3000000000,
+                "ram_total_bytes": 8000000000,
+                "storage_percent": 4.1,
+                "storage_used_bytes": 3200000000,
+                "storage_total_bytes": 96000000000,
+            },
+        )
+        # every percentage the endpoint can return stays in 0-100
+        for key in ("cpu_percent", "ram_percent", "storage_percent"):
+            self.assertGreaterEqual(payload[key], 0)
+            self.assertLessEqual(payload[key], 100)
+
+    def test_13_metrics_endpoint_does_not_expose_filesystem_paths(self):
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=self.FULL_METRICS
+        ):
+            body = self.client.get("/console/system-metrics").get_data(as_text=True)
+        for leak in ("/var/lib", "/proc", "upload", "C:", "\\\\", "web.conf"):
+            self.assertNotIn(leak, body)
+
+    def test_14_metrics_endpoint_does_not_expose_shell_or_config(self):
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=self.FULL_METRICS
+        ):
+            body = self.client.get("/console/system-metrics").get_data(as_text=True)
+        payload = json.loads(body)
+        self.assertEqual(set(payload.keys()), set(metrics_module.METRIC_KEYS))
+        for forbidden in (
+            "hostname", "username", "password", "command", "shell",
+            "sudo", "web-ctl", "config", "env", "token",
+        ):
+            self.assertNotIn(forbidden, body)
+
+    # ------------------------------------------------------------------
+    # Graceful failure behaviour (one bad source never breaks anything)
+    # ------------------------------------------------------------------
+    def test_15_missing_proc_stat_fails_gracefully(self):
+        missing = Path(self._tmp.name) / "no" / "proc" / "stat"
+        self.assertIsNone(metrics_module._read_stat_cpu(missing))
+        collected = metrics_module.collect_metrics(
+            stat_path=str(missing),
+            meminfo_path=str(missing),
+            storage_path=None,
+            sample_interval=0,
+        )
+        self.assertIsNone(collected["cpu_percent"])
+        self.assertIsNone(collected["ram_percent"])
+        self.assertIsNone(collected["storage_percent"])
+
+
+    def test_16_missing_or_malformed_meminfo_fails_gracefully(self):
+        self.assertIsNone(metrics_module.ram_metrics(""))
+        self.assertIsNone(metrics_module.ram_metrics("not meminfo at all"))
+        self.assertIsNone(metrics_module.ram_metrics("MemTotal: abc kB\n"))
+        self.assertIsNone(metrics_module.ram_metrics("MemTotal: 1000 kB\n"))
+        self.assertIsNone(metrics_module.ram_metrics(None))
+        missing = Path(self._tmp.name) / "no" / "meminfo"
+        self.assertIsNone(metrics_module._collect_ram(missing))
+
+    def test_17_storage_read_failure_fails_gracefully(self):
+        def broken(path):
+            raise OSError("no such file")
+
+        self.assertIsNone(metrics_module.storage_metrics("/nope", disk_usage=broken))
+        self.assertIsNone(
+            metrics_module.storage_metrics(
+                "/nope", disk_usage=lambda p: _DiskUsage(total=0, used=0, free=0)
+            )
+        )
+        self.assertIsNone(
+            metrics_module.storage_metrics("/nope", disk_usage=lambda p: None)
+        )
+        self.assertIsNone(metrics_module._collect_storage(None))
+
+    def test_18_failure_of_one_metric_keeps_other_metrics(self):
+        with mock.patch.object(
+            metrics_module, "_collect_cpu", return_value=None
+        ), mock.patch.object(
+            metrics_module,
+            "_collect_ram",
+            return_value={
+                "ram_percent": 10.0,
+                "ram_used_bytes": 1000,
+                "ram_total_bytes": 10000,
+            },
+        ), mock.patch.object(
+            metrics_module,
+            "_collect_storage",
+            return_value={
+                "storage_percent": 20.0,
+                "storage_used_bytes": 2000,
+                "storage_total_bytes": 10000,
+            },
+        ):
+            rv = self.client.get("/console/system-metrics")
+        payload = rv.get_json()
+        self.assertIsNone(payload["cpu_percent"])
+        self.assertEqual(payload["ram_percent"], 10.0)
+        self.assertEqual(payload["ram_used_bytes"], 1000)
+        self.assertEqual(payload["storage_percent"], 20.0)
+        self.assertEqual(payload["storage_used_bytes"], 2000)
+
+    def test_19_dashboard_still_renders_when_metrics_unavailable(self):
+        unavailable = dict.fromkeys(metrics_module.METRIC_KEYS)
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=unavailable
+        ):
+            rv = self.client.get("/console/")
+        self.assertEqual(rv.status_code, 200)
+        html = rv.get_data(as_text=True)
+        self.assertIn("Server Utilities", html)
+        self.assertIn("&mdash;", html)
+        # the rest of the dashboard is untouched
+        self.assertIn("Quick actions", html)
+        self.assertIn("Relays", html)
+        self.assertIn("news", html)
+
+    def test_20_percentages_cannot_exceed_100_or_below_0(self):
+        # RAM: fully exhausted -> 100.0; impossible available > total -> 0.0
+        full = metrics_module.ram_metrics("MemTotal: 8000000 kB\nMemAvailable: 0 kB\n")
+        self.assertEqual(full["ram_percent"], 100.0)
+        bogus = metrics_module.ram_metrics(
+            "MemTotal: 8000000 kB\nMemAvailable: 9000000 kB\n"
+        )
+        self.assertEqual(bogus["ram_percent"], 0.0)
+        self.assertEqual(bogus["ram_used_bytes"], 0)
+        # Storage: used > total is normalized to 100.0 and used == total
+        over = metrics_module.storage_metrics(
+            "/x", disk_usage=lambda p: _DiskUsage(total=1000, used=5000, free=0)
+        )
+        self.assertEqual(over["storage_percent"], 100.0)
+        self.assertEqual(over["storage_used_bytes"], 1000)
+        empty = metrics_module.storage_metrics(
+            "/x", disk_usage=lambda p: _DiskUsage(total=1000, used=0, free=1000)
+        )
+        self.assertEqual(empty["storage_percent"], 0.0)
+        # collect_metrics() clamps every percentage into 0-100 before the
+        # endpoint ever serializes it (even for raw out-of-range collector
+        # outputs, which only exist for malformed/hostile data).
+        with mock.patch.object(
+            metrics_module, "_collect_cpu", return_value=150.0
+        ), mock.patch.object(
+            metrics_module,
+            "_collect_ram",
+            return_value={
+                "ram_percent": -3.0,
+                "ram_used_bytes": 1,
+                "ram_total_bytes": 2,
+            },
+        ), mock.patch.object(
+            metrics_module,
+            "_collect_storage",
+            return_value={
+                "storage_percent": 200.0,
+                "storage_used_bytes": 1,
+                "storage_total_bytes": 2,
+            },
+        ):
+            collected = metrics_module.collect_metrics(sample_interval=0)
+        self.assertEqual(collected["cpu_percent"], 100.0)
+        self.assertEqual(collected["ram_percent"], 0.0)
+        self.assertEqual(collected["storage_percent"], 100.0)
+        # and the endpoint only ever serializes the clamped values
+        with mock.patch.object(
+            metrics_module, "collect_metrics", return_value=collected
+        ):
+            body = self.client.get("/console/system-metrics").get_data(as_text=True)
+        self.assertNotIn("150.0", body)
+        self.assertNotIn("-3.0", body)
+        self.assertNotIn("200.0", body)
+
+
+
+
+    # ------------------------------------------------------------------
+    # Frontend behaviour + regression guards
+    # ------------------------------------------------------------------
+    def test_21_auto_refresh_js_targets_metrics_endpoint(self):
+        html = self._dashboard_html()
+        self.assertIn("/console/system-metrics", html)
+        self.assertIn("fetch(METRICS_ENDPOINT", html)
+        self.assertIn("window.setInterval(refresh, METRICS_REFRESH_MS)", html)
+
+    def test_22_refresh_interval_is_not_excessive(self):
+        html = self._dashboard_html()
+        match = re.search(r"var METRICS_REFRESH_MS = (\d+);", html)
+        self.assertIsNotNone(match, "refresh interval constant missing")
+        interval = int(match.group(1))
+        self.assertGreaterEqual(interval, 5000)
+
+    def test_23_no_sudo_or_webctl_operation_added_for_metrics(self):
+        # The engine bridge is untouched: no new privileged operation exists.
+        self.assertNotIn("system_metrics", engine_module.ALLOWED_OPERATIONS)
+        self.assertNotIn(
+            "system_metrics", engine_module.ALLOWED_MUTATION_OPERATIONS
+        )
+        # metrics.py is stdlib-only: no subprocess, no shell execution. (The
+        # docstring may SAY "no web-ctl/sudo"; what matters is nothing runs.)
+        source = Path(__file__).resolve().parent.joinpath("metrics.py").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in (
+            "import subprocess",
+            "subprocess.",
+            "os.system",
+            "Popen",
+            "shell=True",
+            "check_output",
+            "check_call",
+        ):
+            self.assertNotIn(forbidden, source)
+        self.assertFalse(hasattr(metrics_module, "subprocess"))
+        self.assertFalse(hasattr(metrics_module, "os"))
+
+    def test_24_existing_dashboard_functionality_intact(self):
+        html = self._dashboard_html()
+        for expected in (
+            "Dashboard",
+            "Version",
+            "Hostname",
+            "Uptime",
+            "Nginx",
+            "FFmpeg",
+            "Counts",
+            "Quick actions",
+            "Create Stream",
+            "Upload Media",
+            "Relays",
+            "news",
+            "example.com",
+            "Playlists",
+        ):
+            self.assertIn(expected, html)
+        self.assertIn("0.1.0", html)  # VERSION stays 0.1.0
+
+    def test_25_existing_navigation_intact(self):
+        html = self._dashboard_html()
+        for label in ("Dashboard", "Streams", "Media Library", "Playlists"):
+            self.assertIn(label, html)
+        self.assertRegex(
+            html, r'href="[^"]*console/"' r'[^>]*aria-current="page"'
+        )
+
+    def test_26_streams_playlists_link_functionality_untouched(self):
+        streams_html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("M3U8", streams_html)
+        self.assertIn("Web Player", streams_html)
+        self.assertIn('class="btn btn-sm copy-btn"', streams_html)
+        self.assertIn('class="link-url"', streams_html)
+        self.assertIn("http://example.com/hls/relay/news/index.m3u8", streams_html)
+        # playlists page: cache card + lifecycle controls + copy links intact
+        payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "playlist_list": [
+                {
+                    "name": "loop",
+                    "active": "no",
+                    "enabled": "no",
+                    "items": "2",
+                    "health": "STOPPED",
+                }
+            ],
+            "playlist_cache_status": {
+                "total_bytes": "0",
+                "artifact_count": "0",
+                "protected_bytes": "0",
+                "protected_count": "0",
+                "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+            },
+        }
+        app2 = app_module.create_app(
+            state_dir=self.state, engine=FakeEngine(payloads)
+        )
+        client2 = app2.test_client()
+        login(client2)
+        playlists_html = client2.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Playlist Cache", playlists_html)
+        self.assertIn("Clear Unused Cache", playlists_html)
+        self.assertIn("M3U8", playlists_html)
+        self.assertIn("Web Player", playlists_html)
+        self.assertIn("http://example.com/hls/playlist/loop/index.m3u8", playlists_html)
 
 
 if __name__ == "__main__":

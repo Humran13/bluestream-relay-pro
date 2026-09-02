@@ -204,6 +204,80 @@ h1 { margin: 0.25rem 0 1rem; font-size: 1.4rem; }
 .grid dt { color: var(--muted); }
 .grid dd { margin: 0; font-weight: 600; }
 
+/* GUI-4: Dashboard Server Utilities gauges (CPU / RAM / Storage).
+   Pure CSS ring gauges (conic-gradient) using the BlueStream accent. */
+.metrics-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1rem;
+}
+.metric-card {
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafbfc;
+  padding: 1rem 0.75rem;
+}
+.metric-card h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gauge {
+  --value: 0;
+  position: relative;
+  width: 7rem;
+  height: 7rem;
+  margin: 0 auto 0.75rem;
+  border-radius: 50%;
+  background: #e9ecf0;
+  background: conic-gradient(var(--accent) calc(var(--value) * 1%), #e9ecf0 0);
+  display: grid;
+  place-items: center;
+}
+.gauge-inner {
+  width: 5.5rem;
+  height: 5.5rem;
+  border-radius: 50%;
+  background: var(--panel);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.gauge-value {
+  font-size: 1.55rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+.gauge-unit {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.metric-detail {
+  margin: 0 0 0.25rem;
+  font-size: 0.88rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.metric-status {
+  margin: 0;
+  font-size: 0.75rem;
+}
+.metric-note {
+  margin: 0.9rem 0 0;
+  font-size: 0.78rem;
+}
+
+/* Smaller screens: cards stack naturally (grid auto-fit above). */
+@media (max-width: 30rem) {
+  .metrics-row { grid-template-columns: 1fr; }
+}
+
 table { width: 100%; border-collapse: collapse; }
 
 th, td {

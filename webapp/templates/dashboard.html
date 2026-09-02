@@ -32,6 +32,51 @@
 </section>
 {% endif %}
 
+{% if system_metrics %}
+<section class="card">
+  <h2>Server Utilities</h2>
+  <div class="metrics-row">
+    <div class="metric-card" data-metric="cpu">
+      <h3>CPU</h3>
+      <div class="gauge" role="img"
+           aria-label="CPU usage {% if system_metrics.cpu_percent is not none %}{{ system_metrics.cpu_percent|round|int }} percent{% else %}unavailable{% endif %}"
+           style="--value: {{ system_metrics.cpu_percent if system_metrics.cpu_percent is not none else 0 }}">
+        <div class="gauge-inner">
+          <span class="gauge-value">{% if system_metrics.cpu_percent is not none %}{{ system_metrics.cpu_percent|round|int }}<span class="gauge-unit">%</span>{% else %}&mdash;{% endif %}</span>
+        </div>
+      </div>
+      <p class="metric-detail">Server CPU usage</p>
+      <p class="muted metric-status">Updates every 5&nbsp;s</p>
+    </div>
+    <div class="metric-card" data-metric="ram">
+      <h3>RAM</h3>
+      <div class="gauge" role="img"
+           aria-label="RAM usage {% if system_metrics.ram_percent is not none %}{{ system_metrics.ram_percent|round|int }} percent{% else %}unavailable{% endif %}"
+           style="--value: {{ system_metrics.ram_percent if system_metrics.ram_percent is not none else 0 }}">
+        <div class="gauge-inner">
+          <span class="gauge-value">{% if system_metrics.ram_percent is not none %}{{ system_metrics.ram_percent|round|int }}<span class="gauge-unit">%</span>{% else %}&mdash;{% endif %}</span>
+        </div>
+      </div>
+      <p class="metric-detail">{% if system_metrics.ram_used_bytes is not none %}{{ human_size(system_metrics.ram_used_bytes) }} / {{ human_size(system_metrics.ram_total_bytes) }}{% else %}&mdash;{% endif %}</p>
+      <p class="muted metric-status">Updates every 5&nbsp;s</p>
+    </div>
+    <div class="metric-card" data-metric="storage">
+      <h3>Storage</h3>
+      <div class="gauge" role="img"
+           aria-label="Storage usage {% if system_metrics.storage_percent is not none %}{{ system_metrics.storage_percent|round|int }} percent{% else %}unavailable{% endif %}"
+           style="--value: {{ system_metrics.storage_percent if system_metrics.storage_percent is not none else 0 }}">
+        <div class="gauge-inner">
+          <span class="gauge-value">{% if system_metrics.storage_percent is not none %}{{ system_metrics.storage_percent|round|int }}<span class="gauge-unit">%</span>{% else %}&mdash;{% endif %}</span>
+        </div>
+      </div>
+      <p class="metric-detail">{% if system_metrics.storage_used_bytes is not none %}{{ human_size(system_metrics.storage_used_bytes) }} / {{ human_size(system_metrics.storage_total_bytes) }}{% else %}&mdash;{% endif %}</p>
+      <p class="muted metric-status">Updates every 5&nbsp;s</p>
+    </div>
+  </div>
+  <p class="muted metric-note">System usage refreshes automatically every 5 seconds while this page is open.</p>
+</section>
+{% endif %}
+
 <section class="card">
   <h2>Quick actions</h2>
   <p>
@@ -92,4 +137,96 @@
   {% endif %}
 </section>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+  // GUI-4: Dashboard Server Utilities auto-refresh. Minimal vanilla fetch;
+  // no WebSockets, no SSE, no framework, no background work server-side.
+  var METRICS_REFRESH_MS = 5000;
+  var METRICS_ENDPOINT = "{{ url_for('console.system_metrics') }}";
+  var cards = {
+    cpu: document.querySelector(".metric-card[data-metric=\"cpu\"]"),
+    ram: document.querySelector(".metric-card[data-metric=\"ram\"]"),
+    storage: document.querySelector(".metric-card[data-metric=\"storage\"]")
+  };
+
+  function formatBytes(value) {
+    if (typeof value !== "number" || !isFinite(value) || value < 0) { return "—"; }
+    if (value < 1024) { return value + " B"; }
+    var units = ["KiB", "MiB", "GiB", "TiB"];
+    var v = value;
+    for (var i = 0; i < units.length; i++) {
+      v = v / 1024;
+      if (v < 1024 || i === units.length - 1) {
+        return v.toFixed(1) + " " + units[i];
+      }
+    }
+    return "—";
+  }
+
+  function normalizePercent(value) {
+    if (typeof value !== "number" || !isFinite(value)) { return null; }
+    return Math.max(0, Math.min(100, value));
+  }
+
+  function title(name) {
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  function updateCard(name, percent, bytes) {
+    var card = cards[name];
+    if (!card) { return; }
+    var gauge = card.querySelector(".gauge");
+    var valueEl = card.querySelector(".gauge-value");
+    var detailEl = card.querySelector(".metric-detail");
+    var pct = normalizePercent(percent);
+    if (pct === null) {
+      if (gauge) {
+        gauge.style.setProperty("--value", "0");
+        gauge.setAttribute("aria-label", title(name) + " usage unavailable");
+      }
+      if (valueEl) { valueEl.textContent = "—"; }
+      if (detailEl && bytes) { detailEl.textContent = "—"; }
+      return;
+    }
+    if (gauge) {
+      gauge.style.setProperty("--value", pct.toFixed(1));
+      gauge.setAttribute("aria-label", title(name) + " usage " + Math.round(pct) + " percent");
+    }
+    if (valueEl) { valueEl.innerHTML = Math.round(pct) + '<span class="gauge-unit">%</span>'; }
+    if (detailEl && bytes) {
+      detailEl.textContent = formatBytes(bytes.used) + " / " + formatBytes(bytes.total);
+    }
+  }
+
+  function applyMetrics(data) {
+    if (!data || typeof data !== "object") { return; }
+    updateCard("cpu", data.cpu_percent, null);
+    updateCard("ram", data.ram_percent, { used: data.ram_used_bytes, total: data.ram_total_bytes });
+    updateCard("storage", data.storage_percent, { used: data.storage_used_bytes, total: data.storage_total_bytes });
+  }
+
+  function refresh() {
+    fetch(METRICS_ENDPOINT, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" }
+    }).then(function (response) {
+      if (!response.ok) { throw new Error("metrics request failed"); }
+      return response.json();
+    }).then(applyMetrics).catch(function () {
+      // Keep the previous values; a transient metrics failure must never
+      // break the dashboard.
+    });
+  }
+
+  if (document.querySelector(".metrics-row")) {
+    refresh();
+    window.setInterval(refresh, METRICS_REFRESH_MS);
+  }
+})();
+</script>
 {% endblock %}

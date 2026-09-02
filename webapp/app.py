@@ -65,6 +65,7 @@ from webapp.engine import (
     valid_source_url,
     valid_target_name,
 )
+from webapp import metrics
 from webapp.security import (
     ADMIN_USERNAME,
     LoginRateLimiter,
@@ -675,6 +676,20 @@ def _register_template_context(app: Flask) -> None:
 
 
 # ---------------------------------------------------------------------------
+# GUI-4: Dashboard Server Utilities metrics (CPU / RAM / Storage).
+#
+# Read-only, unprivileged collection: /proc/stat + /proc/meminfo +
+# shutil.disk_usage on the filesystem hosting BlueStream's persistent
+# media/state. No sudo, no web-ctl operation, no shell commands, no background
+# sampler. Every metric fails independently to None, so a broken source can
+# never take down the dashboard or the JSON endpoint.
+# ---------------------------------------------------------------------------
+def _dashboard_metrics() -> dict:
+    storage_path = current_app.config.get("WEB_UPLOAD_DIR", PRODUCTION_UPLOAD_DIR)
+    return metrics.collect_metrics(storage_path=storage_path)
+
+
+# ---------------------------------------------------------------------------
 # GUI-1B.1: controlled lifecycle actions.  Operation is fixed by the route
 # (via LIFECYCLE_OPERATIONS); form data can never select an operation.
 # ---------------------------------------------------------------------------
@@ -796,11 +811,28 @@ def _register_console_routes(app: Flask) -> None:
             except EngineError as exc:
                 current_app.logger.warning("engine %s unavailable: %s", op, exc)
                 errors.append(op)
+        # GUI-4: server utilities (CPU / RAM / Storage) render server-side so
+        # the page works before the first auto-refresh; failures show "—".
+        system_metrics = _dashboard_metrics()
         return render_template(
             "dashboard.html",
             data=data,
             engine_unavailable=bool(errors),
+            system_metrics=system_metrics,
+            human_size=human_size,
         )
+
+    # ------------------------------------------------------------------
+    # GUI-4: Dashboard Server Utilities JSON feed (authenticated, read-only).
+    # The frontend polls this every 5 seconds while the Dashboard is open.
+    # Returns exactly the structured metrics dict; never paths, process
+    # lists, usernames, or shell/system configuration output.
+    # ------------------------------------------------------------------
+    @console.route("/system-metrics", methods=["GET"])
+    def system_metrics():
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return jsonify(_dashboard_metrics())
 
     # ------------------------------------------------------------------
     # GUI-1B.1 lifecycle actions: POST only, operation fixed by the route,
