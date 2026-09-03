@@ -816,6 +816,15 @@ LIFECYCLE_OPERATIONS = {
 
 _PAST_TENSE = {"start": "started", "stop": "stopped", "restart": "restarted"}
 
+# GUI-1B.1 fix: after a lifecycle POST, keep the operator in the section they
+# acted from. The landing endpoint is derived from the fixed ``kind`` constant
+# (never from form data or a return-URL parameter), so there is no open
+# redirect. Both callers of these routes are the Streams and Playlists pages.
+_LIFECYCLE_LANDING = {
+    "relay": "console.streams",
+    "playlist": "console.playlists",
+}
+
 # GUI-5A: safe delete. Operation is fixed by the route; the engine method name
 # and the list page to return to are looked up here, never chosen by the form.
 _DELETE_TARGETS = {
@@ -883,14 +892,17 @@ def _lifecycle_action(kind: str, action: str, name: str):
       before any bridge call.
     * Only the fixed corresponding EngineClient method is invoked; bridge
       details stay server-side in the logs.
-    * Every outcome is a redirect to the dashboard (never a mutation response).
+    * Every outcome is a redirect (Post/Redirect/Get) back to the list page
+      for this ``kind`` - Streams for a relay, Playlists for a playlist - so
+      the operator stays in the section they acted from.
     """
+    landing = url_for(_LIFECYCLE_LANDING.get(kind, "console.dashboard"))
     if not session.get("authenticated"):
         return redirect(url_for("console.login"))
     if not valid_target_name(name):
         current_app.logger.warning("lifecycle %s rejected invalid name", kind)
         flash("%s action rejected: invalid name" % kind.title(), "error")
-        return redirect(url_for("console.dashboard"))
+        return redirect(landing)
     engine = current_app.extensions["bluestream_engine"]
     method_name = LIFECYCLE_OPERATIONS.get((kind, action))
     method = getattr(engine, method_name, None) if method_name else None
@@ -899,7 +911,7 @@ def _lifecycle_action(kind: str, action: str, name: str):
             "lifecycle %s %s: engine has no %s", kind, action, method_name
         )
         flash("%s '%s' %s failed." % (kind.title(), name, action), "error")
-        return redirect(url_for("console.dashboard"))
+        return redirect(landing)
     try:
         method(name)
     except EngineError as exc:
@@ -913,7 +925,7 @@ def _lifecycle_action(kind: str, action: str, name: str):
             % (kind.title(), name, _PAST_TENSE.get(action, action)),
             "success",
         )
-    return redirect(url_for("console.dashboard"))
+    return redirect(landing)
 
 
 # ---------------------------------------------------------------------------

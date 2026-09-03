@@ -642,13 +642,18 @@ class LifecycleActionTests(unittest.TestCase):
             "/console/relays/news/start", data={"csrf_token": token}
         )
         self.assertEqual(rv.status_code, 302)
-        self.assertIn("/console/", rv.headers["Location"])
+        # GUI-1B.1 fix: a stream lifecycle action returns to the Streams page,
+        # not the Dashboard - the operator stays in the section they acted from.
+        self.assertTrue(
+            rv.headers["Location"].endswith("/console/streams"),
+            rv.headers["Location"],
+        )
         self.assertEqual(self.engine.mutation_calls, [("relay_start", "news")])
-        # follow the redirect: dashboard re-renders fresh state with the flash
-        rv = self.client.get("/console/")
+        # follow the redirect: the Streams page re-renders with the flash
+        rv = self.client.get("/console/streams")
         self.assertEqual(rv.status_code, 200)
         html = rv.get_data(as_text=True)
-        self.assertIn("Dashboard", html)
+        self.assertIn("Streams", html)
         self.assertIn("Relay &#39;news&#39; started successfully.", html)
 
     def test_08_engine_failure_redirects_without_traceback(self):
@@ -664,13 +669,65 @@ class LifecycleActionTests(unittest.TestCase):
         token = get_csrf(client, path="/console/")
         rv = client.post("/console/relays/news/restart", data={"csrf_token": token})
         self.assertEqual(rv.status_code, 302)
-        self.assertIn("/console/", rv.headers["Location"])
+        self.assertTrue(
+            rv.headers["Location"].endswith("/console/streams"),
+            rv.headers["Location"],
+        )
         self.assertEqual(engine.mutation_calls, [("relay_restart", "news")])
-        rv = client.get("/console/")
+        rv = client.get("/console/streams")
         html = rv.get_data(as_text=True)
         self.assertIn("Relay &#39;news&#39; restart failed.", html)
         self.assertNotIn("secret-detail", html)
         self.assertNotIn("Traceback", html)
+
+    def test_11_stream_lifecycle_actions_return_to_streams_page(self):
+        login(self.client)
+        token = get_csrf(self.client, path="/console/")
+        for action, method in (
+            ("start", "relay_start"), ("stop", "relay_stop"),
+            ("restart", "relay_restart"),
+        ):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/relays/news/%s" % action, data={"csrf_token": token}
+            )
+            self.assertEqual(rv.status_code, 302, action)
+            self.assertTrue(
+                rv.headers["Location"].endswith("/console/streams"),
+                (action, rv.headers["Location"]),
+            )
+            self.assertEqual(self.engine.mutation_calls, [(method, "news")], action)
+
+    def test_12_playlist_lifecycle_actions_return_to_playlists_page(self):
+        login(self.client)
+        token = get_csrf(self.client, path="/console/")
+        for action, method in (
+            ("start", "playlist_start"), ("stop", "playlist_stop"),
+            ("restart", "playlist_restart"),
+        ):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/playlists/pl/%s" % action, data={"csrf_token": token}
+            )
+            self.assertEqual(rv.status_code, 302, action)
+            self.assertTrue(
+                rv.headers["Location"].endswith("/console/playlists"),
+                (action, rv.headers["Location"]),
+            )
+            self.assertEqual(self.engine.mutation_calls, [(method, "pl")], action)
+
+    def test_13_lifecycle_landing_not_form_controlled(self):
+        # a return-URL style form field must be ignored - the landing page is
+        # fixed by the route's kind, never by request data (no open redirect).
+        login(self.client)
+        token = get_csrf(self.client, path="/console/")
+        rv = self.client.post(
+            "/console/relays/news/start",
+            data={"csrf_token": token, "next": "https://evil.example/",
+                  "redirect": "/console/dashboard", "return_to": "//evil"},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertTrue(rv.headers["Location"].endswith("/console/streams"))
 
     def test_09_all_six_operations_map_to_exact_methods(self):
         login(self.client)
@@ -5454,6 +5511,211 @@ class EngineSafeDeleteValidationTests(unittest.TestCase):
     def test_media_delete_rejects_separator(self):
         with self.assertRaises(EngineError):
             self._client().media_delete("sub/dir.mp4")
+
+
+class LiveUiCorrectionTests(unittest.TestCase):
+    """Focused live-UI correction pass: lifecycle redirect target, vertical
+    lifecycle-action layout, and the dark/light theme toggle. Backend
+    lifecycle behaviour, privileged operations and every other feature are
+    unchanged."""
+
+    TPL = REPO_ROOT / "webapp" / "templates"
+    CSS = (REPO_ROOT / "webapp" / "static" / "css" / "console.css").read_text(
+        encoding="utf-8"
+    )
+
+    PAYLOADS = {
+        "snapshot": VALID_SNAPSHOT,
+        "relay_list": [
+            {"name": "news", "type": "remote-hls",
+             "source": "https://s.example/x.m3u8", "active": "no",
+             "enabled": "no", "health": "STOPPED", "destination_count": "1",
+             "hls_url": "https://example.com/hls/relay/news/index.m3u8",
+             "player_url": "https://example.com/player/?relay=news"},
+        ],
+        "playlist_list": [
+            {"name": "promo", "active": "no", "enabled": "no", "items": "2",
+             "health": "STOPPED", "destination_count": "0",
+             "scheduled": "no", "scheduled_at": "", "scheduled_at_iso": "",
+             "schedule_state": "",
+             "hls_url": "https://example.com/hls/playlist/promo/index.m3u8",
+             "player_url": "https://example.com/player/?playlist=promo"},
+        ],
+        "media_list": [],
+        "destination_list": [],
+        "playlist_cache_status": {
+            "total_bytes": "0", "artifact_count": "0", "protected_bytes": "0",
+            "protected_count": "0", "reclaimable_bytes": "0",
+            "reclaimable_count": "0",
+        },
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.engine = FakeEngine(self.PAYLOADS)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _tpl(self, name):
+        return (self.TPL / name).read_text(encoding="utf-8")
+
+    # -- Item 1: lifecycle POST stays in the section --------------------
+    def test_01_stream_start_still_invokes_engine_method(self):
+        token = get_csrf(self.client, path="/console/")
+        rv = self.client.post("/console/relays/news/start",
+                              data={"csrf_token": token})
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("relay_start", "news")])
+
+    def test_02_stream_start_redirects_to_streams(self):
+        token = get_csrf(self.client, path="/console/")
+        rv = self.client.post("/console/relays/news/start",
+                              data={"csrf_token": token})
+        self.assertTrue(rv.headers["Location"].endswith("/console/streams"))
+
+    def test_03_stream_stop_redirects_to_streams(self):
+        token = get_csrf(self.client, path="/console/")
+        rv = self.client.post("/console/relays/news/stop",
+                              data={"csrf_token": token})
+        self.assertTrue(rv.headers["Location"].endswith("/console/streams"))
+
+    def test_04_stream_restart_redirects_to_streams(self):
+        token = get_csrf(self.client, path="/console/")
+        rv = self.client.post("/console/relays/news/restart",
+                              data={"csrf_token": token})
+        self.assertTrue(rv.headers["Location"].endswith("/console/streams"))
+
+    def test_05_lifecycle_auth_and_csrf_preserved(self):
+        anon = self.app.test_client()
+        rv = anon.post("/console/relays/news/start", data={})
+        self.assertIn(rv.status_code, (302, 400))
+        rv = self.client.post("/console/relays/news/start")  # no CSRF
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_06_lifecycle_routes_post_only(self):
+        for path in ("/console/relays/news/start",
+                     "/console/playlists/promo/restart"):
+            self.assertEqual(self.client.get(path).status_code, 405)
+
+    # -- Item 2: layout - controls preserved + vertical lifecycle group -
+    def test_07_streams_template_retains_delete(self):
+        s = self._tpl("streams.html")
+        self.assertIn("console.relay_delete_post", s)
+        self.assertIn("btn-danger", s)
+
+    def test_08_streams_template_retains_destinations(self):
+        self.assertIn("console.relay_destinations", self._tpl("streams.html"))
+
+    def test_09_streams_template_retains_edit_source(self):
+        s = self._tpl("streams.html")
+        self.assertIn("console.relay_edit_source", s)
+        self.assertIn("relay.get('type') != 'local-file'", s)
+
+    def test_10_playlists_template_retains_delete(self):
+        p = self._tpl("playlists.html")
+        self.assertIn("console.playlist_delete_post", p)
+        self.assertIn("btn-danger", p)
+
+    def test_11_playlists_template_retains_destinations(self):
+        self.assertIn("console.playlist_destinations", self._tpl("playlists.html"))
+
+    def test_12_playlists_template_retains_schedule(self):
+        self.assertIn("console.playlist_schedule", self._tpl("playlists.html"))
+
+    def test_13_m3u8_and_web_player_controls_remain(self):
+        for name in ("streams.html", "playlists.html"):
+            t = self._tpl(name)
+            self.assertIn("copy-btn", t)
+            self.assertIn("M3U8", t)
+            self.assertIn("Web Player", t)
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn('class="btn btn-sm copy-btn"', html)
+        self.assertIn("index.m3u8", html)
+
+    def test_14_lifecycle_uses_vertical_group_structure(self):
+        for name, ops in (
+            ("streams.html", ("relay_start", "relay_stop", "relay_restart")),
+            ("playlists.html",
+             ("playlist_start", "playlist_stop", "playlist_restart")),
+        ):
+            t = self._tpl(name)
+            self.assertIn('class="lifecycle-group"', t)
+            group = t.split('class="lifecycle-group"', 1)[1].split("</div>", 1)[0]
+            for op in ops:
+                self.assertIn(op, group, (name, op))
+        # the CSS stacks the group as a column
+        block = self.CSS.split(".lifecycle-group {", 1)[1].split("}", 1)[0]
+        self.assertIn("flex-direction: column", block)
+
+    def test_15_layout_does_not_conceal_with_overflow_hidden(self):
+        # the action clusters / tables must not hide content behind
+        # overflow-x: hidden - they wrap / scroll instead.
+        for sel in (".actions", ".lifecycle-group", ".action-extras"):
+            block = self.CSS.split(sel + " {", 1)[1].split("}", 1)[0]
+            self.assertNotIn("overflow-x: hidden", block)
+            self.assertNotIn("overflow: hidden", block)
+        table_wrap = self.CSS.split(".table-wrap {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("overflow-x: hidden", table_wrap)
+        self.assertIn("flex-wrap: wrap", self.CSS.split(".actions {", 1)[1].split("}", 1)[0])
+
+    # -- Item 3: theme toggle, dark default, localStorage --------------
+    def test_16_base_template_contains_theme_toggle(self):
+        b = self._tpl("base.html")
+        self.assertIn('id="theme-toggle"', b)
+        self.assertIn("aria-label=", b.split('id="theme-toggle"', 1)[1][:200])
+        # present on every page (shared base) - a rendered page has it too
+        for path in ("/console/", "/console/streams", "/console/playlists",
+                     "/console/media", "/console/destinations"):
+            self.assertIn('id="theme-toggle"',
+                          self.client.get(path).get_data(as_text=True), path)
+
+    def test_17_dark_is_the_default_theme(self):
+        b = self._tpl("base.html")
+        self.assertIn('<html lang="en" data-theme="dark">', b)
+        # the pre-paint script only *overrides* to a stored value
+        self.assertIn("localStorage.getItem(\"bs-theme\")", b)
+        self.assertIn('data-theme="dark"',
+                      self.client.get("/console/streams").get_data(as_text=True))
+        # dark palette is keyed on the attribute, not prefers-color-scheme
+        self.assertIn(':root[data-theme="dark"]', self.CSS)
+        self.assertNotIn("@media (prefers-color-scheme: dark)", self.CSS)
+
+    def test_18_light_can_be_explicitly_selected(self):
+        b = self._tpl("base.html")
+        self.assertIn('"light"', b)
+        self.assertIn('setAttribute("data-theme", next)', b)
+        # a light-specific token override exists in the stylesheet
+        self.assertIn(':root[data-theme="light"]', self.CSS)
+
+    def test_19_theme_choice_persisted_in_localstorage(self):
+        b = self._tpl("base.html")
+        self.assertIn('localStorage.setItem("bs-theme", next)', b)
+        self.assertNotIn("cookie", b.lower().split("theme-toggle")[1][:400]
+                         if "theme-toggle" in b else "")
+
+    def test_20_active_navigation_behaviour_preserved(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertRegex(html, r'href="/console/streams"[^>]*nav-active')
+        html = self.client.get("/console/destinations").get_data(as_text=True)
+        self.assertRegex(html, r'href="/console/destinations"[^>]*nav-active')
+
+    def test_21_dashboard_section_order_unchanged(self):
+        html = self.client.get("/console/").get_data(as_text=True)
+        util = html.index("<h2>Server Utilities</h2>")
+        quick = html.index("<h2>Quick actions</h2>")
+        relays = html.index("<h2>Relays</h2>")
+        playlists = html.index("<h2>Playlists</h2>")
+        server = html.index("<h2>Server</h2>")
+        self.assertTrue(util < quick < relays < playlists < server,
+                        (util, quick, relays, playlists, server))
+
+    def test_22_version_unchanged(self):
+        self.assertEqual(
+            (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip(), "0.1.0"
+        )
 
 
 if __name__ == "__main__":

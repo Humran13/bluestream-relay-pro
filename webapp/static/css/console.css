@@ -1,8 +1,14 @@
 /* BlueStream Relay Pro - console styles.
  *
- * A single hand-written stylesheet (no framework, no CDN). Light and dark are
- * both supported via prefers-color-scheme; every colour is a token so the two
- * themes stay in lock-step. The BlueStream accent (#1f6feb) is unchanged.
+ * A single hand-written stylesheet (no framework, no CDN). Every colour is a
+ * token so the two themes stay in lock-step. The BlueStream accent (#1f6feb)
+ * is unchanged.
+ *
+ * THEME: <html data-theme="dark"> (the default set in base.html and by the
+ * pre-paint script) or data-theme="light" (explicit operator choice, stored
+ * in localStorage). :root below carries the LIGHT palette; the dark palette
+ * is applied only when data-theme="dark". DARK is the default and is NOT
+ * driven by prefers-color-scheme.
  */
 
 :root {
@@ -58,42 +64,45 @@
     "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
+
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0c1017;
-    --bg-elev: #141a23;
-    --panel: #161d27;
-    --panel-sub: #1b232f;
-    --topbar: #0a0f17;
-    --topbar-text: #e7edf6;
-    --topbar-muted: #808fa6;
+:root[data-theme="light"] { color-scheme: light; }
 
-    --text: #d5dde7;
-    --text-strong: #f0f4f9;
-    --muted: #93a0b1;
-    --faint: #6f7d8e;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0c1017;
+  --bg-elev: #141a23;
+  --panel: #161d27;
+  --panel-sub: #1b232f;
+  --topbar: #0a0f17;
+  --topbar-text: #e7edf6;
+  --topbar-muted: #808fa6;
 
-    --border: #29323f;
-    --border-strong: #3a4552;
+  --text: #d5dde7;
+  --text-strong: #f0f4f9;
+  --muted: #93a0b1;
+  --faint: #6f7d8e;
 
-    --accent: #4f97ff;
-    --accent-hover: #6aa6ff;
-    --accent-soft: #16263f;
-    --danger: #ff6b5e;
-    --danger-hover: #ff8377;
-    --danger-soft: #331a19;
-    --ok: #5bd07f;
-    --ok-soft: #16281c;
-    --warn: #e6b455;
-    --warn-soft: #2c2416;
-    --info: #4f97ff;
-    --info-soft: #16263f;
+  --border: #29323f;
+  --border-strong: #3a4552;
 
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.35);
-  }
+  --accent: #4f97ff;
+  --accent-hover: #6aa6ff;
+  --accent-soft: #16263f;
+  --danger: #ff6b5e;
+  --danger-hover: #ff8377;
+  --danger-soft: #331a19;
+  --ok: #5bd07f;
+  --ok-soft: #16281c;
+  --warn: #e6b455;
+  --warn-soft: #2c2416;
+  --info: #4f97ff;
+  --info-soft: #16263f;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.35);
 }
 
 * { box-sizing: border-box; }
@@ -167,6 +176,37 @@ a:hover { color: var(--accent-hover); }
 }
 
 .topbar form { margin: 0; }
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Theme (dark / light) toggle in the header - keyboard-operable button. */
+.theme-toggle {
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--topbar-text);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+.theme-toggle:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.theme-toggle .theme-toggle-icon { font-size: 0.95em; line-height: 1; }
 
 /* --------------------------------------------------------------------------
  * Layout
@@ -435,16 +475,44 @@ td.col-check { width: 2.5rem; text-align: center; }
   max-width: 24rem;
 }
 
-/* Per-row action clusters */
+/* Per-row action clusters.
+ * The lifecycle controls (Start / Stop / Restart) stack VERTICALLY as one
+ * compact column so the Actions cell stays narrow (no page-wide horizontal
+ * scroll); the remaining per-row actions wrap beside/below it. */
 .actions {
-  white-space: nowrap;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.4rem 0.6rem;
+  white-space: normal;
 }
-.actions form,
-.actions .btn,
-.actions a.btn {
-  display: inline-flex;
-  margin: 0.12rem 0.25rem 0.12rem 0;
-  vertical-align: middle;
+.actions form { margin: 0; }
+
+.lifecycle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+.lifecycle-group form { display: block; }
+.lifecycle-group .btn {
+  width: 100%;
+  margin: 0;
+  justify-content: center;
+}
+
+.action-extras {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.3rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.action-extras form { margin: 0; }
+.action-extras .btn,
+.action-extras a.btn {
+  margin: 0;
 }
 
 /* --------------------------------------------------------------------------
@@ -631,6 +699,9 @@ td.col-check { width: 2.5rem; text-align: center; }
   .link-url { width: 100%; max-width: none; }
   .link-row { flex-wrap: wrap; }
   .link-label { min-width: 0; }
+  /* Stack the whole action cluster so it never widens the row on phones. */
+  .actions { flex-direction: column; }
+  .action-extras { flex: 1 1 100%; }
 }
 
 @media (max-width: 34rem) {

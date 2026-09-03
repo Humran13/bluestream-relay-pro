@@ -1,9 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}BlueStream Relay Pro{% endblock %}</title>
+  <script>
+  /* Apply the stored theme BEFORE first paint (no light->dark flash). DARK
+     is the default: data-theme="dark" is set statically on <html> above and
+     is only replaced here when the operator has explicitly chosen a theme. */
+  (function () {
+    try {
+      var t = window.localStorage.getItem("bs-theme");
+      if (t === "light" || t === "dark") {
+        document.documentElement.setAttribute("data-theme", t);
+      }
+    } catch (e) { /* private mode / disabled storage: keep the dark default */ }
+  })();
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/console.css') }}">
 </head>
 <body>
@@ -20,12 +33,20 @@
       </nav>
       {% endif %}
     </div>
-    {% if session.get('authenticated') %}
-    <form method="post" action="{{ url_for('console.logout') }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button type="submit" class="btn">Sign out</button>
-    </form>
-    {% endif %}
+    <div class="topbar-right">
+      <button type="button" id="theme-toggle" class="theme-toggle"
+              aria-label="Switch between dark and light theme" aria-pressed="true"
+              title="Switch to light theme">
+        <span class="theme-toggle-icon" aria-hidden="true">&#9790;</span>
+        <span class="theme-toggle-label">Dark</span>
+      </button>
+      {% if session.get('authenticated') %}
+      <form method="post" action="{{ url_for('console.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
   </header>
   <main class="content">
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -42,6 +63,33 @@
   <script>
   (function () {
     "use strict";
+    // Dark / light theme toggle. The pre-paint script in <head> already
+    // applied the stored (or default: dark) theme; this only handles clicks
+    // and keeps the button label/state in sync. Minimal vanilla JS.
+    var themeBtn = document.getElementById("theme-toggle");
+    if (themeBtn) {
+      var icon = themeBtn.querySelector(".theme-toggle-icon");
+      var label = themeBtn.querySelector(".theme-toggle-label");
+      var syncToggle = function () {
+        var isLight = document.documentElement.getAttribute("data-theme") === "light";
+        if (icon) { icon.innerHTML = isLight ? "&#9728;" : "&#9790;"; } // sun / moon
+        if (label) { label.textContent = isLight ? "Light" : "Dark"; }
+        themeBtn.setAttribute("aria-pressed", isLight ? "false" : "true");
+        themeBtn.setAttribute(
+          "title", isLight ? "Switch to dark theme" : "Switch to light theme"
+        );
+      };
+      syncToggle();
+      themeBtn.addEventListener("click", function () {
+        var next =
+          document.documentElement.getAttribute("data-theme") === "light"
+            ? "dark"
+            : "light";
+        document.documentElement.setAttribute("data-theme", next);
+        try { window.localStorage.setItem("bs-theme", next); } catch (e) {}
+        syncToggle();
+      });
+    }
     function fallbackCopy(text) {
       var ta = document.createElement("textarea");
       ta.value = text;

@@ -44,28 +44,32 @@
           {% if not relay.get('hls_url') and not relay.get('player_url') %}<span class="muted">-</span>{% endif %}
         </td>
         <td class="actions">
-          <form method="post" action="{{ url_for('console.relay_start', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Start</button>
-          </form>
-          <form method="post" action="{{ url_for('console.relay_stop', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Stop</button>
-          </form>
-          <form method="post" action="{{ url_for('console.relay_restart', name=relay.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Restart</button>
-          </form>
-          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_destinations', name=relay.get('name')) }}">Destinations ({{ relay.get('destination_count') or 0 }})</a>
-          {% if relay.get('type') != 'local-file' %}
-          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_edit_source', name=relay.get('name')) }}">Edit Source</a>
-          {% endif %}
-          <form method="post" action="{{ url_for('console.relay_delete_post', name=relay.get('name')) }}"
-                onsubmit="return confirm('Delete this stream? This removes its configuration and output and cannot be undone.');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-danger"
-                    {% if relay.get('active') == 'yes' %}disabled title="Stop the stream before deleting it."{% endif %}>Delete</button>
-          </form>
+          <div class="lifecycle-group">
+            <form method="post" action="{{ url_for('console.relay_start', name=relay.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Start</button>
+            </form>
+            <form method="post" action="{{ url_for('console.relay_stop', name=relay.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Stop</button>
+            </form>
+            <form method="post" action="{{ url_for('console.relay_restart', name=relay.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Restart</button>
+            </form>
+          </div>
+          <div class="action-extras">
+            <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_destinations', name=relay.get('name')) }}">Destinations ({{ relay.get('destination_count') or 0 }})</a>
+            {% if relay.get('type') != 'local-file' %}
+            <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_edit_source', name=relay.get('name')) }}">Edit Source</a>
+            {% endif %}
+            <form method="post" action="{{ url_for('console.relay_delete_post', name=relay.get('name')) }}"
+                  onsubmit="return confirm('Delete this stream? This removes its configuration and output and cannot be undone.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm btn-danger"
+                      {% if relay.get('active') == 'yes' %}disabled title="Stop the stream before deleting it."{% endif %}>Delete</button>
+            </form>
+          </div>
         </td>
       </tr>
     {% endfor %}

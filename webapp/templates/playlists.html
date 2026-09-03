@@ -54,26 +54,30 @@
           {% if not playlist.get('hls_url') and not playlist.get('player_url') %}<span class="muted">-</span>{% endif %}
         </td>
         <td class="actions">
-          <form method="post" action="{{ url_for('console.playlist_start', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Start</button>
-          </form>
-          <form method="post" action="{{ url_for('console.playlist_stop', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Stop</button>
-          </form>
-          <form method="post" action="{{ url_for('console.playlist_restart', name=playlist.get('name')) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Restart</button>
-          </form>
-          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_destinations', name=playlist.get('name')) }}">Destinations ({{ playlist.get('destination_count') or 0 }})</a>
-          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_schedule', name=playlist.get('name')) }}">Schedule</a>
-          <form method="post" action="{{ url_for('console.playlist_delete_post', name=playlist.get('name')) }}"
-                onsubmit="return confirm('Delete this playlist? This removes its configuration and output (media files are kept) and cannot be undone.');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-danger"
-                    {% if playlist.get('active') == 'yes' %}disabled title="Stop the playlist before deleting it."{% endif %}>Delete</button>
-          </form>
+          <div class="lifecycle-group">
+            <form method="post" action="{{ url_for('console.playlist_start', name=playlist.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Start</button>
+            </form>
+            <form method="post" action="{{ url_for('console.playlist_stop', name=playlist.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Stop</button>
+            </form>
+            <form method="post" action="{{ url_for('console.playlist_restart', name=playlist.get('name')) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm">Restart</button>
+            </form>
+          </div>
+          <div class="action-extras">
+            <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_destinations', name=playlist.get('name')) }}">Destinations ({{ playlist.get('destination_count') or 0 }})</a>
+            <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_schedule', name=playlist.get('name')) }}">Schedule</a>
+            <form method="post" action="{{ url_for('console.playlist_delete_post', name=playlist.get('name')) }}"
+                  onsubmit="return confirm('Delete this playlist? This removes its configuration and output (media files are kept) and cannot be undone.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm btn-danger"
+                      {% if playlist.get('active') == 'yes' %}disabled title="Stop the playlist before deleting it."{% endif %}>Delete</button>
+            </form>
+          </div>
         </td>
       </tr>
     {% endfor %}
