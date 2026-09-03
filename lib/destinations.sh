@@ -28,7 +28,9 @@ DEST_SERVER_URL=""; DEST_STREAM_KEY=""; DEST_ENABLED="no"; DEST_CREATED=""
 # Stable internal platform identifiers.  The user always supplies the actual
 # RTMP/RTMPS server URL and stream key; the platform value is organisation/
 # display/future-behaviour only - never treated as an authoritative endpoint.
-DEST_PLATFORM_ALLOW="youtube facebook twitch rumble instagram custom"
+# 'tiktok' is a label only: TikTok Live ingest URLs and stream-key access vary
+# by account, so no endpoint is ever hard-coded (the user supplies both).
+DEST_PLATFORM_ALLOW="youtube facebook twitch rumble instagram tiktok custom"
 
 # Bounds shared with the web layer (Flask mirrors these exactly).
 DEST_DISPLAY_MAX=64
@@ -197,12 +199,93 @@ dest_set_enabled() {
 
 # Delete ONLY the fixed, validated destination config file.  No generic path
 # or wildcard deletion operation exists at any layer.
+#
+# Phase 1B safety: a destination that is ATTACHED to any stream or playlist is
+# NOT deletable here (the authoritative, root-side check).  The caller must
+# detach it first; deletion never silently detaches.
+#   0 ok | 1 invalid name | 2 not found | 3 attached (detach first) |
+#   4 remove failed
 dest_delete() {
     local name="$1"
     bs_require_root
     bs_valid_name "$name" || return 1
     dest_exists "$name" || return 2
-    rm -f "$BLUESTREAM_DEST_CONF_DIR/$name.conf" || return 3
+    [ -z "$(dest_attached_targets "$name")" ] || return 3
+    rm -f "$BLUESTREAM_DEST_CONF_DIR/$name.conf" || return 4
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Phase 1B: destination <-> stream/playlist ATTACHMENTS.
+#
+# A "target" is a relay (stream) or a playlist.  Its config file carries at
+# most one bounded line:  DESTINATIONS=id1,id2,...  listing destination IDs
+# ONLY (never a stream key, secret, or publish URL).  A missing line means no
+# destinations are attached.  This library holds the shared attachment helpers
+# so relay.sh / playlist.sh and the web bridge share ONE implementation.
+#
+# Attachment is independent of the destination's global enabled/disabled flag:
+# a disabled destination may stay attached and is never auto-detached.
+# ---------------------------------------------------------------------------
+
+# Upper bound on destinations attached to a single target.  Bounds every
+# privileged argv line and config write; the web form validates the same limit.
+BLUESTREAM_MAX_TARGET_DESTINATIONS=32
+
+DEST_ATTACH_CSV=""
+
+# Normalize a comma-separated destination-ID list.  On success sets
+# DEST_ATTACH_CSV to the cleaned list (order preserved, no surrounding spaces)
+# and returns 0.  Fails closed:
+#   1 an ID does not match the engine name rule
+#   2 the same ID appears more than once
+#   3 an ID does not resolve to an existing destination
+#   4 more than BLUESTREAM_MAX_TARGET_DESTINATIONS IDs
+bs_dest_attach_normalize() {
+    DEST_ATTACH_CSV=""
+    local id out="" seen="," n=0
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        bs_valid_name "$id" || return 1
+        case "$seen" in *",$id,"*) return 2 ;; esac
+        dest_exists "$id" || return 3
+        seen="${seen}${id},"
+        out="${out:+$out,}$id"
+        n=$((n + 1))
+        [ "$n" -le "$BLUESTREAM_MAX_TARGET_DESTINATIONS" ] || return 4
+    done < <(bs_csv_fields "$1")
+    DEST_ATTACH_CSV="$out"
+    return 0
+}
+
+# Count the IDs in a DESTINATIONS= value (0 for empty/malformed-empty).
+bs_dest_attach_count() {
+    local id n=0
+    while IFS= read -r id; do
+        [ -n "$id" ] && n=$((n + 1))
+    done < <(bs_csv_fields "$1")
+    printf '%d' "$n"
+}
+
+# Print the basename of every relay/playlist config whose DESTINATIONS= line
+# references destination ID "$1".  Reads the config files directly (no
+# dependency on relay.sh / playlist.sh being loaded) so it is safe to call
+# from dest_delete in any context.
+dest_attached_targets() {
+    local id="$1" f line val
+    bs_valid_name "$id" || return 0
+    shopt -s nullglob
+    for f in "$BLUESTREAM_RELAY_CONF_DIR"/*.conf "$BLUESTREAM_PLAYLIST_CONF_DIR"/*.playlist; do
+        [ -f "$f" ] || continue
+        line="$(grep -m1 '^DESTINATIONS=' "$f" 2>/dev/null || true)"
+        [ -n "$line" ] || continue
+        val="${line#DESTINATIONS=}"
+        val="${val//[[:space:]]/}"
+        case ",$val," in
+            *",$id,"*) basename "$f" ;;
+        esac
+    done
+    shopt -u nullglob
     return 0
 }
 

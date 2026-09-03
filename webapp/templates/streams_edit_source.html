@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Edit Source - {{ name }} - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Edit Source &ndash; Stream &ldquo;{{ name }}&rdquo;</h1>
+  <p class="muted">
+    Change the source URL without recreating the stream. The stream name,
+    destination attachments and public M3U8 / Web Player URLs stay the same.
+    Saving does <strong>not</strong> start the stream.
+  </p>
+</div>
+
+<section class="card">
+  {% if media_backed %}
+  <p class="empty-state">
+    This stream plays a <strong>managed media file</strong>, not a URL, so there
+    is no source URL to edit. To change the media, create a new stream from the
+    Media Library.
+  </p>
+  <p><a href="{{ url_for('console.streams') }}">&laquo; Back to Streams</a></p>
+  {% else %}
+  <dl class="grid">
+    <dt>Current type</dt><dd>{{ type_label or 'unknown' }}</dd>
+    <dt>Current source</dt><dd class="cell-url">{{ current_source or '&mdash;'|safe }}</dd>
+  </dl>
+  {% if running %}
+  <p class="error">
+    This stream is running. Stop it first, then edit the source.
+  </p>
+  <p><a class="btn btn-secondary" href="{{ url_for('console.streams') }}">Back to Streams</a></p>
+  {% else %}
+  <form method="post" action="{{ url_for('console.relay_edit_source_post', name=name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="url">New source URL</label>
+    <input type="text" id="url" name="url" required maxlength="4096"
+           placeholder="https://example.com/live/index.m3u8" autocomplete="off">
+    <p class="muted">
+      Supported: HLS (.m3u8), HTTP/HTTPS media, RTMP / RTMPS, RTSP. The type is
+      re-detected from the new URL. The URL is stored as data only and never
+      executed by the server. The full current URL is hidden above to protect
+      any embedded credentials &mdash; enter the complete new URL.
+    </p>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save Source</button>
+      <a class="btn btn-secondary" href="{{ url_for('console.streams') }}">Cancel</a>
+    </div>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

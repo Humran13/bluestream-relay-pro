@@ -244,9 +244,44 @@ bs_valid_name() {
 
 bs_valid_type() {
     case "$1" in
-        local-file|remote-hls|rtmp|rtmps|rtsp|http-file) return 0 ;;
+        local-file|remote-hls|rtmp|rtmps|rtsp|http-file|youtube) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Public YouTube Live source support (GUI-7A).
+#
+# A YouTube watch/live PAGE URL is an HTML document, NOT a raw media stream,
+# so FFmpeg cannot ingest it directly (this is why pasting one as a plain
+# source URL fails). BlueStream stores the page URL as TYPE=youtube and the
+# systemd runtime wrapper resolves the CURRENT playable media URL fresh on
+# every start with yt-dlp (see lib/youtube.sh). PUBLIC content only.
+# ---------------------------------------------------------------------------
+BLUESTREAM_YOUTUBE_HOSTS="www.youtube.com youtube.com m.youtube.com music.youtube.com youtu.be"
+
+# Extract the lowercase host from a URL (strips scheme, userinfo, port, path,
+# query). Never evaluates the value.
+bs_url_host() {
+    local rest="${1#*://}"
+    rest="${rest#*@}"
+    rest="${rest%%/*}"
+    rest="${rest%%\?*}"
+    rest="${rest%%:*}"
+    printf '%s' "$rest" | tr 'A-Z' 'a-z'
+}
+
+# True only for a bounded, data-only https:// URL whose host is a recognized
+# public YouTube host. Mirrors bs_valid_youtube_url in the web layer.
+bs_is_youtube_url() {
+    local u="$1" host x
+    case "$u" in https://*) ;; *) return 1 ;; esac
+    bs_valid_url "$u" || return 1
+    host="$(bs_url_host "$u")"
+    for x in $BLUESTREAM_YOUTUBE_HOSTS; do
+        [ "$host" = "$x" ] && return 0
+    done
+    return 1
 }
 
 # URLs: only the supported schemes. Rejects whitespace, control characters
@@ -278,10 +313,16 @@ bs_classify_source_type() {
         rtmps://*) printf 'rtmps' ;;
         rtsp://*)  printf 'rtsp' ;;
         http://*|https://*)
-            case "$noquery" in
-                *.m3u8)   printf 'remote-hls' ;;
-                *)        printf 'http-file' ;;
-            esac
+            if bs_is_youtube_url "$url"; then
+                # A YouTube page URL is HTML, not a media stream: mark it so
+                # the runtime wrapper resolves a playable URL at start time.
+                printf 'youtube'
+            else
+                case "$noquery" in
+                    *.m3u8)   printf 'remote-hls' ;;
+                    *)        printf 'http-file' ;;
+                esac
+            fi
             ;;
         *) return 1 ;;
     esac
@@ -417,6 +458,20 @@ bs_unit_active() {
 
 bs_unit_enabled() {
     [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "enabled" ]
+}
+
+# Return 0 ONLY when a unit is DEFINITIVELY stopped: systemd ActiveState is
+# exactly 'inactive' or 'failed' (crashed, not running).  Every other value -
+# active, activating, deactivating, reloading, or an unknown/empty state -
+# returns 1 (treated as "still in use / uncertain").  Used to gate destructive
+# operations (delete, source edit) so they can never touch a live target.
+bs_unit_definitively_stopped() {
+    local state
+    state="$(systemctl is-active "$1" 2>/dev/null)"
+    case "$state" in
+        inactive|failed) return 0 ;;
+        *)               return 1 ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -642,6 +697,19 @@ bs_parse_kv_file() {
 # ---------------------------------------------------------------------------
 bs_to_lower() {
     printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+# Split a comma-separated value on ',' WITHOUT shell word splitting or globbing
+# (manual parse), printing one non-empty, whitespace-stripped field per line.
+# Used for bounded ID lists (e.g. a target's DESTINATIONS= attachment line);
+# every field is still validated by the caller before use.
+bs_csv_fields() {
+    local csv="${1//[[:space:]]/}" field
+    while [ -n "$csv" ]; do
+        field="${csv%%,*}"
+        if [ "$field" = "$csv" ]; then csv=""; else csv="${csv#*,}"; fi
+        [ -n "$field" ] && printf '%s\n' "$field"
+    done
 }
 
 bs_now_ts() {

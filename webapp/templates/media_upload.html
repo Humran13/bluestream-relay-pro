@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Upload Media - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Upload Media</h1>
+<div class="page-header">
+  <h1>Upload Media</h1>
+  <p class="muted">Uploaded files are validated with ffprobe and stored as managed media.</p>
+</div>
 <section class="card">
   <form id="upload-form" method="post" action="{{ url_for('console.media_upload_post') }}" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

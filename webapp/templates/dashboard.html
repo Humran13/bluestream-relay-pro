@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <p class="muted">Live server health and a snapshot of every relay and playlist.</p>
+</div>
 
 {% if engine_unavailable %}
 <p class="error">BlueStream engine information is temporarily unavailable.</p>
@@ -62,6 +65,7 @@
 <section class="card">
   <h2>Relays</h2>
   {% if relays %}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Name</th><th>Type</th><th>Active</th><th>Health</th></tr>
@@ -77,6 +81,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   <p class="muted"><a href="{{ url_for('console.streams') }}">Manage streams &raquo;</a></p>
   {% else %}
   <p class="muted">No relays configured. <a href="{{ url_for('console.streams_create') }}">Create a stream</a>.</p>
@@ -89,6 +94,7 @@
 <section class="card">
   <h2>Playlists</h2>
   {% if playlists %}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Name</th><th>Active</th><th>Enabled</th></tr>
@@ -103,6 +109,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   <p class="muted"><a href="{{ url_for('console.playlists') }}">Manage playlists &raquo;</a></p>
   {% else %}
   <p class="muted">No playlists configured.</p>
@@ -125,6 +132,9 @@
     <dt>Nginx</dt><dd>{{ snap.get('nginx_active') }}</dd>
     <dt>FFmpeg</dt><dd>{{ snap.get('ffmpeg_available') }}</dd>
     <dt>ffprobe</dt><dd>{{ snap.get('ffprobe_available') }}</dd>
+    {% if snap.get('ytdlp_available') is not none %}
+    <dt>yt-dlp</dt><dd>{{ snap.get('ytdlp_available') }} <span class="muted">(YouTube Live)</span></dd>
+    {% endif %}
     <dt>HTTPS</dt><dd>{{ snap.get('https_configured') }}</dd>
   </dl>
   <h2>Counts</h2>

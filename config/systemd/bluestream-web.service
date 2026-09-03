@@ -53,16 +53,20 @@ ProtectSystem=strict
 # unable to write any of these paths):
 #   /run/sudo               - sudo timestamp directory (NOPASSWD)
 #   /etc/systemd/system     - relay/playlist dropin override.conf writes
-#                             (relay_sync_dropin)
+#                             (relay_sync_dropin) and GUI-8A generated
+#                             bluestream-schedule-<name>.timer units
+#                             (schedule_set / schedule_clear); root:root 0644,
+#                             so only the sudo-root web-ctl child can write them
 #   /etc/bluestream/relays  - relay config create/save (relay_create /
 #                             relay_save_config); on disk root:root 0600, so
 #                             only the sudo-root web-ctl child can write
 #                             inside the namespace
 #   /etc/bluestream/playlists - GUI-1D.1 playlist config create/save
-#                             (playlist_create / playlist_save_config); same
-#                             root:root 0600 model as the relays directory, so
-#                             only the sudo-root web-ctl child can write inside
-#                             the namespace during browser playlist creation
+#                             (playlist_create / playlist_save_config) and the
+#                             GUI-8A <name>.schedule sidecar (schedule_set);
+#                             same root:root 0600 model as the relays
+#                             directory, so only the sudo-root web-ctl child
+#                             can write inside the namespace
 #   /etc/bluestream/destinations - GUI-4 Phase 1A destination config
 #                             create/save (destination_create and the
 #                             enable/disable toggle); same root:root 0600

@@ -1,0 +1,24 @@
+# BlueStream Relay Pro - one-time playlist start service (GUI-8A).
+# Instantiated as:  bluestream-playlist-start@<playlist-name>.service
+# Installed to:     /etc/systemd/system/bluestream-playlist-start@.service
+#
+# Triggered ONLY by a generated bluestream-schedule-<name>.timer at the
+# scheduled instant. It runs the authoritative playlist_start (via
+# run-playlist-start.sh): a safe no-op if the playlist is already running,
+# a safe exit if the playlist no longer exists, and then it removes its own
+# timer + schedule sidecar (one-shot). It never runs FFmpeg itself.
+
+[Unit]
+Description=BlueStream Relay Pro - one-time start of playlist %i
+Documentation=file:/usr/local/lib/bluestream/docs/playlists.md
+Wants=network-online.target
+After=network-online.target nginx.service bluestream-playlist@%i.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/bluestream/run-playlist-start.sh %i
+# The wrapper needs root to call the engine's systemctl-based playlist_start
+# and to remove its own generated timer unit under /etc/systemd/system.
+SyslogIdentifier=bluestream-playlist-start-%i
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Destinations for {{ target_name }} - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Destinations &ndash; {{ noun|capitalize }} &ldquo;{{ target_name }}&rdquo;</h1>
+  <p class="muted">
+    Attach one or more existing destinations to this {{ noun }}. Saving changes
+    the attachment list only &mdash; it never starts, stops or restarts a running
+    {{ noun }}, and nothing is pushed to these destinations yet.
+  </p>
+</div>
+
+{% if stale %}
+<section class="card">
+  <p class="error">
+    These attached destination IDs no longer exist and will be removed when you save:
+    {{ stale|join(', ') }}
+  </p>
+</section>
+{% endif %}
+
+<section class="card">
+  {% if destinations %}
+  <form method="post" action="{{ url_for(post_endpoint, name=target_name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th class="col-check">Attach</th>
+          <th>Destination</th>
+          <th>Platform</th>
+          <th>Server URL</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for d in destinations %}
+        <tr>
+          <td class="col-check">
+            <input type="checkbox" name="destinations" value="{{ d.name }}"
+                   id="dest-{{ d.name }}"{% if d.attached %} checked{% endif %}>
+          </td>
+          <td>
+            <label for="dest-{{ d.name }}">{{ d.display_name }}</label>
+            {% if d.display_name != d.name %}<span class="muted">({{ d.name }})</span>{% endif %}
+          </td>
+          <td>{{ d.platform_label }}</td>
+          <td class="cell-url">{{ d.server_url or '&mdash;'|safe }}</td>
+          <td>
+            {% if d.enabled %}
+            <span class="badge badge-healthy">Enabled</span>
+            {% else %}
+            <span class="badge badge-stopped">Disabled</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted">
+      A disabled destination may still be attached &mdash; it is not detached
+      automatically. Up to {{ max_destinations }} destinations per {{ noun }}.
+      The stream key is never shown here.
+    </p>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save Attachments</button>
+      <a class="btn btn-secondary" href="{{ url_for(list_endpoint) }}">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <p class="empty-state">
+    No destinations have been created yet.
+    <a href="{{ url_for('console.destinations_create') }}">Add a destination</a>
+    first, then attach it here.
+  </p>
+  {% endif %}
+</section>
+
+<p><a href="{{ url_for(list_endpoint) }}">&laquo; Back</a></p>
+{% endblock %}

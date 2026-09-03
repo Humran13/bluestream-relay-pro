@@ -126,6 +126,19 @@ install_packages() {
         || bs_die "Failed to install base packages."
     web_verify_packages
 
+    # GUI-7A: yt-dlp is OPTIONAL - it is needed ONLY for public "YouTube Live"
+    # source URLs. Every other source type works without it, so a missing
+    # package is a warning, never a fatal error. Ubuntu 22.04+ ships a yt-dlp
+    # package; on older releases install it with pipx (pipx install yt-dlp).
+    if ! command -v yt-dlp >/dev/null 2>&1; then
+        os_pkg_install yt-dlp 2>/dev/null || true
+    fi
+    if command -v yt-dlp >/dev/null 2>&1; then
+        bs_ok "yt-dlp available (enables public YouTube Live sources)"
+    else
+        bs_warn "yt-dlp not installed - public 'YouTube Live' source URLs will not work until you install it (apt-get install yt-dlp, or: pipx install yt-dlp). All other source types are unaffected."
+    fi
+
     if [ "$SSL_REQUESTED" = "1" ]; then
         bs_step "Installing certbot for Let's Encrypt SSL"
         os_pkg_install certbot python3-certbot-nginx \
@@ -273,6 +286,8 @@ install_files() {
     # ExecStart always works regardless of the source checkout's modes.
     install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-relay.sh" "$libdir/run-relay.sh"
     install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-playlist.sh" "$libdir/run-playlist.sh"
+    # GUI-8A: one-time scheduled playlist start wrapper.
+    install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-playlist-start.sh" "$libdir/run-playlist-start.sh"
     cp -f "$BS_ROOT/VERSION" "$libdir/VERSION"
     cp -f "$BS_ROOT/CHANGELOG.md" "$libdir/CHANGELOG.md"
     cp -f "$BS_ROOT/README.md" "$libdir/README.md"
@@ -289,6 +304,9 @@ install_files() {
     # systemd unit templates.
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-relay@.service" /etc/systemd/system/bluestream-relay@.service
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-playlist@.service" /etc/systemd/system/bluestream-playlist@.service
+    # GUI-8A: one-time playlist start oneshot template (triggered only by a
+    # generated bluestream-schedule-<name>.timer).
+    install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-playlist-start@.service" /etc/systemd/system/bluestream-playlist-start@.service
 
     # Web console application + web-ctl (GUI-1A.3B). web_install_files also
     # installs the systemd unit and the sudoers source; sudoers itself is
@@ -297,7 +315,7 @@ install_files() {
 
     # Verify the production runners: present, root:root owned, executable.
     local _runner _runner_owner
-    for _runner in run-relay.sh run-playlist.sh; do
+    for _runner in run-relay.sh run-playlist.sh run-playlist-start.sh; do
         if [ ! -f "$libdir/$_runner" ]; then
             bs_die "Installed runner missing: $libdir/$_runner"
         fi

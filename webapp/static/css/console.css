@@ -1,104 +1,164 @@
-/* BlueStream Relay Pro - console styles (GUI-1A.2). Minimal and functional. */
+/* BlueStream Relay Pro - console styles.
+ *
+ * A single hand-written stylesheet (no framework, no CDN). Light and dark are
+ * both supported via prefers-color-scheme; every colour is a token so the two
+ * themes stay in lock-step. The BlueStream accent (#1f6feb) is unchanged.
+ */
 
 :root {
-  --bg: #f5f6f8;
+  /* Surfaces */
+  --bg: #eef1f5;
+  --bg-elev: #ffffff;
   --panel: #ffffff;
-  --border: #d8dbe0;
-  --text: #22262c;
-  --muted: #6a7078;
+  --panel-sub: #f6f8fa;
+  --topbar: #10203a;
+  --topbar-text: #eef2f8;
+  --topbar-muted: #9db0c9;
+
+  /* Text */
+  --text: #1b2430;
+  --text-strong: #0f1620;
+  --muted: #5b6673;
+  --faint: #8a95a2;
+
+  /* Lines */
+  --border: #dbe0e7;
+  --border-strong: #c4cbd4;
+
+  /* Accent + status */
   --accent: #1f6feb;
-  --error: #c0392b;
+  --accent-hover: #1a5fd0;
+  --accent-soft: #e8f1fe;
+  --danger: #c0392b;
+  --danger-hover: #a83224;
+  --danger-soft: #fdecec;
+  --ok: #1a7f37;
+  --ok-soft: #e6f6ec;
+  --warn: #9a6700;
+  --warn-soft: #fff4e0;
+  --info: #1f6feb;
+  --info-soft: #e8f1fe;
+
+  /* Shape + depth */
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(15, 22, 32, 0.06), 0 1px 3px rgba(15, 22, 32, 0.05);
+  --shadow-md: 0 2px 6px rgba(15, 22, 32, 0.07), 0 6px 20px rgba(15, 22, 32, 0.06);
+
+  /* Rhythm */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c1017;
+    --bg-elev: #141a23;
+    --panel: #161d27;
+    --panel-sub: #1b232f;
+    --topbar: #0a0f17;
+    --topbar-text: #e7edf6;
+    --topbar-muted: #808fa6;
+
+    --text: #d5dde7;
+    --text-strong: #f0f4f9;
+    --muted: #93a0b1;
+    --faint: #6f7d8e;
+
+    --border: #29323f;
+    --border-strong: #3a4552;
+
+    --accent: #4f97ff;
+    --accent-hover: #6aa6ff;
+    --accent-soft: #16263f;
+    --danger: #ff6b5e;
+    --danger-hover: #ff8377;
+    --danger-soft: #331a19;
+    --ok: #5bd07f;
+    --ok-soft: #16281c;
+    --warn: #e6b455;
+    --warn-soft: #2c2416;
+    --info: #4f97ff;
+    --info-soft: #16263f;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.35);
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
   background: var(--bg);
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
 }
 
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+/* --------------------------------------------------------------------------
+ * Top bar / navigation
+ * ------------------------------------------------------------------------ */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1.25rem;
-  background: #1c2733;
-  color: #fff;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding: 0.7rem 1.5rem;
+  background: var(--topbar);
+  color: var(--topbar-text);
+  box-shadow: var(--shadow-sm);
 }
 
-.topbar .brand { font-weight: 600; }
-
-.content { max-width: 64rem; margin: 1.5rem auto; padding: 0 1rem; }
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1.25rem;
+.topbar .brand {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  font-size: 0.98rem;
+  white-space: nowrap;
 }
 
-.card h2 { margin-top: 0.25rem; font-size: 1.05rem; }
-
-.login-card { max-width: 24rem; margin: 3rem auto; }
-
-label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; }
-
-input[type="text"],
-input[type="password"] {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 0.95rem;
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
-.btn {
-  display: inline-block;
-  margin-top: 1rem;
-  padding: 0.5rem 1rem;
-  border: none;
-  border-radius: 4px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 0.95rem;
-  cursor: pointer;
-  text-decoration: none;
+.nav {
+  display: flex;
+  gap: 0.15rem;
+  flex-wrap: wrap;
 }
-
-/* GUI-3A: harmless disabled state for the manual cache-clear button. */
-.btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.btn-sm {
-  margin-top: 0;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.82rem;
-}
-
-.error { color: var(--error); font-weight: 600; }
-
-.muted { color: var(--muted); }
-
-/* GUI-1C.1 navigation */
-.topbar-left { display: flex; align-items: center; gap: 1.25rem; }
-
-.nav { display: flex; gap: 0.5rem; }
 .nav a {
-  color: #cfd8e3;
+  color: var(--topbar-muted);
   text-decoration: none;
-  font-size: 0.9rem;
-  padding: 0.3rem 0.6rem;
-  border-radius: 4px;
+  font-size: 0.86rem;
+  font-weight: 500;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.nav a:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
-
-/* GUI-2B: active top-level navigation section (route-aware, child pages map
-   to their parent section via the active_section template context). */
+.nav a:hover {
+  color: var(--topbar-text);
+  background: rgba(255, 255, 255, 0.09);
+}
 .nav a.nav-active,
 .nav a[aria-current="page"] {
   color: #fff;
@@ -106,150 +166,385 @@ input[type="password"] {
   background: var(--accent);
 }
 
-.flash p { padding: 0.6rem 0.85rem; border-radius: 4px; margin: 0 0 0.75rem; }
-.flash .success { background: #e7f6ec; color: #1a7f37; border: 1px solid #b7e4c7; }
-.flash .error { background: #fdecea; color: var(--error); border: 1px solid #f5c6bf; font-weight: 600; }
+.topbar form { margin: 0; }
 
-.actions { white-space: nowrap; }
-.actions form { display: inline-block; margin-right: 0.35rem; }
+/* --------------------------------------------------------------------------
+ * Layout
+ * ------------------------------------------------------------------------ */
+.content {
+  max-width: 74rem;
+  margin: 1.75rem auto 3rem;
+  padding: 0 1.25rem;
+}
 
-.source { word-break: break-all; max-width: 22rem; }
+h1 {
+  margin: 0 0 var(--sp-2);
+  font-size: 1.4rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
 
-/* GUI-2C/1D: copyable public M3U8 + Web Player links (streams and playlists) */
-.links { white-space: nowrap; }
-.link-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.2rem 0; }
-.link-label {
-  font-size: 0.72rem;
+h2 {
+  margin: 0 0 var(--sp-3);
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+h3 { font-size: 0.9rem; font-weight: 600; margin: 0 0 var(--sp-2); }
+
+.page-header {
+  margin-bottom: var(--sp-5);
+}
+.page-header h1 { margin-bottom: var(--sp-1); }
+.page-header p { margin: 0; max-width: 62ch; }
+
+/* A single row: page title on the left, a primary action on the right. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-5);
+}
+.toolbar h1 { margin: 0; }
+
+.section-gap { margin-top: var(--sp-5); }
+
+/* --------------------------------------------------------------------------
+ * Cards
+ * ------------------------------------------------------------------------ */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.15rem 1.35rem;
+  margin-bottom: var(--sp-5);
+  box-shadow: var(--shadow-sm);
+}
+.card > h2:first-child,
+.card > h3:first-child { margin-top: 0; }
+.card + .card { margin-top: calc(-1 * var(--sp-2)); }
+
+.login-card {
+  max-width: 23rem;
+  margin: 4rem auto;
+}
+
+/* --------------------------------------------------------------------------
+ * Buttons - one clear hierarchy
+ * ------------------------------------------------------------------------ */
+.btn {
+  --btn-bg: var(--accent);
+  --btn-bg-hover: var(--accent-hover);
+  --btn-fg: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: var(--sp-4);
+  padding: 0.5rem 0.95rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font: inherit;
+  font-size: 0.88rem;
   font-weight: 600;
-  color: #57606a;
-  min-width: 4.7rem;
+  line-height: 1.1;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  white-space: nowrap;
 }
-.link-url {
-  width: 15rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.75rem;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #fafbfc;
-  color: var(--text);
+.btn:hover { background: var(--btn-bg-hover); color: var(--btn-fg); }
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
-.copy-btn { min-width: 5.4rem; }
-
-/* GUI-1D.1: copyable HLS URL in the playlists table */
-.hls-url {
-  width: 22rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.78rem;
-  padding: 0.3rem 0.45rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #fafbfc;
-  color: var(--text);
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-input[type="number"] {
-  width: 4.5rem;
-  padding: 0.35rem 0.4rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+/* Secondary: quiet, outlined - for per-row navigation actions. */
+.btn-secondary {
+  --btn-bg: transparent;
+  --btn-bg-hover: var(--panel-sub);
+  --btn-fg: var(--text);
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover { color: var(--text); }
+
+/* Danger: destructive actions are always visually distinct. */
+.btn-danger {
+  --btn-bg: transparent;
+  --btn-bg-hover: var(--danger-soft);
+  --btn-fg: var(--danger);
+  border-color: var(--danger);
+}
+.btn-danger:hover { color: var(--danger-hover); }
+.btn-danger:disabled,
+.btn-danger[disabled] { border-color: var(--border); }
+
+.btn-sm {
+  margin-top: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.form-actions {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: var(--sp-5);
+}
+.form-actions .btn { margin-top: 0; }
+
+/* --------------------------------------------------------------------------
+ * Forms
+ * ------------------------------------------------------------------------ */
+label {
+  display: block;
+  margin: var(--sp-4) 0 var(--sp-1);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="datetime-local"],
+select,
+textarea {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
   font-size: 0.9rem;
 }
-
-input[type="file"] { display: block; margin: 0.25rem 0 0.75rem; }
-
-/* GUI-4 Phase 1A: destination form/list controls. */
-select {
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 0.95rem;
-  background: #fff;
-  color: var(--text);
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
+input[type="number"] { width: 5rem; }
+input[type="file"] {
+  display: block;
+  margin: var(--sp-1) 0 var(--sp-3);
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+select { appearance: auto; }
+
 .checkbox {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  margin: 1rem 0 0;
-  font-size: 0.9rem;
+  gap: 0.5rem;
+  margin: var(--sp-4) 0 0;
+  font-size: 0.88rem;
+  font-weight: 500;
 }
 .checkbox input { width: auto; margin: 0; }
-.key-mask {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  letter-spacing: 0.12em;
+
+.muted { color: var(--muted); }
+p.muted { font-size: 0.85rem; }
+.error { color: var(--danger); font-weight: 600; }
+
+/* Small helper text under a field or heading */
+label + p.muted { margin-top: calc(-1 * var(--sp-1)); }
+
+/* --------------------------------------------------------------------------
+ * Flash messages
+ * ------------------------------------------------------------------------ */
+.flash { margin-bottom: var(--sp-4); }
+.flash p {
+  margin: 0 0 var(--sp-2);
+  padding: 0.7rem 0.9rem 0.7rem 0.85rem;
+  border: 1px solid transparent;
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+}
+.flash .success {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.flash .error {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+ * Tables
+ * ------------------------------------------------------------------------ */
+.table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+thead th {
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--muted);
+  border-bottom: 2px solid var(--border-strong);
   white-space: nowrap;
 }
 
-/* GUI-2A: real upload progress (percentages come from browser upload events) */
-.upload-progress { margin-top: 1rem; max-width: 30rem; }
-.upload-progress-track {
-  height: 0.75rem;
-  background: #e9ecf0;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
+tbody td {
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
 }
-.upload-progress-fill {
-  height: 100%;
-  width: 0;
-  background: var(--accent);
-  border-radius: 999px;
-  transition: width 0.15s ease;
-}
-.upload-progress-status { font-size: 0.9rem; margin: 0.5rem 0 0; }
-.upload-progress-status.success { color: #1a7f37; font-weight: 600; }
 
-/* Status badges */
+tbody tr:hover td { background: var(--panel-sub); }
+tbody tr:last-child td { border-bottom: none; }
+
+td.col-check { width: 2.5rem; text-align: center; }
+
+.source,
+.cell-url {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  word-break: break-all;
+  max-width: 24rem;
+}
+
+/* Per-row action clusters */
+.actions {
+  white-space: nowrap;
+}
+.actions form,
+.actions .btn,
+.actions a.btn {
+  display: inline-flex;
+  margin: 0.12rem 0.25rem 0.12rem 0;
+  vertical-align: middle;
+}
+
+/* --------------------------------------------------------------------------
+ * Copyable link rows (M3U8 / Web Player) - preserved behaviour, tidier look
+ * ------------------------------------------------------------------------ */
+.links { white-space: normal; }
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.2rem 0;
+}
+.link-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--faint);
+  min-width: 4.6rem;
+}
+.link-url {
+  width: 15rem;
+  max-width: 46vw;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  padding: 0.28rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-sub);
+  color: var(--text);
+}
+.copy-btn { min-width: 4.6rem; }
+
+/* --------------------------------------------------------------------------
+ * Status badges
+ * ------------------------------------------------------------------------ */
 .badge {
   display: inline-block;
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+  white-space: nowrap;
 }
-.badge-healthy   { background: #e7f6ec; color: #1a7f37; }
-.badge-stopped   { background: #eef1f4; color: #57606a; }
-.badge-stale     { background: #fff4e5; color: #b36b00; }
-.badge-failed    { background: #fdecea; color: var(--error); }
-.badge-starting  { background: #e8f1fd; color: #1f6feb; }
-.badge-unknown   { background: #eef1f4; color: #57606a; }
+.badge-healthy  { background: var(--ok-soft);   color: var(--ok); }
+.badge-stopped  { background: var(--panel-sub); color: var(--muted); border: 1px solid var(--border); }
+.badge-disabled { background: var(--panel-sub); color: var(--muted); border: 1px solid var(--border); }
+.badge-stale    { background: var(--warn-soft); color: var(--warn); }
+.badge-failed   { background: var(--danger-soft); color: var(--danger); }
+.badge-starting { background: var(--info-soft); color: var(--info); }
+.badge-unknown  { background: var(--panel-sub); color: var(--muted); border: 1px solid var(--border); }
 
-h1 { margin: 0.25rem 0 1rem; font-size: 1.4rem; }
-
+/* --------------------------------------------------------------------------
+ * Definition grids (Server / Engine / Counts, schedule summary, ...)
+ * ------------------------------------------------------------------------ */
 .grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(8rem, auto));
-  gap: 0.25rem 1.5rem;
-  margin: 0 0 1rem;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1.5rem;
+  margin: 0 0 var(--sp-3);
+  align-items: baseline;
+}
+.grid dt { color: var(--muted); font-size: 0.85rem; }
+.grid dd { margin: 0; font-weight: 600; color: var(--text-strong); }
+
+/* --------------------------------------------------------------------------
+ * Empty states
+ * ------------------------------------------------------------------------ */
+.empty-state {
+  margin: 0;
+  padding: 1.75rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 
-.grid dt { color: var(--muted); }
-.grid dd { margin: 0; font-weight: 600; }
-
-/* GUI-4: Dashboard Server Utilities gauges (CPU / RAM / Storage).
-   Pure CSS ring gauges (conic-gradient) using the BlueStream accent. */
+/* --------------------------------------------------------------------------
+ * Dashboard - Server Utilities gauges (conic-gradient rings; unchanged model)
+ * ------------------------------------------------------------------------ */
 .metrics-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--sp-4);
 }
 .metric-card {
   text-align: center;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fafbfc;
-  padding: 1rem 0.75rem;
+  border-radius: var(--radius);
+  background: var(--panel-sub);
+  padding: 1.1rem 0.85rem;
 }
 .metric-card h3 {
-  margin: 0 0 0.6rem;
-  font-size: 0.88rem;
-  font-weight: 600;
+  margin: 0 0 0.7rem;
+  font-size: 0.72rem;
+  font-weight: 700;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 .gauge {
   --value: 0;
@@ -258,53 +553,88 @@ h1 { margin: 0.25rem 0 1rem; font-size: 1.4rem; }
   height: 7rem;
   margin: 0 auto 0.75rem;
   border-radius: 50%;
-  background: #e9ecf0;
-  background: conic-gradient(var(--accent) calc(var(--value) * 1%), #e9ecf0 0);
+  background: conic-gradient(
+    var(--accent) calc(var(--value) * 1%),
+    var(--border) 0
+  );
   display: grid;
   place-items: center;
 }
 .gauge-inner {
-  width: 5.5rem;
-  height: 5.5rem;
+  width: 5.4rem;
+  height: 5.4rem;
   border-radius: 50%;
   background: var(--panel);
   display: grid;
   place-items: center;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .gauge-value {
-  font-size: 1.55rem;
-  font-weight: 700;
+  font-size: 1.5rem;
+  font-weight: 750;
   line-height: 1;
-  color: var(--text);
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
 }
-.gauge-unit {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--muted);
-}
+.gauge-unit { font-size: 0.9rem; font-weight: 600; color: var(--muted); }
 .metric-detail {
-  margin: 0 0 0.25rem;
-  font-size: 0.88rem;
+  margin: 0 0 var(--sp-1);
+  font-size: 0.86rem;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .metric-cores {
   margin: 0;
-  font-size: 0.88rem;
+  font-size: 0.82rem;
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
-/* Smaller screens: cards stack naturally (grid auto-fit above). */
-@media (max-width: 30rem) {
-  .metrics-row { grid-template-columns: 1fr; }
+/* --------------------------------------------------------------------------
+ * Upload progress (real percentages from browser upload events; unchanged)
+ * ------------------------------------------------------------------------ */
+.upload-progress { margin-top: var(--sp-4); max-width: 30rem; }
+.upload-progress-track {
+  height: 0.7rem;
+  background: var(--panel-sub);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.upload-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width 0.15s ease;
+}
+.upload-progress-status { font-size: 0.88rem; margin: var(--sp-2) 0 0; }
+.upload-progress-status.success { color: var(--ok); font-weight: 600; }
+.upload-progress-status.error { color: var(--danger); font-weight: 600; }
+
+/* --------------------------------------------------------------------------
+ * Key mask (destinations table)
+ * ------------------------------------------------------------------------ */
+.key-mask {
+  font-family: var(--mono);
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  white-space: nowrap;
 }
 
-table { width: 100%; border-collapse: collapse; }
+/* --------------------------------------------------------------------------
+ * Responsive
+ * ------------------------------------------------------------------------ */
+@media (max-width: 48rem) {
+  .content { margin-top: 1.25rem; padding: 0 1rem; }
+  .topbar { padding: 0.65rem 1rem; }
+  .link-url { width: 100%; max-width: none; }
+  .link-row { flex-wrap: wrap; }
+  .link-label { min-width: 0; }
+}
 
-th, td {
-  text-align: left;
-  padding: 0.45rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.92rem;
+@media (max-width: 34rem) {
+  .metrics-row { grid-template-columns: 1fr; }
+  h1 { font-size: 1.25rem; }
+  .toolbar { align-items: flex-start; }
 }

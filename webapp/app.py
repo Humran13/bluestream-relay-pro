@@ -38,7 +38,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import (
@@ -60,6 +60,9 @@ from webapp.engine import (
     ALLOWED_PLATFORMS,
     ALLOWED_UPLOAD_EXTENSIONS,
     MAX_PLAYLIST_ITEMS,
+    MAX_TARGET_DESTINATIONS,
+    SCHEDULE_EPOCH_MAX,
+    SCHEDULE_EPOCH_MIN,
     EngineClient,
     EngineError,
     valid_dest_display,
@@ -214,6 +217,9 @@ TYPE_LABELS = {
     "rtmp": "RTMP",
     "rtmps": "RTMPS",
     "rtsp": "RTSP",
+    # GUI-7A: a public YouTube Live page URL, resolved to a playable media URL
+    # by yt-dlp at start time (the page URL is what is stored).
+    "youtube": "YouTube Live",
 }
 
 # GUI-4 Phase 1A: display labels for the stable internal platform values.
@@ -224,6 +230,7 @@ PLATFORM_LABELS = {
     "twitch": "Twitch",
     "rumble": "Rumble",
     "instagram": "Instagram",
+    "tiktok": "TikTok",
     "custom": "Custom RTMP",
 }
 
@@ -345,6 +352,17 @@ _DEST_STATE_MESSAGES = {
     "delete": "Destination deleted.",
 }
 
+# GUI-4 Phase 1B: controlled messages for the attachment setter failures.
+_DEST_ATTACH_ERROR_MESSAGES = {
+    "INVALID_NAME": "That stream or playlist name is not valid.",
+    "NOT_FOUND": "That stream or playlist no longer exists.",
+    "INVALID_DESTINATION": "One or more selected destinations are not valid.",
+    "DUPLICATE_DESTINATION": "A destination was selected more than once.",
+    "DESTINATION_NOT_FOUND": "One or more selected destinations no longer exist.",
+    "TOO_MANY_DESTINATIONS": "Too many destinations selected for one target.",
+    "OPERATION_FAILED": "The attachments could not be updated. Please try again.",
+}
+
 
 def _present_destination(item) -> dict | None:
     """Shape one safe engine destination record for the listing template.
@@ -358,6 +376,10 @@ def _present_destination(item) -> dict | None:
         return None
     display = (item.get("display_name") or "").strip() or name
     platform = item.get("platform") or ""
+    try:
+        attached_count = int(item.get("attached_count") or 0)
+    except (TypeError, ValueError):
+        attached_count = 0
     return {
         "name": name,
         "display_name": display,
@@ -366,6 +388,9 @@ def _present_destination(item) -> dict | None:
         "server_url": item.get("server_url") or "",
         "enabled": item.get("enabled") == "yes",
         "has_stream_key": item.get("has_stream_key") == "yes",
+        # GUI-4 Phase 1B: how many streams/playlists this destination is
+        # attached to. > 0 means the authoritative root-side delete will refuse.
+        "attached_count": attached_count,
     }
 
 
@@ -726,15 +751,29 @@ _NAV_SECTIONS = {
     "console.streams": "streams",
     "console.streams_create": "streams",
     "console.streams_create_post": "streams",
+    "console.relay_delete_post": "streams",
+    "console.relay_edit_source": "streams",
+    "console.relay_edit_source_post": "streams",
     "console.media": "media",
     "console.media_upload": "media",
     "console.media_upload_post": "media",
     "console.media_create_stream": "media",
     "console.media_create_stream_post": "media",
+    "console.media_delete_post": "media",
     "console.playlists": "playlists",
     "console.playlists_create": "playlists",
     "console.playlists_create_post": "playlists",
     "console.playlists_cache_clear": "playlists",
+    "console.playlist_delete_post": "playlists",
+    "console.playlist_schedule": "playlists",
+    "console.playlist_schedule_post": "playlists",
+    "console.playlist_schedule_cancel": "playlists",
+    # GUI-4 Phase 1B: destination assignment pages keep their parent section
+    # highlighted (Streams / Playlists).
+    "console.relay_destinations": "streams",
+    "console.relay_destinations_post": "streams",
+    "console.playlist_destinations": "playlists",
+    "console.playlist_destinations_post": "playlists",
     # GUI-4 Phase 1A: destinations section (listing + create pages).
     "console.destinations": "destinations",
     "console.destinations_create": "destinations",
@@ -776,6 +815,64 @@ LIFECYCLE_OPERATIONS = {
 }
 
 _PAST_TENSE = {"start": "started", "stop": "stopped", "restart": "restarted"}
+
+# GUI-5A: safe delete. Operation is fixed by the route; the engine method name
+# and the list page to return to are looked up here, never chosen by the form.
+_DELETE_TARGETS = {
+    "relay": {
+        "method": "relay_delete",
+        "list_endpoint": "console.streams",
+        "noun": "Stream",
+    },
+    "playlist": {
+        "method": "playlist_delete",
+        "list_endpoint": "console.playlists",
+        "noun": "Playlist",
+    },
+    "media": {
+        "method": "media_delete",
+        "list_endpoint": "console.media",
+        "noun": "Media file",
+    },
+}
+
+_DELETE_ERROR_MESSAGES = {
+    "NOT_STOPPED": "%s is not stopped. Stop it first, then delete it.",
+    "MEDIA_REFERENCED": (
+        "%s is used by a stream or playlist. Delete those first, "
+        "then delete the media file."
+    ),
+    "NOT_FOUND": "%s no longer exists.",
+    "INVALID_NAME": "That name is not valid.",
+    "INVALID_MEDIA": "That media file name is not valid.",
+    "NOT_REGULAR": "That media entry could not be deleted.",
+}
+
+
+def _delete_target(kind: str, name: str):
+    """Run one fixed, authenticated safe-delete and Post/Redirect/Get back."""
+    if not session.get("authenticated"):
+        return redirect(url_for("console.login"))
+    spec = _DELETE_TARGETS[kind]
+    valid = (
+        valid_media_name(name) if kind == "media" else valid_target_name(name)
+    )
+    if not valid:
+        flash("That name is not valid.", "error")
+        return redirect(url_for(spec["list_endpoint"]))
+    engine = current_app.extensions["bluestream_engine"]
+    try:
+        getattr(engine, spec["method"])(name)
+    except EngineError as exc:
+        current_app.logger.warning("%s '%s' failed: %s", spec["method"], name, exc)
+        template = _DELETE_ERROR_MESSAGES.get(exc.code or "", "")
+        if template:
+            flash(template % spec["noun"], "error")
+        else:
+            flash("%s could not be deleted." % spec["noun"], "error")
+    else:
+        flash("%s deleted." % spec["noun"], "success")
+    return redirect(url_for(spec["list_endpoint"]))
 
 
 def _lifecycle_action(kind: str, action: str, name: str):
@@ -1448,7 +1545,14 @@ def _register_console_routes(app: Flask) -> None:
             current_app.logger.warning(
                 "destination_%s '%s' failed: %s", kind, name, exc
             )
-            flash("Destination operation failed.", "error")
+            if kind == "delete" and exc.code == "DESTINATION_ATTACHED":
+                flash(
+                    "Destination is attached to a stream or playlist. "
+                    "Detach it before deleting.",
+                    "error",
+                )
+            else:
+                flash("Destination operation failed.", "error")
         else:
             flash(_DEST_STATE_MESSAGES[kind], "success")
         return redirect(url_for("console.destinations"))
@@ -1470,6 +1574,392 @@ def _register_console_routes(app: Flask) -> None:
         if not session.get("authenticated"):
             return redirect(url_for("console.login"))
         return _destination_state("delete", name)
+
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1B: attach existing destinations to a stream or playlist.
+    # IDs ONLY ever cross the privileged boundary (never a stream key). The
+    # engine setter rewrites only the target's config - it never starts,
+    # stops or restarts a running stream/playlist, and never begins an
+    # outgoing RTMP push (that is Phase 1C). Every mutation is POST + CSRF
+    # (global) + authenticated + PRG.
+    # ------------------------------------------------------------------
+    _TARGET_KINDS = {
+        "relay": {
+            "exists_op": "relay_list",
+            "get": "relay_destinations_get",
+            "set": "relay_destinations_set",
+            "list_endpoint": "console.streams",
+            "get_endpoint": "console.relay_destinations",
+            "post_endpoint": "console.relay_destinations_post",
+            "noun": "stream",
+        },
+        "playlist": {
+            "exists_op": "playlist_list",
+            "get": "playlist_destinations_get",
+            "set": "playlist_destinations_set",
+            "list_endpoint": "console.playlists",
+            "get_endpoint": "console.playlist_destinations",
+            "post_endpoint": "console.playlist_destinations_post",
+            "noun": "playlist",
+        },
+    }
+
+    def _target_destinations_page(kind: str, name: str):
+        spec = _TARGET_KINDS[kind]
+        if not valid_target_name(name):
+            flash("That %s name is not valid." % spec["noun"], "error")
+            return redirect(url_for(spec["list_endpoint"]))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            all_items = engine.destination_list() or []
+        except EngineError as exc:
+            current_app.logger.warning("destination_list unavailable: %s", exc)
+            flash("Destinations are temporarily unavailable.", "error")
+            return redirect(url_for(spec["list_endpoint"]))
+        try:
+            attached_ids = getattr(engine, spec["get"])(name) or []
+        except EngineError as exc:
+            current_app.logger.warning(
+                "%s '%s' failed: %s", spec["get"], name, exc
+            )
+            flash("That %s no longer exists." % spec["noun"], "error")
+            return redirect(url_for(spec["list_endpoint"]))
+        attached = set(
+            i for i in attached_ids if isinstance(i, str) and valid_target_name(i)
+        )
+        destinations = []
+        for presented in (_present_destination(item) for item in all_items):
+            if presented is None:
+                continue
+            presented["attached"] = presented["name"] in attached
+            destinations.append(presented)
+        # Stale IDs (destination deleted out-of-band, which the guard prevents
+        # in normal use) are surfaced so the operator can clear them on save.
+        known = {d["name"] for d in destinations}
+        stale = sorted(i for i in attached if i not in known)
+        return render_template(
+            "target_destinations.html",
+            kind=kind,
+            noun=spec["noun"],
+            target_name=name,
+            destinations=destinations,
+            stale=stale,
+            attached_count=len(attached),
+            max_destinations=MAX_TARGET_DESTINATIONS,
+            post_endpoint=spec["post_endpoint"],
+            list_endpoint=spec["list_endpoint"],
+        )
+
+    def _target_destinations_save(kind: str, name: str):
+        spec = _TARGET_KINDS[kind]
+        if not valid_target_name(name):
+            flash("That %s name is not valid." % spec["noun"], "error")
+            return redirect(url_for(spec["list_endpoint"]))
+        selected = request.form.getlist("destinations")
+        clean = []
+        seen = set()
+        for raw in selected:
+            item = (raw or "").strip()
+            if not valid_target_name(item):
+                flash("One or more selected destinations are not valid.", "error")
+                return redirect(url_for(spec["get_endpoint"], name=name))
+            if item in seen:
+                flash("A destination was selected more than once.", "error")
+                return redirect(url_for(spec["get_endpoint"], name=name))
+            seen.add(item)
+            clean.append(item)
+        if len(clean) > MAX_TARGET_DESTINATIONS:
+            flash(
+                "Select at most %d destinations for one %s."
+                % (MAX_TARGET_DESTINATIONS, spec["noun"]),
+                "error",
+            )
+            return redirect(url_for(spec["get_endpoint"], name=name))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            getattr(engine, spec["set"])(name, clean)
+        except EngineError as exc:
+            current_app.logger.warning("%s '%s' failed: %s", spec["set"], name, exc)
+            flash(
+                _DEST_ATTACH_ERROR_MESSAGES.get(
+                    exc.code, "The attachments could not be updated."
+                ),
+                "error",
+            )
+            return redirect(url_for(spec["get_endpoint"], name=name))
+        if clean:
+            flash(
+                "Attached %d destination%s to %s '%s'."
+                % (len(clean), "" if len(clean) == 1 else "s", spec["noun"], name),
+                "success",
+            )
+        else:
+            flash(
+                "All destinations detached from %s '%s'." % (spec["noun"], name),
+                "success",
+            )
+        return redirect(url_for(spec["list_endpoint"]))
+
+    @console.route("/streams/<name>/destinations", methods=["GET"])
+    def relay_destinations(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _target_destinations_page("relay", name)
+
+    @console.route("/streams/<name>/destinations", methods=["POST"])
+    def relay_destinations_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _target_destinations_save("relay", name)
+
+    @console.route("/playlists/<name>/destinations", methods=["GET"])
+    def playlist_destinations(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _target_destinations_page("playlist", name)
+
+    @console.route("/playlists/<name>/destinations", methods=["POST"])
+    def playlist_destinations_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        return _target_destinations_save("playlist", name)
+
+    # ------------------------------------------------------------------
+    # GUI-5A: safe delete (POST + CSRF + auth + PRG). Operation is fixed by
+    # the route; the engine enforces "definitively stopped" (stream/playlist)
+    # and "unreferenced" (media) and only ever removes that one target's own
+    # artifacts.
+    # ------------------------------------------------------------------
+    @console.route("/streams/<name>/delete", methods=["POST"])
+    def relay_delete_post(name):
+        return _delete_target("relay", name)
+
+    @console.route("/playlists/<name>/delete", methods=["POST"])
+    def playlist_delete_post(name):
+        return _delete_target("playlist", name)
+
+    @console.route("/media/<name>/delete", methods=["POST"])
+    def media_delete_post(name):
+        return _delete_target("media", name)
+
+    # ------------------------------------------------------------------
+    # GUI-8A: one-time playlist start scheduling. The browser submits a full
+    # ISO-8601 instant WITH its timezone offset; the backend normalizes to
+    # UTC, rejects past / out-of-range times, and passes an absolute epoch to
+    # the engine. A root systemd timer then performs the equivalent of "Start"
+    # once at that instant (never a Stop, never recurring).
+    # ------------------------------------------------------------------
+    _SCHEDULE_MAX_HORIZON_DAYS = 400
+
+    def _parse_schedule_instant(raw):
+        """(epoch:int, norm_iso:str) or (None, user-safe error message)."""
+        s = (raw or "").strip()
+        if not s or len(s) > 40:
+            return None, "Please choose a date and time."
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None, "That date and time could not be understood."
+        if dt.tzinfo is None:
+            return None, "The submitted time was missing its timezone."
+        dt_utc = dt.astimezone(timezone.utc)
+        epoch = int(dt_utc.timestamp())
+        now = int(datetime.now(timezone.utc).timestamp())
+        if epoch <= now + 30:
+            return None, "The scheduled time must be in the future."
+        if epoch > now + _SCHEDULE_MAX_HORIZON_DAYS * 86400:
+            return None, (
+                "Schedules more than %d days ahead are not supported."
+                % _SCHEDULE_MAX_HORIZON_DAYS
+            )
+        if not (SCHEDULE_EPOCH_MIN <= epoch <= SCHEDULE_EPOCH_MAX):
+            return None, "That date is outside the supported range."
+        return epoch, dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _schedule_snapshot(name):
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            data = engine.playlist_schedule_get(name) or {}
+        except EngineError as exc:
+            return None, exc
+        if not isinstance(data, dict):
+            data = {}
+        scheduled = data.get("scheduled") == "yes"
+        # "pending" = still waiting to run; "missed" = the instant has passed
+        # (Persistent=false, so it will NOT run late). The engine computes this;
+        # fall back to comparing the stored epoch to now if it is absent.
+        state = data.get("state") or ""
+        if scheduled and state not in ("pending", "missed"):
+            try:
+                epoch = int(data.get("start_at") or 0)
+                now = int(datetime.now(timezone.utc).timestamp())
+                state = "pending" if epoch > now else "missed"
+            except (TypeError, ValueError):
+                state = "missed"
+        return {
+            "scheduled": scheduled,
+            "start_at": data.get("start_at") or "",
+            "start_at_iso": data.get("start_at_iso") or "",
+            "state": state,
+            "missed": scheduled and state == "missed",
+        }, None
+
+    @console.route("/playlists/<name>/schedule", methods=["GET"])
+    def playlist_schedule(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That playlist name is not valid.", "error")
+            return redirect(url_for("console.playlists"))
+        snap, err = _schedule_snapshot(name)
+        if err is not None:
+            if err.code == "NOT_FOUND":
+                flash("That playlist no longer exists.", "error")
+            else:
+                current_app.logger.warning(
+                    "playlist_schedule_get '%s' failed: %s", name, err
+                )
+                flash("Scheduling is temporarily unavailable.", "error")
+            return redirect(url_for("console.playlists"))
+        return render_template(
+            "playlist_schedule.html",
+            name=name,
+            schedule=snap,
+            max_horizon_days=_SCHEDULE_MAX_HORIZON_DAYS,
+        )
+
+    @console.route("/playlists/<name>/schedule", methods=["POST"])
+    def playlist_schedule_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That playlist name is not valid.", "error")
+            return redirect(url_for("console.playlists"))
+        epoch, norm = _parse_schedule_instant(request.form.get("iso"))
+        if epoch is None:
+            flash(norm, "error")
+            return redirect(url_for("console.playlist_schedule", name=name))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.playlist_schedule_set(name, str(epoch), norm)
+        except EngineError as exc:
+            current_app.logger.warning(
+                "playlist_schedule_set '%s' failed: %s", name, exc
+            )
+            messages = {
+                "SCHEDULE_IN_PAST": "The scheduled time is in the past.",
+                "INVALID_SCHEDULE": "That date and time is not valid.",
+                "NOT_FOUND": "That playlist no longer exists.",
+            }
+            flash(
+                messages.get(exc.code or "", "The schedule could not be saved."),
+                "error",
+            )
+            return redirect(url_for("console.playlist_schedule", name=name))
+        flash(
+            "Playlist '%s' is scheduled to start automatically." % name, "success"
+        )
+        return redirect(url_for("console.playlists"))
+
+    @console.route("/playlists/<name>/schedule/cancel", methods=["POST"])
+    def playlist_schedule_cancel(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That playlist name is not valid.", "error")
+            return redirect(url_for("console.playlists"))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.playlist_schedule_clear(name)
+        except EngineError as exc:
+            current_app.logger.warning(
+                "playlist_schedule_clear '%s' failed: %s", name, exc
+            )
+            flash("The schedule could not be cancelled.", "error")
+            return redirect(url_for("console.playlist_schedule", name=name))
+        flash("Schedule cancelled for playlist '%s'." % name, "success")
+        return redirect(url_for("console.playlists"))
+
+    # ------------------------------------------------------------------
+    # GUI-6A: edit the source URL of a stopped, URL-backed stream. The engine
+    # enforces "stopped" + "URL-backed"; this page mirrors those rules for a
+    # clear UI. Saving does NOT start the stream, and the name / attachments /
+    # public M3U8 + Web Player URLs are preserved.
+    # ------------------------------------------------------------------
+    def _find_relay(name):
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            relays = engine.call("relay_list") or []
+        except EngineError as exc:
+            current_app.logger.warning("relay_list unavailable: %s", exc)
+            return None, True
+        for relay in relays:
+            if isinstance(relay, dict) and relay.get("name") == name:
+                return relay, False
+        return None, False
+
+    @console.route("/streams/<name>/edit-source", methods=["GET"])
+    def relay_edit_source(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That stream name is not valid.", "error")
+            return redirect(url_for("console.streams"))
+        relay, unavailable = _find_relay(name)
+        if unavailable:
+            flash("Streams are temporarily unavailable.", "error")
+            return redirect(url_for("console.streams"))
+        if relay is None:
+            flash("That stream no longer exists.", "error")
+            return redirect(url_for("console.streams"))
+        rtype = relay.get("type") or ""
+        return render_template(
+            "streams_edit_source.html",
+            name=name,
+            current_source=relay.get("source") or "",
+            type_label=TYPE_LABELS.get(rtype, rtype),
+            media_backed=(rtype == "local-file"),
+            running=(relay.get("active") == "yes"),
+        )
+
+    @console.route("/streams/<name>/edit-source", methods=["POST"])
+    def relay_edit_source_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That stream name is not valid.", "error")
+            return redirect(url_for("console.streams"))
+        url = (request.form.get("url") or "").strip()
+        if not valid_source_url(url):
+            flash(
+                "Unsupported or malformed source URL. Supported: http(s), "
+                "rtmp(s), rtsp.",
+                "error",
+            )
+            return redirect(url_for("console.relay_edit_source", name=name))
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.relay_set_source(name, url)
+        except EngineError as exc:
+            current_app.logger.warning("relay_set_source '%s' failed: %s", name, exc)
+            messages = {
+                "NOT_STOPPED": "Stop the stream before editing its source.",
+                "MEDIA_BACKED": (
+                    "This stream uses managed media, not a URL - its source "
+                    "cannot be edited here."
+                ),
+                "NOT_FOUND": "That stream no longer exists.",
+                "INVALID_URL": "Unsupported or malformed source URL.",
+                "UNSUPPORTED_URL": "Unsupported source URL scheme.",
+            }
+            flash(messages.get(exc.code or "", "The source could not be updated."), "error")
+            return redirect(url_for("console.relay_edit_source", name=name))
+        flash(
+            "Source updated for stream '%s'. It is still stopped - press Start "
+            "when ready." % name,
+            "success",
+        )
+        return redirect(url_for("console.streams"))
 
     app.register_blueprint(console)
 

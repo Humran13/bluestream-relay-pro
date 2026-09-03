@@ -324,6 +324,52 @@ media_remove() {
     return 0
 }
 
+# Return 0 (referenced - do NOT delete) when a managed media basename is used
+# by any relay (a local-file relay whose URL is exactly this managed file) or
+# listed in any playlist.  Returns 1 only when nothing references it.  Reads
+# the root-only config files directly (whole-line fixed-string match) so it
+# needs no other library loaded and cannot be fooled by a partial match.
+media_is_referenced() {
+    local name="$1" f
+    bs_valid_media_name "$name" || return 0
+    shopt -s nullglob
+    for f in "$BLUESTREAM_RELAY_CONF_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        if grep -qxF "URL=$BLUESTREAM_MEDIA_DIR/$name" "$f"; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    for f in "$BLUESTREAM_PLAYLIST_CONF_DIR"/*.playlist; do
+        [ -f "$f" ] || continue
+        if grep -qxF "$name" "$f"; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+# Authoritative NON-interactive managed-media delete for the web console
+# (GUI-5A).  Deletes EXACTLY ONE validated managed-media file and only when
+# nothing references it.  Never accepts an arbitrary path, never follows a
+# symlink, never recurses into a directory.  Unrelated normalized-cache
+# artifacts may remain and are reclaimed through the existing cache workflow.
+#   0 ok | 1 invalid media name | 2 not found | 3 not a plain file / symlink |
+#   4 still referenced by a stream or playlist | 5 removal failed
+media_delete() {
+    bs_require_root
+    local name="${1:-}" p
+    bs_valid_media_name "$name" || return 1
+    p="$BLUESTREAM_MEDIA_DIR/$name"
+    [ -e "$p" ] || return 2
+    { [ -L "$p" ] || [ ! -f "$p" ]; } && return 3
+    media_is_referenced "$name" && return 4
+    rm -f -- "$p" || return 5
+    return 0
+}
+
 media_show_bandwidth() {
     # Standalone bandwidth estimator (not tied to a relay).
     local mbps viewers total

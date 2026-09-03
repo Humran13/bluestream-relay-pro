@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Add Destination - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Add Destination</h1>
+<div class="page-header">
+  <h1>Add Destination</h1>
+  <p class="muted">A publish target for multistreaming. The stream key is stored root-only and never shown again.</p>
+</div>
 <section class="card">
   <form method="post" action="{{ url_for('console.destinations_create_post') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

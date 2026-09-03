@@ -32,6 +32,20 @@ bs_load_server_conf
 relay_load_config "$NAME" || exit 1
 relay_config_validate || exit 1
 
+# GUI-7A: a TYPE=youtube relay stores the PUBLIC YouTube *page* URL, which is
+# HTML - not a media stream. Resolve the CURRENT playable media URL fresh on
+# every start with yt-dlp. Nothing is stored back; fails closed if yt-dlp is
+# missing or the page cannot be resolved as public content.
+RELAY_RESOLVED_URL=""
+if [ "$RELAY_TYPE" = "youtube" ]; then
+    # shellcheck source=lib/youtube.sh
+    source "$LIBDIR/youtube.sh" || exit 1
+    RELAY_RESOLVED_URL="$(bs_youtube_resolve "$RELAY_URL")" || {
+        bs_error "Relay '$NAME': could not resolve the YouTube Live source. Only PUBLIC YouTube URLs are supported, and yt-dlp must be installed on this server."
+        exit 1
+    }
+fi
+
 # nginx-rtmp (www-data) owns all HLS output; FFmpeg publishes over the
 # private local RTMP socket and never writes the HLS filesystem directly,
 # so no HLS directory bootstrap is required here.

@@ -436,12 +436,22 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 "enable", "disable",
                 "nginx", "ssl", "firewall",
             )
-            # GUI-4 Phase 1A: exactly these fixed destination actions are
-            # allowlisted; every other mutation word stays forbidden.
+            # Exactly these FIXED, fully-validated action routes are
+            # allowlisted; every other mutation word stays forbidden. Each is a
+            # single-purpose operation - there is still no generic editor,
+            # remover, or arbitrary-path/command surface.
             allowed_action_endpoints = {
+                # GUI-4 Phase 1A destination actions
                 "console.destinations_enable",
                 "console.destinations_disable",
                 "console.destinations_delete",
+                # GUI-5A safe delete (one stopped/unreferenced target each)
+                "console.relay_delete_post",
+                "console.playlist_delete_post",
+                "console.media_delete_post",
+                # GUI-6A edit one stopped, URL-backed stream's source URL
+                "console.relay_edit_source",
+                "console.relay_edit_source_post",
             }
             for rule in app.url_map.iter_rules():
                 if rule.endpoint in allowed_action_endpoints:
@@ -472,11 +482,15 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             ),
         )
 
-    def test_24_engineclient_mutation_operations_exactly_fifteen(self):
+    def test_24_engineclient_mutation_operations_are_the_fixed_set(self):
         import sys
 
         sys.path.insert(0, str(REPO_ROOT))
-        from webapp.engine import ALLOWED_MUTATION_OPERATIONS, EngineClient
+        from webapp.engine import (
+            ALLOWED_MUTATION_OPERATIONS,
+            ALLOWED_READ_OPERATIONS,
+            EngineClient,
+        )
 
         self.assertEqual(
             ALLOWED_MUTATION_OPERATIONS,
@@ -494,8 +508,32 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "destination_enable",
                     "destination_disable",
                     "destination_delete",
+                    # GUI-4 Phase 1B: destination attachment setters (IDs only;
+                    # no systemd unit touched, no outgoing RTMP push)
+                    "relay_destinations_set",
+                    "playlist_destinations_set",
+                    # GUI-5A: safe delete (one stopped/unreferenced target each)
+                    "relay_delete",
+                    "playlist_delete",
+                    "media_delete",
+                    # GUI-6A: edit one stopped, URL-backed stream's source URL
+                    "relay_set_source",
+                    # GUI-8A: one-time playlist start schedule (set/replace +
+                    # cancel); a root-generated timer targets a FIXED oneshot
+                    # service, never a browser-supplied command
+                    "playlist_schedule_set",
+                    "playlist_schedule_clear",
                 }
             ),
+        )
+        # The only parameterized read operations (IDs / absolute instant only).
+        self.assertEqual(
+            ALLOWED_READ_OPERATIONS,
+            frozenset({
+                "relay_destinations_get",
+                "playlist_destinations_get",
+                "playlist_schedule_get",
+            }),
         )
         client = EngineClient(production=True)
         for name in (
@@ -505,11 +543,19 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "playlist_create", "playlist_cache_clear_unused",
             "destination_list", "destination_create",
             "destination_enable", "destination_disable", "destination_delete",
+            "relay_destinations_get", "relay_destinations_set",
+            "playlist_destinations_get", "playlist_destinations_set",
+            "relay_delete", "playlist_delete", "media_delete",
+            "relay_set_source",
+            "playlist_schedule_get", "playlist_schedule_set",
+            "playlist_schedule_clear",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
+        # No generic edit / arbitrary-path / exec operation exists.
         for name in (
-            "relay_edit", "relay_delete", "playlist_edit", "playlist_delete",
-            "media_remove", "media_delete",
+            "relay_edit", "playlist_edit", "media_remove",
+            "relay_delete_path", "playlist_delete_path", "media_delete_path",
+            "config_edit", "config_write", "exec", "shell",
             "destination_edit", "destination_exec", "destination_execute",
             "destination_write", "destination_write_file",
             "destination_delete_path", "destination_remove_path",
@@ -525,19 +571,33 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             # GUI-4 Phase 1A destination operations
             "destination_list", "destination_create",
             "destination_enable", "destination_disable", "destination_delete",
+            # GUI-4 Phase 1B attachment operations (IDs only)
+            "relay_destinations_get", "relay_destinations_set",
+            "playlist_destinations_get", "playlist_destinations_set",
+            # GUI-5A safe delete (fixed, one validated name each)
+            "relay_delete", "playlist_delete", "media_delete",
+            # GUI-6A edit one stopped, URL-backed stream's source URL
+            "relay_set_source",
+            # GUI-8A one-time playlist start schedule
+            "playlist_schedule_get", "playlist_schedule_set",
+            "playlist_schedule_clear",
         ):
             self.assertIn(op, w)
         # no shell code-execution constructs in the bridge
         self.assertNotIn("eval ", w)
         self.assertNotIn("eval(", w)
         self.assertNotIn("sh -c", w)
-        # no OUT-OF-SCOPE mutation operation tokens anywhere in web-ctl
-        # (create/upload are in scope for GUI-1C.1; edit/delete/remove/restore
-        # and the infrastructure managers are not)
+        self.assertNotIn("bash -c", w)
+        # no generic editor / arbitrary-path / infrastructure-manager tokens
+        # anywhere in web-ctl (the safe deletes above are fixed single-target
+        # operations; a generic *_edit / *_remove / *_path / restore / firewall
+        # surface must never appear)
         for op in (
-            "relay_delete", "relay_edit", "relay_remove",
-            "playlist_delete", "playlist_edit", "playlist_remove",
-            "media_delete", "media_remove", "restore", "firewall",
+            "relay_edit", "relay_remove",
+            "playlist_edit", "playlist_remove",
+            "media_remove", "restore", "firewall",
+            "relay_delete_path", "playlist_delete_path", "media_delete_path",
+            "config_edit", "config_write",
             "destination_exec", "destination_execute",
             "destination_write", "destination_write_file",
             "destination_delete_path", "destination_remove_path",
@@ -2003,7 +2063,7 @@ class DestinationFoundationTests(unittest.TestCase):
 
     def test_06_web_ctl_sources_destinations_library(self):
         w = repo_text("web-ctl")
-        self.assertIn("media destinations;", w)
+        self.assertIn("media destinations schedule;", w)
         # the read-only list only reports a has_stream_key flag; it never emits
         # a record for the stored key itself
         self.assertIn("has_stream_key", w)
@@ -2011,7 +2071,13 @@ class DestinationFoundationTests(unittest.TestCase):
 
     def test_07_platform_allowlist_is_bounded(self):
         d = repo_text("lib/destinations.sh")
-        self.assertIn('DEST_PLATFORM_ALLOW="youtube facebook twitch rumble instagram custom"', d)
+        # A small, fixed set of display-only platform labels. 'tiktok' is a
+        # label only - no ingest endpoint is hard-coded (the user supplies the
+        # RTMP/RTMPS URL and stream key, exactly as for every other platform).
+        self.assertIn(
+            'DEST_PLATFORM_ALLOW="youtube facebook twitch rumble instagram tiktok custom"',
+            d,
+        )
 
     def test_08_no_env_or_temp_file_secret_transport(self):
         # The secret is transported over stdin only - never via an environment

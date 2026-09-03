@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Destinations - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Destinations</h1>
-<p><a class="btn" href="{{ url_for('console.destinations_create') }}">+ Add Destination</a></p>
-<p class="muted">Destinations are target publishing points for future multistreaming. Nothing is pushed from this page yet.</p>
+<div class="toolbar">
+  <h1>Destinations</h1>
+  <a class="btn" href="{{ url_for('console.destinations_create') }}">+ Add Destination</a>
+</div>
+<p class="muted">Destinations are target publishing points. Attach them to a stream or playlist from that item's <strong>Destinations</strong> action. Nothing is pushed from this page yet.</p>
 
 {% if engine_unavailable %}
 <p class="error">Destination information is temporarily unavailable.</p>
@@ -11,9 +13,10 @@
 
 {% if destinations %}
 <section class="card">
+  <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Name</th><th>Platform</th><th>Server</th><th>Stream Key</th><th>Enabled</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Platform</th><th>Server</th><th>Stream Key</th><th>Attached</th><th>Enabled</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for d in destinations %}
@@ -22,6 +25,7 @@
         <td>{{ d.platform_label }}</td>
         <td class="source" title="{{ d.server_url }}">{{ d.server_url }}</td>
         <td class="key-mask">{% if d.has_stream_key %}&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;{% else %}&mdash;{% endif %}</td>
+        <td>{% if d.attached_count > 0 %}<span class="badge badge-starting">{{ d.attached_count }} target{% if d.attached_count != 1 %}s{% endif %}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
         <td>{% if d.enabled %}<span class="badge badge-healthy">Enabled</span>{% else %}<span class="badge badge-stopped">Disabled</span>{% endif %}</td>
         <td class="actions">
           {% if d.enabled %}
@@ -35,20 +39,26 @@
             <button type="submit" class="btn btn-sm">Enable</button>
           </form>
           {% endif %}
+          {% if d.attached_count > 0 %}
+          <button type="button" class="btn btn-sm btn-danger" disabled
+                  title="Attached to a stream or playlist. Detach it before deleting.">Delete</button>
+          {% else %}
           <form method="post" action="{{ url_for('console.destinations_delete', name=d.name) }}"
-                onsubmit="return confirm('Delete destination \'{{ d.name }}\'? This cannot be undone.');">
+                onsubmit="return confirm('Delete this destination? This cannot be undone.');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Delete</button>
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
           </form>
+          {% endif %}
         </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% else %}
 <section class="card">
-  <p class="muted">No streaming destinations configured yet. <a href="{{ url_for('console.destinations_create') }}">Add your first destination</a>.</p>
+  <p class="empty-state">No streaming destinations configured yet. <a href="{{ url_for('console.destinations_create') }}">Add your first destination</a>.</p>
 </section>
 {% endif %}
 {% endblock %}

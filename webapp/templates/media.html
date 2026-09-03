@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Media Library - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Media Library</h1>
-<p><a class="btn" href="{{ url_for('console.media_upload') }}">+ Upload Media</a></p>
+<div class="toolbar">
+  <h1>Media Library</h1>
+  <a class="btn" href="{{ url_for('console.media_upload') }}">+ Upload Media</a>
+</div>
 
 {% if engine_unavailable %}
 <p class="error">Media library information is temporarily unavailable.</p>
@@ -10,6 +12,7 @@
 
 {% if media %}
 <section class="card">
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>File</th><th>Type</th><th>Size</th><th>Actions</th></tr>
@@ -20,15 +23,23 @@
         <td>{{ item.get('name') }}</td>
         <td>{{ item.get('extension') }}</td>
         <td>{{ human_size(item.get('size')) }}</td>
-        <td><a class="btn btn-sm" href="{{ url_for('console.media_create_stream', name=item.get('name')) }}">Create Stream</a></td>
+        <td class="actions">
+          <a class="btn btn-sm" href="{{ url_for('console.media_create_stream', name=item.get('name')) }}">Create Stream</a>
+          <form method="post" action="{{ url_for('console.media_delete_post', name=item.get('name')) }}"
+                onsubmit="return confirm('Delete this media file? This cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
+        </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% else %}
 <section class="card">
-  <p class="muted">No media yet. <a href="{{ url_for('console.media_upload') }}">Upload your first video</a>.</p>
+  <p class="empty-state">No media yet. <a href="{{ url_for('console.media_upload') }}">Upload your first video</a> (.mp4 .mkv .mov .webm .m4v .ts).</p>
 </section>
 {% endif %}
 {% endblock %}

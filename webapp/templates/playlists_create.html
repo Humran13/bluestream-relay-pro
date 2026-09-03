@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Create Playlist - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Create Playlist</h1>
+<div class="page-header">
+  <h1>Create Playlist</h1>
+  <p class="muted">Playlists play their media in order and loop continuously.</p>
+</div>
 
 {% if engine_unavailable %}
 <p class="error">Media library information is temporarily unavailable.</p>
@@ -17,20 +20,22 @@
     <p class="muted">Use a normal name - spaces and punctuation are converted to a safe internal ID automatically (e.g. &quot;Evening Promo Loop&quot; becomes &quot;evening-promo-loop&quot;).</p>
 
     <label>Media items (select at least two)</label>
+    <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Use</th><th>File</th><th>Play order</th></tr>
+        <tr><th class="col-check">Use</th><th>File</th><th>Play order</th></tr>
       </thead>
       <tbody>
       {% for item in media %}
         <tr>
-          <td><input type="checkbox" name="items" value="{{ item.get('name') }}"></td>
+          <td class="col-check"><input type="checkbox" name="items" value="{{ item.get('name') }}" aria-label="Include {{ item.get('name') }}"></td>
           <td>{{ item.get('name') }}</td>
-          <td><input type="number" name="order_{{ item.get('name') }}" min="1" max="{{ max_playlist_items }}" placeholder="-"></td>
+          <td><input type="number" name="order_{{ item.get('name') }}" min="1" max="{{ max_playlist_items }}" placeholder="-" aria-label="Play order for {{ item.get('name') }}"></td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
+    </div>
     <p class="muted">Tick each file to include it, then give every selected file a unique play order number starting at 1 (1 = plays first). Files play in that order and loop continuously. Maximum {{ max_playlist_items }} files.</p>
 
     <button type="submit" class="btn">Create Playlist</button>

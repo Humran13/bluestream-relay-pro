@@ -87,7 +87,7 @@ fi
 # ---------------------------------------------------------------------------
 if [ -n "$PY" ]; then
     _out="$(bash web-ctl snapshot 2>/dev/null)"; _rc=$?
-    if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is True; dd=d["data"]; assert all(k in dd for k in ("version","hostname","uptime","domain","https_configured","nginx_active","ffmpeg_available","ffprobe_available","relay_count","playlist_count")); assert dd["version"] == "0.1.0"'; then
+    if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is True; dd=d["data"]; assert all(k in dd for k in ("version","hostname","uptime","domain","https_configured","nginx_active","ffmpeg_available","ffprobe_available","ytdlp_available","relay_count","playlist_count")); assert dd["version"] == "0.1.0"'; then
         check "web-ctl snapshot: exit 0, valid JSON, all fields present" 0
     else
         check "web-ctl snapshot: exit 0, valid JSON, all fields present" 1
@@ -456,6 +456,193 @@ if [ -n "$PY" ]; then
 else
     skip "playlist_create bridge: fail-closed validation (no python)"
 fi
+
+# ---------------------------------------------------------------------------
+# 10.7 GUI-4 Phase 1B destination-attachment bridge validation (fail-closed
+#      only: every case below stops at dispatch/name/list validation - no
+#      config file is ever written, and no systemd unit is ever touched)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    # get: exact argc == 2
+    _out="$(bash web-ctl relay_destinations_get 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_TARGET"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_destinations_get a b 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    # get: invalid target name rejected before any filesystem access
+    _out="$(bash web-ctl relay_destinations_get ../evil 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    # set: exact argc == 3 (the list value must be present, even if empty)
+    _out="$(bash web-ctl relay_destinations_set news 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_destinations_set news a b 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    # set: invalid target name rejected
+    _out="$(bash web-ctl playlist_destinations_set --help '' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "attachment bridge: destinations get/set fail-closed validation" 0
+    else
+        check "attachment bridge: destinations get/set fail-closed validation" 1
+    fi
+    unset _ok
+else
+    skip "attachment bridge: destinations get/set validation (no python)"
+fi
+
+# ---------------------------------------------------------------------------
+# 10.8 GUI-5A safe-delete bridge validation (fail-closed only: every case
+#      below stops at dispatch/name validation - nothing is ever deleted)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_delete 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_TARGET"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_delete a b 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_delete ../evil 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl media_delete '../etc/passwd' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl media_delete 'sub/file.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "safe-delete bridge: relay/playlist/media delete fail-closed validation" 0
+    else
+        check "safe-delete bridge: relay/playlist/media delete fail-closed validation" 1
+    fi
+    unset _ok
+else
+    skip "safe-delete bridge: delete validation (no python)"
+fi
+
+# ---------------------------------------------------------------------------
+# 10.9 GUI-6A relay_set_source bridge validation (fail-closed only: every case
+#      below stops at dispatch/name/URL validation - no config is ever written)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl relay_set_source news 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_set_source news 'https://x/y.m3u8' extra 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_set_source --help 'https://x/y.m3u8' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_set_source news 'file:///etc/passwd' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] in ("INVALID_URL","NOT_FOUND")'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_set_source news 'https://x/`id`.m3u8' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] in ("INVALID_URL","NOT_FOUND")'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "edit-source bridge: relay_set_source fail-closed validation" 0
+    else
+        check "edit-source bridge: relay_set_source fail-closed validation" 1
+    fi
+    unset _ok
+else
+    skip "edit-source bridge: relay_set_source validation (no python)"
+fi
+
+# ---------------------------------------------------------------------------
+# 10.10 GUI-7A public YouTube Live classification (engine-side, no network):
+#       a YouTube page URL classifies as its own TYPE, look-alike hosts do
+#       not, and the resolver in lib/youtube.sh uses a fixed argv (no eval).
+# ---------------------------------------------------------------------------
+_ok=1
+( . "$SCRIPT_DIR/lib/common.sh" 2>/dev/null
+  bs_is_youtube_url "https://www.youtube.com/watch?v=abc" || exit 1
+  bs_is_youtube_url "https://youtu.be/abc"                || exit 1
+  bs_is_youtube_url "https://youtube.com.evil.com/x"      && exit 1
+  bs_is_youtube_url "http://www.youtube.com/watch?v=x"    && exit 1
+  [ "$(bs_classify_source_type 'https://www.youtube.com/live/x')" = "youtube" ] || exit 1
+  [ "$(bs_classify_source_type 'https://cdn.example/a.m3u8')" = "remote-hls" ] || exit 1
+  exit 0 ) || _ok=0
+# The resolver must never build a shell string / use eval / read cookies.
+# Inspect executable lines only (comments describe the safety rules verbatim).
+_yt_code="$(grep -v '^[[:space:]]*#' "$SCRIPT_DIR/lib/youtube.sh")"
+printf '%s' "$_yt_code" | grep -q 'eval ' && _ok=0
+printf '%s' "$_yt_code" | grep -qE 'bash -c|sh -c' && _ok=0
+printf '%s' "$_yt_code" | grep -q -- '--no-cookies' || _ok=0
+printf '%s' "$_yt_code" | grep -q -- '--ignore-config' || _ok=0
+printf '%s' "$_yt_code" | grep -q 'local -a cmd=(' || _ok=0
+unset _yt_code
+if [ "$_ok" -eq 1 ]; then
+    check "youtube: classification + resolver is fixed-argv, no-cookies, no eval" 0
+else
+    check "youtube: classification + resolver is fixed-argv, no-cookies, no eval" 1
+fi
+unset _ok
+
+# ---------------------------------------------------------------------------
+# 10.11 GUI-8A one-time playlist schedule bridge validation (fail-closed only:
+#       every case below stops at dispatch/name/timestamp validation - no
+#       sidecar or timer unit is ever written, no systemd unit is ever touched)
+# ---------------------------------------------------------------------------
+if [ -n "$PY" ]; then
+    _ok=1
+    _out="$(bash web-ctl playlist_schedule_get 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_TARGET"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_get a b 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_set promo 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_set promo 4000000000 x y 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "TOO_MANY_ARGUMENTS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_set ../evil 4000000000 2099-01-01T00:00:00Z 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_set promo not-a-number 2099-01-01T00:00:00Z 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] in ("INVALID_SCHEDULE","NOT_FOUND")'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl playlist_schedule_set promo 4000000000 "2099 \$(id)" 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] in ("INVALID_SCHEDULE","NOT_FOUND")'; then :; else _ok=0; fi
+    unset _out _rc
+    if [ "$_ok" -eq 1 ]; then
+        check "schedule bridge: playlist_schedule get/set/clear fail-closed validation" 0
+    else
+        check "schedule bridge: playlist_schedule get/set/clear fail-closed validation" 1
+    fi
+    unset _ok
+else
+    skip "schedule bridge: playlist_schedule validation (no python)"
+fi
+
+# GUI-8A missed-time safety: the generated timer must be Persistent=false (a
+# start missed while the box was offline is never run late), the engine must
+# expose a pending/missed state, and the start wrapper must be able to skip a
+# very-late fire without calling playlist_start.
+_ok=1
+grep -q "printf 'Persistent=false" "$SCRIPT_DIR/lib/schedule.sh" || _ok=0
+grep -q "Persistent=true" "$SCRIPT_DIR/lib/schedule.sh" && _ok=0
+grep -q 'schedule_state()' "$SCRIPT_DIR/lib/schedule.sh" || _ok=0
+grep -q 'schedule_expire_timer()' "$SCRIPT_DIR/lib/schedule.sh" || _ok=0
+grep -q 'BLUESTREAM_SCHEDULE_GRACE' "$SCRIPT_DIR/config/systemd/run-playlist-start.sh" || _ok=0
+grep -q 'schedule_expire_timer "\$NAME"' "$SCRIPT_DIR/config/systemd/run-playlist-start.sh" || _ok=0
+if [ "$_ok" -eq 1 ]; then
+    check "schedule: timer Persistent=false + pending/missed state + very-late-fire guard" 0
+else
+    check "schedule: timer Persistent=false + pending/missed state + very-late-fire guard" 1
+fi
+unset _ok
 
 # ---------------------------------------------------------------------------
 # 11. no existing engine files changed unexpectedly

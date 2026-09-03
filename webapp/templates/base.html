@@ -65,6 +65,17 @@
       }
       return Promise.resolve(fallbackCopy(text));
     }
+    // Render any <time class="js-localtime"> in the viewer's local time zone
+    // (the value is stored/sent as UTC; display is a courtesy only).
+    Array.prototype.forEach.call(document.querySelectorAll("time.js-localtime"), function (el) {
+      var iso = el.getAttribute("datetime");
+      if (!iso) { return; }
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) { return; }
+      try {
+        el.textContent = d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      } catch (e) { el.textContent = d.toString(); }
+    });
     // One delegated listener: any .copy-btn copies its sibling .link-url value
     // and shows brief feedback, then reverts. No page reload, no framework.
     document.addEventListener("click", function (event) {

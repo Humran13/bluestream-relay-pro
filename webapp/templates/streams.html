@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Streams - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Streams</h1>
-<p><a class="btn" href="{{ url_for('console.streams_create') }}">+ Create Stream</a></p>
+<div class="toolbar">
+  <h1>Streams</h1>
+  <a class="btn" href="{{ url_for('console.streams_create') }}">+ Create Stream</a>
+</div>
 
 {% if engine_unavailable %}
 <p class="error">BlueStream engine information is temporarily unavailable.</p>
@@ -10,6 +12,7 @@
 
 {% if relays %}
 <section class="card">
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Name</th><th>Source Type</th><th>Source</th><th>Active</th><th>Enabled</th><th>Health</th><th>Links</th><th>Actions</th></tr>
@@ -53,15 +56,26 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm">Restart</button>
           </form>
+          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_destinations', name=relay.get('name')) }}">Destinations ({{ relay.get('destination_count') or 0 }})</a>
+          {% if relay.get('type') != 'local-file' %}
+          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_edit_source', name=relay.get('name')) }}">Edit Source</a>
+          {% endif %}
+          <form method="post" action="{{ url_for('console.relay_delete_post', name=relay.get('name')) }}"
+                onsubmit="return confirm('Delete this stream? This removes its configuration and output and cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-danger"
+                    {% if relay.get('active') == 'yes' %}disabled title="Stop the stream before deleting it."{% endif %}>Delete</button>
+          </form>
         </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% else %}
 <section class="card">
-  <p class="muted">No streams yet. <a href="{{ url_for('console.streams_create') }}">Create your first stream</a>.</p>
+  <p class="empty-state">No streams yet. <a href="{{ url_for('console.streams_create') }}">Create your first stream</a> from a URL or from the Media Library.</p>
 </section>
 {% endif %}
 {% endblock %}

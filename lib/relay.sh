@@ -13,6 +13,13 @@ BLUESTREAM_RELAY_LOADED=1
 
 RELAY_NAME=""; RELAY_TYPE=""; RELAY_URL=""; RELAY_LOOP="no"
 RELAY_RESTART_SEC="5"; RELAY_ENABLED="no"; RELAY_NOTE=""; RELAY_CREATED=""
+# Phase 1B: comma-separated destination IDs attached to this relay (IDs only,
+# never a stream key / secret / publish URL).  Empty = no destinations.
+RELAY_DESTINATIONS=""
+# GUI-7A: for TYPE=youtube, the systemd runtime wrapper resolves the CURRENT
+# playable media URL here at start time (from the configured YouTube page
+# URL). Never loaded from / written to the relay config.
+RELAY_RESOLVED_URL=""
 
 # ---------------------------------------------------------------------------
 # Config load / save / validate
@@ -21,16 +28,25 @@ relay_load_config() {
     local name="$1"
     RELAY_NAME=""; RELAY_TYPE=""; RELAY_URL=""; RELAY_LOOP="no"
     RELAY_RESTART_SEC="5"; RELAY_ENABLED="no"; RELAY_NOTE=""; RELAY_CREATED=""
+    RELAY_DESTINATIONS=""
     local conf="$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
     [ -f "$conf" ] || return 1
     BLUESTREAM_CFG_FILE="$conf"
-    BLUESTREAM_CFG_KEYS="NAME TYPE URL LOOP RESTART_SEC ENABLED NOTE CREATED"
+    BLUESTREAM_CFG_KEYS="NAME TYPE URL LOOP RESTART_SEC ENABLED NOTE CREATED DESTINATIONS"
     BLUESTREAM_CFG_PREFIX="RELAY_"
     bs_parse_kv_file
     [ "$RELAY_NAME" = "$name" ] || return 1
     case "$RELAY_LOOP" in yes|no) ;; *) return 1 ;; esac
     case "$RELAY_ENABLED" in yes|no) ;; *) return 1 ;; esac
     bs_valid_restart_sec "$RELAY_RESTART_SEC" || return 1
+    # Phase 1B: the attachment list, when present, is a bounded set of engine
+    # IDs (lowercase, digits, '-', '_', comma-separated).  A stale entry (a
+    # destination deleted out-of-band) is not fatal here - delete is guarded -
+    # but anything outside the safe grammar fails the config closed.
+    case "$RELAY_DESTINATIONS" in
+        '') ;;
+        *[!a-z0-9,_-]*) return 1 ;;
+    esac
     return 0
 }
 
@@ -45,6 +61,11 @@ relay_config_validate() {
         remote-hls|http-file)
             bs_valid_url "$RELAY_URL" || return 1
             case "$RELAY_URL" in http://*|https://*) ;; *) return 1 ;; esac
+            ;;
+        youtube)
+            # The configured value is the PUBLIC YouTube page URL; it is
+            # resolved to a playable media URL at start time (never stored).
+            bs_is_youtube_url "$RELAY_URL" || return 1
             ;;
         rtmp)
             bs_valid_url "$RELAY_URL" || return 1
@@ -79,6 +100,7 @@ relay_save_config() {
         printf 'ENABLED=%s\n' "$RELAY_ENABLED"
         printf 'NOTE=%s\n' "$RELAY_NOTE"
         printf 'CREATED=%s\n' "$RELAY_CREATED"
+        printf 'DESTINATIONS=%s\n' "$RELAY_DESTINATIONS"
     } > "$tmp"; then
         rm -f "$tmp"
         return 1
@@ -108,6 +130,7 @@ relay_create() {
     RELAY_LOOP="no"; RELAY_RESTART_SEC="5"
     RELAY_ENABLED="no"; RELAY_NOTE="created via web console"
     RELAY_CREATED="$(bs_now_ts)"
+    RELAY_DESTINATIONS=""
     relay_config_validate || return 1
     # Fail closed: the relay only counts as created once its config file is
     # actually on disk. A failed mkdir or a failed save must not report a
@@ -124,6 +147,67 @@ relay_list_names() {
         basename "$f" .conf
     done
     shopt -u nullglob
+}
+
+# ---------------------------------------------------------------------------
+# Phase 1B: destination attachments (IDs only; never a stream key / secret).
+# Changing attachments only rewrites the relay config - it never touches the
+# systemd unit, so a running relay is not restarted.
+# ---------------------------------------------------------------------------
+
+# Print the attached destination IDs for a relay, one per line (nothing when
+# the relay has none).  Returns 1 only when the relay config cannot be read.
+relay_get_destinations() {
+    local name="$1"
+    relay_load_config "$name" || return 1
+    bs_csv_fields "$RELAY_DESTINATIONS"
+    return 0
+}
+
+# Replace a relay's attached destinations with the normalized ID list in "$2"
+# (comma-separated, may be empty to detach all).  Never restarts the unit.
+#   0 ok | 1 invalid name | 2 relay not found | 3 invalid destination list |
+#   4 config save failed
+relay_set_destinations() {
+    local name="$1" csv="${2:-}"
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    relay_load_config "$name" || return 2
+    bs_dest_attach_normalize "$csv" || return 3
+    RELAY_DESTINATIONS="$DEST_ATTACH_CSV"
+    relay_save_config "$name" || return 4
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# GUI-6A: edit the source URL of a STOPPED, URL-backed relay (web console).
+#
+# Non-interactive and state-guarded: allowed ONLY when the unit is
+# definitively stopped and the relay is NOT media-backed (local-file). The
+# new value is validated exactly like relay creation (bs_valid_url +
+# bs_classify_source_type + relay_config_validate) and the TYPE is
+# re-derived from the new URL. Everything else - name, loop, restart delay,
+# note, enabled flag, destination attachments, created timestamp, and
+# therefore the public M3U8 / Web Player URLs - is preserved. The relay is
+# NOT started.
+#   0 ok | 1 invalid name | 2 not found | 3 not definitively stopped |
+#   4 media-backed (source is managed media, not a URL) |
+#   5 unsupported or malformed URL | 6 config save failed
+relay_set_source() {
+    local name="$1" url="${2:-}" newtype=""
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    relay_load_config "$name" || return 2
+    [ "$RELAY_TYPE" = "local-file" ] && return 4
+    bs_unit_definitively_stopped "$(bs_unit relay "$name")" || return 3
+    [ -n "$url" ] || return 5
+    bs_valid_url "$url" || return 5
+    newtype="$(bs_classify_source_type "$url")" || return 5
+    RELAY_TYPE="$newtype"
+    RELAY_URL="$url"
+    relay_config_validate || return 5
+    relay_save_config "$name" || return 6
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -156,6 +240,15 @@ relay_build_ffmpeg_args() {
         remote-hls)
             input+=( -fflags +genpts -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 30 )
             input+=( -i "$url" )
+            ;;
+        youtube)
+            # RELAY_URL is the YouTube page URL; RELAY_RESOLVED_URL is the
+            # fresh playable media URL set by run-relay.sh at start time.
+            local resolved="${RELAY_RESOLVED_URL:-}"
+            [ -n "$resolved" ] || return 1
+            case "$resolved" in http://*|https://*) ;; *) return 1 ;; esac
+            input+=( -fflags +genpts -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 30 )
+            input+=( -i "$resolved" )
             ;;
         rtmp|rtmps)
             input+=( -rw_timeout 20000000 )
@@ -271,6 +364,30 @@ relay_remove() {
     rm -rf "/etc/systemd/system/$(bs_unit relay "$name").d"
     rm -rf "$(bs_hls_dir_for relay "$name")"
     bs_ok "Relay '$name' removed"
+}
+
+# Authoritative NON-interactive relay delete for the web console (GUI-5A).
+# Allowed ONLY when the unit is DEFINITIVELY stopped - a running, starting,
+# stopping or uncertain-state relay is never deleted.  Removes ONLY this
+# relay's own artifacts: its root-only config file, its systemd drop-in
+# directory, and its HLS output directory.  Never touches other relays,
+# managed media, destinations, or any path outside the fixed roots.
+#   0 ok | 1 invalid name | 2 not found | 3 not definitively stopped |
+#   4 config removal failed
+relay_delete() {
+    local name="$1" unit
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    relay_exists "$name" || return 2
+    unit="$(bs_unit relay "$name")"
+    bs_unit_definitively_stopped "$unit" || return 3
+    systemctl disable "$unit" 2>/dev/null || true
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    rm -f "$BLUESTREAM_RELAY_CONF_DIR/$name.conf" || return 4
+    rm -rf "/etc/systemd/system/$unit.d"
+    rm -rf "$(bs_hls_dir_for relay "$name")"
+    systemctl daemon-reload 2>/dev/null || true
+    return 0
 }
 
 # ---------------------------------------------------------------------------

@@ -100,6 +100,9 @@ class FakeEngine:
     def relay_create_url(self, name, url):
         return self._mutation("relay_create_url", name, url)
 
+    def relay_set_source(self, name, url):
+        return self._mutation("relay_set_source", name, url)
+
     def relay_create_media(self, name, media):
         return self._mutation("relay_create_media", name, media)
 
@@ -131,6 +134,39 @@ class FakeEngine:
 
     def destination_delete(self, name):
         return self._mutation("destination_delete", name)
+
+    # GUI-4 Phase 1B: destination attachment reads/writes.
+    def relay_destinations_get(self, name):
+        return self.call(("relay_destinations_get", name))
+
+    def playlist_destinations_get(self, name):
+        return self.call(("playlist_destinations_get", name))
+
+    def relay_destinations_set(self, name, ids):
+        return self._mutation("relay_destinations_set", name, tuple(ids))
+
+    def playlist_destinations_set(self, name, ids):
+        return self._mutation("playlist_destinations_set", name, tuple(ids))
+
+    # GUI-5A: safe delete.
+    def relay_delete(self, name):
+        return self._mutation("relay_delete", name)
+
+    def playlist_delete(self, name):
+        return self._mutation("playlist_delete", name)
+
+    def media_delete(self, name):
+        return self._mutation("media_delete", name)
+
+    # GUI-8A: one-time playlist start schedule.
+    def playlist_schedule_get(self, name):
+        return self.call(("playlist_schedule_get", name))
+
+    def playlist_schedule_set(self, name, epoch, iso):
+        return self._mutation("playlist_schedule_set", name, str(epoch), iso)
+
+    def playlist_schedule_clear(self, name):
+        return self._mutation("playlist_schedule_clear", name)
 
 
 def make_state(tmpdir, password=ADMIN_PASSWORD):
@@ -176,6 +212,7 @@ VALID_SNAPSHOT = {
     "nginx_active": "no",
     "ffmpeg_available": "yes",
     "ffprobe_available": "yes",
+    "ytdlp_available": "yes",
     "relay_count": "1",
     "playlist_count": "0",
 }
@@ -433,11 +470,12 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
         self.assertNotIn("<b>bold-host</b>", html)
 
     def test_21_route_surface_only_allowed_endpoints(self):
-        # GUI-1B.1/GUI-1C.1 add the lifecycle, create-stream and media endpoints;
-        # everything else that mutates (edit/delete/remove/restore/...) stays
-        # forbidden. The exact-set assertion below is the real guard. GUI-4
-        # Phase 1A allowlists exactly the fixed destination enable/disable/
-        # delete action routes; every other mutation word stays forbidden.
+        # GUI-1B.1/GUI-1C.1 add the lifecycle, create-stream and media endpoints.
+        # GUI-4 Phase 1A/1B add the fixed destination enable/disable/delete and
+        # attachment routes; GUI-5A adds the three fixed safe-delete routes;
+        # GUI-6A adds the fixed edit-source route. Every one of those is a
+        # FIXED, validated, single-purpose operation - there is still no generic
+        # editor/remover. The exact-set assertion below is the real guard.
         forbidden = (
             "edit", "delete", "remove", "restore",
             "enable", "disable",
@@ -447,6 +485,13 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
             "console.destinations_enable",
             "console.destinations_disable",
             "console.destinations_delete",
+            # GUI-5A: fixed safe-delete of one stopped/unreferenced target
+            "console.relay_delete_post",
+            "console.playlist_delete_post",
+            "console.media_delete_post",
+            # GUI-6A: fixed edit of one stopped, URL-backed stream's source URL
+            "console.relay_edit_source",
+            "console.relay_edit_source_post",
         }
         endpoints = set()
         for rule in self.app.url_map.iter_rules():
@@ -491,6 +536,22 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 "console.destinations_enable",
                 "console.destinations_disable",
                 "console.destinations_delete",
+                # GUI-4 Phase 1B: destination attachment pages
+                "console.relay_destinations",
+                "console.relay_destinations_post",
+                "console.playlist_destinations",
+                "console.playlist_destinations_post",
+                # GUI-5A: safe delete
+                "console.relay_delete_post",
+                "console.playlist_delete_post",
+                "console.media_delete_post",
+                # GUI-6A: edit stream source URL
+                "console.relay_edit_source",
+                "console.relay_edit_source_post",
+                # GUI-8A: one-time playlist start schedule
+                "console.playlist_schedule",
+                "console.playlist_schedule_post",
+                "console.playlist_schedule_cancel",
             },
         )
         # only the expected HTTP methods
@@ -642,11 +703,14 @@ class LifecycleActionTests(unittest.TestCase):
         self.assertIn("/console/relays/news/start", html)
         self.assertIn("/console/relays/news/stop", html)
         self.assertIn("/console/relays/news/restart", html)
-        # every action form carries its own CSRF token (3 actions + logout)
-        self.assertGreaterEqual(html.count('name="csrf_token"'), 4)
-        # no delete/edit controls yet
-        self.assertNotIn("Delete", html)
-        self.assertNotIn("Edit", html)
+        # every action form carries its own CSRF token (start/stop/restart +
+        # delete + logout = at least 5)
+        self.assertGreaterEqual(html.count('name="csrf_token"'), 5)
+        # GUI-5A/6A: fixed, per-stream Delete and Edit Source controls exist
+        # and post to their dedicated single-purpose routes.
+        self.assertIn("/console/streams/news/delete", html)
+        self.assertIn("/console/streams/news/edit-source", html)
+        self.assertIn("btn-danger", html)
 
 
 class EngineClientTests(unittest.TestCase):
@@ -797,12 +861,29 @@ class EngineClientTests(unittest.TestCase):
             "destination_enable",
             "destination_disable",
             "destination_delete",
+            # GUI-4 Phase 1B: destination attachments (IDs only)
+            "relay_destinations_get",
+            "relay_destinations_set",
+            "playlist_destinations_get",
+            "playlist_destinations_set",
+            # GUI-5A: fixed safe-delete methods (one validated name each)
+            "relay_delete",
+            "playlist_delete",
+            "media_delete",
+            # GUI-6A: edit source URL of a stopped, URL-backed stream
+            "relay_set_source",
+            # GUI-8A: one-time playlist start schedule
+            "playlist_schedule_get",
+            "playlist_schedule_set",
+            "playlist_schedule_clear",
         ):
             self.assertTrue(callable(getattr(client, name, None)), name)
         for forbidden in (
-            "relay_edit", "relay_delete",
-            "playlist_edit", "playlist_delete",
-            "media_remove", "media_delete",
+            # No generic edit / arbitrary-path / exec operations may exist.
+            "relay_edit", "playlist_edit",
+            "media_remove", "media_delete_path", "media_remove_path",
+            "relay_delete_path", "playlist_delete_path",
+            "config_edit", "config_write", "exec", "run", "shell",
             # GUI-4: no generic destination operations may exist
             "destination_edit", "destination_exec", "destination_execute",
             "destination_write", "destination_write_file",
@@ -828,6 +909,22 @@ class EngineClientTests(unittest.TestCase):
                     "destination_enable",
                     "destination_disable",
                     "destination_delete",
+                    # GUI-4 Phase 1B: destination attachment setters (IDs only;
+                    # no systemd unit touched, no outgoing RTMP push started).
+                    "relay_destinations_set",
+                    "playlist_destinations_set",
+                    # GUI-5A: safe delete (one stopped/unreferenced target each).
+                    "relay_delete",
+                    "playlist_delete",
+                    "media_delete",
+                    # GUI-6A: edit the source URL of a stopped, URL-backed
+                    # stream (URL treated strictly as data; never starts it).
+                    "relay_set_source",
+                    # GUI-8A: one-time playlist start schedule (set/replace +
+                    # cancel). A root-generated timer targets a FIXED oneshot
+                    # service - never a browser-supplied command.
+                    "playlist_schedule_set",
+                    "playlist_schedule_clear",
                 }
             ),
         )
@@ -1768,6 +1865,13 @@ class ProductionModeTests(unittest.TestCase):
             "console.destinations_enable",
             "console.destinations_disable",
             "console.destinations_delete",
+            # GUI-5A safe delete + GUI-6A edit-source: fixed single-purpose
+            # routes, each validated end to end. Still no generic editor.
+            "console.relay_delete_post",
+            "console.playlist_delete_post",
+            "console.media_delete_post",
+            "console.relay_edit_source",
+            "console.relay_edit_source_post",
         }
         for rule in prod_app.url_map.iter_rules():
             if rule.endpoint in allowed_action_endpoints:
@@ -2818,7 +2922,7 @@ class Gui3PlaylistCacheTests(unittest.TestCase):
         engine = EngineClient(production=True)
         captured = {}
 
-        def fake_run_argv(argv, timeout=None):
+        def fake_run_argv(argv, timeout=None, stdin_data=None):
             op = argv[-1]
             if op not in envelopes:
                 raise EngineError("unexpected operation in real-engine test: %r" % op)
@@ -3241,12 +3345,13 @@ class Gui1dPlaylistWorkflowTests(unittest.TestCase):
         self.assertIn(
             "https://example.com/hls/playlist/evening-promo-loop/index.m3u8", html
         )
-        # lifecycle actions are the only actions (no edit/delete yet)
         self.assertIn("/console/playlists/evening-promo-loop/start", html)
         self.assertIn("/console/playlists/evening-promo-loop/stop", html)
         self.assertIn("/console/playlists/evening-promo-loop/restart", html)
-        self.assertNotIn("Delete", html)
-        self.assertNotIn("Edit", html)
+        # GUI-5A/1B: a fixed safe-delete control and a fixed destinations
+        # assignment link, each posting to its own single-purpose route.
+        self.assertIn("/console/playlists/evening-promo-loop/delete", html)
+        self.assertIn("/console/playlists/evening-promo-loop/destinations", html)
 
     def test_20_create_page_lists_media_with_order_fields(self):
         self._login()
@@ -4337,7 +4442,7 @@ class DestinationsWorkflowTests(unittest.TestCase):
         self.assertNotIn(self.SECRET, html)
 
     def test_12_supported_platform_labels_accepted(self):
-        for platform in ("youtube", "facebook", "twitch", "rumble", "instagram", "custom"):
+        for platform in ("youtube", "facebook", "twitch", "rumble", "instagram", "tiktok", "custom"):
             self.engine.mutation_calls = []
             rv = self._post_create(
                 self._create_data(platform=platform, display="Dest " + platform)
@@ -4498,9 +4603,10 @@ class DestinationsWorkflowTests(unittest.TestCase):
             )
 
     def test_22_engine_destination_validators_unit(self):
-        for good in ("youtube", "facebook", "twitch", "rumble", "instagram", "custom"):
+        for good in ("youtube", "facebook", "twitch", "rumble", "instagram", "tiktok", "custom"):
             self.assertTrue(valid_dest_platform(good), good)
         self.assertFalse(valid_dest_platform("youtube-extra"))
+        self.assertFalse(valid_dest_platform("tiktok-live"))
         self.assertTrue(valid_dest_url("rtmp://host/live"))
         self.assertTrue(valid_dest_url("rtmps://host/app?key=1"))
         for bad in (
@@ -4525,8 +4631,830 @@ class DestinationsWorkflowTests(unittest.TestCase):
         self.assertIn("http://example.com/hls/relay/news/index.m3u8", streams)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class Phase1bDestinationAttachmentTests(unittest.TestCase):
+    """GUI-4 Phase 1B: attach existing destinations to a stream/playlist.
+
+    IDs only ever cross the boundary; the stream key is never rendered.
+    Saving attachments never invokes a lifecycle (start/stop/restart) method.
+    """
+
+    RELAY_DEST_LIST = [
+        {
+            "name": "main-youtube",
+            "display_name": "Main YouTube",
+            "platform": "youtube",
+            "server_url": "rtmps://a.rtmp.youtube.com/live2",
+            "enabled": "yes",
+            "has_stream_key": "yes",
+            "attached_count": "1",
+        },
+        {
+            "name": "backup-fb",
+            "display_name": "Backup Facebook",
+            "platform": "facebook",
+            "server_url": "rtmps://live-api-s.facebook.com:443/rtmp/",
+            "enabled": "no",
+            "has_stream_key": "yes",
+            "attached_count": "0",
+        },
+    ]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [
+                {
+                    "name": "news",
+                    "type": "remote-hls",
+                    "source": "https://s.example/live.m3u8",
+                    "active": "yes",
+                    "enabled": "no",
+                    "health": "HEALTHY",
+                    "destination_count": "1",
+                }
+            ],
+            "playlist_list": [
+                {
+                    "name": "promo",
+                    "active": "no",
+                    "enabled": "no",
+                    "items": "3",
+                    "health": "STOPPED",
+                    "destination_count": "0",
+                }
+            ],
+            "media_list": [],
+            "destination_list": self.RELAY_DEST_LIST,
+            ("relay_destinations_get", "news"): ["main-youtube"],
+            ("playlist_destinations_get", "promo"): [],
+            "playlist_cache_status": {
+                "total_bytes": "0", "artifact_count": "0",
+                "protected_bytes": "0", "protected_count": "0",
+                "reclaimable_bytes": "0", "reclaimable_count": "0",
+            },
+        }
+        self.engine = FakeEngine(payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _csrf(self, path):
+        m = CSRF_RE.search(self.client.get(path).get_data(as_text=True))
+        assert m, "no csrf on %s" % path
+        return m.group(1)
+
+    def test_01_requires_authentication(self):
+        anon = self.app.test_client()
+        rv = anon.get("/console/streams/news/destinations")
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/login", rv.headers["Location"])
+
+    def test_02_assignment_page_lists_destinations_without_key(self):
+        html = self.client.get("/console/streams/news/destinations").get_data(as_text=True)
+        self.assertIn("Main YouTube", html)
+        self.assertIn("Backup Facebook", html)
+        # attached destination is pre-checked
+        self.assertRegex(html, r'value="main-youtube"[^>]*checked')
+        self.assertNotRegex(html, r'value="backup-fb"[^>]*checked')
+        # never a stream key or mask leakage of the secret itself
+        self.assertNotIn("live2?", html)
+
+    def test_03_save_attachments_calls_setter_not_lifecycle(self):
+        token = self._csrf("/console/streams/news/destinations")
+        rv = self.client.post(
+            "/console/streams/news/destinations",
+            data={"csrf_token": token,
+                  "destinations": ["main-youtube", "backup-fb"]},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_destinations_set", "news", ("main-youtube", "backup-fb"))],
+        )
+        for call in self.engine.mutation_calls:
+            self.assertNotIn(
+                call[0],
+                ("relay_start", "relay_stop", "relay_restart"),
+            )
+
+    def test_04_empty_selection_detaches_all(self):
+        token = self._csrf("/console/streams/news/destinations")
+        rv = self.client.post(
+            "/console/streams/news/destinations",
+            data={"csrf_token": token},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_destinations_set", "news", ())],
+        )
+
+    def test_05_invalid_destination_id_rejected_before_engine(self):
+        token = self._csrf("/console/streams/news/destinations")
+        rv = self.client.post(
+            "/console/streams/news/destinations",
+            data={"csrf_token": token, "destinations": "../etc/passwd"},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_06_save_requires_csrf(self):
+        rv = self.client.post(
+            "/console/streams/news/destinations",
+            data={"destinations": "main-youtube"},
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_07_playlist_assignment_page_and_save(self):
+        html = self.client.get("/console/playlists/promo/destinations").get_data(as_text=True)
+        self.assertIn("Main YouTube", html)
+        token = self._csrf("/console/playlists/promo/destinations")
+        rv = self.client.post(
+            "/console/playlists/promo/destinations",
+            data={"csrf_token": token, "destinations": "main-youtube"},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/playlists", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("playlist_destinations_set", "promo", ("main-youtube",))],
+        )
+
+    def test_08_streams_and_playlists_show_destinations_action(self):
+        streams = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("/console/streams/news/destinations", streams)
+        self.assertIn("Destinations (1)", streams)
+        playlists = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("/console/playlists/promo/destinations", playlists)
+        self.assertIn("Destinations (0)", playlists)
+
+    def test_09_destinations_list_guards_delete_when_attached(self):
+        html = self.client.get("/console/destinations").get_data(as_text=True)
+        # attached destination: disabled Delete button, no delete form action
+        self.assertIn("1 target", html)
+        self.assertRegex(html, r"btn-danger[^>]*disabled")
+        # unattached destination still has a working delete form
+        self.assertIn(
+            '/console/destinations/backup-fb/delete', html
+        )
+
+    def test_10_delete_attached_destination_reports_safe_message(self):
+        self.engine.mutation_payloads[("destination_delete", "main-youtube")] = EngineError(
+            "attached", code="DESTINATION_ATTACHED"
+        )
+        token = self._csrf("/console/destinations")
+        rv = self.client.post(
+            "/console/destinations/main-youtube/delete",
+            data={"csrf_token": token},
+            follow_redirects=True,
+        )
+        html = rv.get_data(as_text=True)
+        self.assertIn("Detach it before deleting", html)
+
+    def test_11_assignment_nav_keeps_parent_section_active(self):
+        html = self.client.get("/console/streams/news/destinations").get_data(as_text=True)
+        self.assertRegex(html, r'href="/console/streams"[^>]*nav-active')
+        html = self.client.get("/console/playlists/promo/destinations").get_data(as_text=True)
+        self.assertRegex(html, r'href="/console/playlists"[^>]*nav-active')
+
+    def test_12_invalid_target_name_redirects_safely(self):
+        rv = self.client.get("/console/streams/Bad_UPPER/destinations")
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+
+
+class EnginePhase1bValidationTests(unittest.TestCase):
+    """The EngineClient validates attachment argv fully before any subprocess."""
+
+    def _client(self):
+        return EngineClient(web_ctl=Path(__file__), bash="/bin/sh")
+
+    def test_set_rejects_bad_target_name(self):
+        c = self._client()
+        with self.assertRaises(EngineError):
+            c.relay_destinations_set("../evil", ["a"])
+
+    def test_set_rejects_bad_destination_id(self):
+        c = self._client()
+        with self.assertRaises(EngineError) as ctx:
+            c.relay_destinations_set("news", ["ok", "../bad"])
+        self.assertEqual(ctx.exception.code, "INVALID_DESTINATION")
+
+    def test_set_rejects_duplicate_ids(self):
+        c = self._client()
+        with self.assertRaises(EngineError) as ctx:
+            c.playlist_destinations_set("promo", ["a", "a"])
+        self.assertEqual(ctx.exception.code, "DUPLICATE_DESTINATION")
+
+    def test_set_rejects_over_limit(self):
+        from webapp.engine import MAX_TARGET_DESTINATIONS
+        c = self._client()
+        ids = ["d%02d" % i for i in range(MAX_TARGET_DESTINATIONS + 1)]
+        with self.assertRaises(EngineError) as ctx:
+            c.relay_destinations_set("news", ids)
+        self.assertEqual(ctx.exception.code, "TOO_MANY_DESTINATIONS")
+
+    def test_get_rejects_bad_name(self):
+        c = self._client()
+        with self.assertRaises(EngineError):
+            c.relay_destinations_get("../x")
+
+    def test_csv_normalization_drops_blanks_and_spaces(self):
+        from webapp.engine import _ids_to_csv
+        self.assertEqual(_ids_to_csv([" a ", "", "b"]), "a,b")
+        self.assertEqual(_ids_to_csv("a, b ,,c"), "a,b,c")
+        self.assertEqual(_ids_to_csv(None), "")
+
+
+class YouTubeLiveSupportTests(unittest.TestCase):
+    """GUI-7A: public YouTube Live sources surface as their own type in the UI.
+
+    Classification and resolution are engine-side (bash) and covered by the
+    web-ctl functional tests; here we confirm the console renders the new
+    'youtube' type and the yt-dlp availability hint without regressions.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [
+                {"name": "yt", "type": "youtube",
+                 "source": "https://www.youtube.com/watch?v=LIVE",
+                 "active": "no", "enabled": "no", "health": "STOPPED",
+                 "destination_count": "0"},
+            ],
+            "playlist_list": [],
+            "media_list": [],
+            "destination_list": [],
+            "playlist_cache_status": {
+                "total_bytes": "0", "artifact_count": "0", "protected_bytes": "0",
+                "protected_count": "0", "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+            },
+        }
+        self.engine = FakeEngine(payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def test_01_streams_list_labels_youtube_type(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("YouTube Live", html)
+        # a youtube stream is URL-backed, so it gets the Edit Source control
+        self.assertIn("/console/streams/yt/edit-source", html)
+
+    def test_02_create_page_documents_youtube(self):
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn("YouTube Live", html)
+        self.assertIn("yt-dlp", html)
+
+    def test_03_dashboard_shows_ytdlp_status(self):
+        html = self.client.get("/console/").get_data(as_text=True)
+        self.assertIn("yt-dlp", html)
+
+    def test_04_type_label_map_has_youtube(self):
+        self.assertEqual(app_module.TYPE_LABELS.get("youtube"), "YouTube Live")
+
+
+class SafeDeleteWorkflowTests(unittest.TestCase):
+    """GUI-5A: safe delete for streams, playlists and media.
+
+    The route always calls the FIXED engine delete method for that resource,
+    never a lifecycle or generic method; the engine enforces the real "stopped"
+    / "unreferenced" guard. Every mutation is POST + CSRF + auth + PRG.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [
+                {"name": "news", "type": "remote-hls", "source": "https://s/x.m3u8",
+                 "active": "no", "enabled": "no", "health": "STOPPED",
+                 "destination_count": "0"},
+                {"name": "live", "type": "remote-hls", "source": "https://s/y.m3u8",
+                 "active": "yes", "enabled": "no", "health": "HEALTHY",
+                 "destination_count": "0"},
+            ],
+            "playlist_list": [
+                {"name": "promo", "active": "no", "enabled": "no", "items": "2",
+                 "health": "STOPPED", "destination_count": "0"},
+            ],
+            "media_list": [
+                {"name": "intro.mp4", "extension": "mp4", "size": "1024"},
+            ],
+            "destination_list": [],
+            "playlist_cache_status": {
+                "total_bytes": "0", "artifact_count": "0", "protected_bytes": "0",
+                "protected_count": "0", "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+            },
+        }
+        self.engine = FakeEngine(self.payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _csrf(self, path="/console/streams"):
+        m = CSRF_RE.search(self.client.get(path).get_data(as_text=True))
+        assert m, "no csrf on %s" % path
+        return m.group(1)
+
+    def test_01_delete_is_post_only(self):
+        rv = self.client.get("/console/streams/news/delete")
+        self.assertEqual(rv.status_code, 405)
+
+    def test_02_delete_requires_csrf(self):
+        rv = self.client.post("/console/streams/news/delete", data={})
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_03_delete_requires_auth(self):
+        anon = self.app.test_client()
+        rv = anon.post("/console/streams/news/delete", data={})
+        self.assertIn(rv.status_code, (302, 400))
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_04_relay_delete_calls_fixed_method_and_prg(self):
+        token = self._csrf()
+        rv = self.client.post(
+            "/console/streams/news/delete", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [("relay_delete", "news")])
+
+    def test_05_relay_delete_not_stopped_message(self):
+        self.engine.mutation_payloads[("relay_delete", "live")] = EngineError(
+            "not stopped", code="NOT_STOPPED"
+        )
+        token = self._csrf()
+        rv = self.client.post(
+            "/console/streams/live/delete", data={"csrf_token": token},
+            follow_redirects=True,
+        )
+        self.assertIn("not stopped", rv.get_data(as_text=True).lower())
+
+    def test_06_running_relay_delete_button_disabled_in_ui(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        # the running relay 'live' row has a disabled Delete button
+        live_row = html.split("<td>live</td>", 1)[1].split("</tr>", 1)[0]
+        self.assertRegex(live_row, r"(?s)btn-danger[^>]*disabled")
+        # the stopped relay 'news' row's Delete button is NOT disabled
+        news_row = html.split("<td>news</td>", 1)[1].split("</tr>", 1)[0]
+        self.assertNotRegex(news_row, r"(?s)btn-danger[^>]*disabled")
+
+    def test_07_playlist_delete_calls_fixed_method(self):
+        token = self._csrf("/console/playlists")
+        rv = self.client.post(
+            "/console/playlists/promo/delete", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("playlist_delete", "promo")])
+
+    def test_08_media_delete_calls_fixed_method(self):
+        token = self._csrf("/console/media")
+        rv = self.client.post(
+            "/console/media/intro.mp4/delete", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/media", rv.headers["Location"])
+        self.assertEqual(self.engine.mutation_calls, [("media_delete", "intro.mp4")])
+
+    def test_09_media_delete_referenced_message(self):
+        self.engine.mutation_payloads[("media_delete", "intro.mp4")] = EngineError(
+            "referenced", code="MEDIA_REFERENCED"
+        )
+        token = self._csrf("/console/media")
+        rv = self.client.post(
+            "/console/media/intro.mp4/delete", data={"csrf_token": token},
+            follow_redirects=True,
+        )
+        self.assertIn("used by a stream or playlist", rv.get_data(as_text=True))
+
+    def test_10_media_delete_rejects_arbitrary_path(self):
+        token = self._csrf("/console/media")
+        for bad in ("..%2Fetc%2Fpasswd", "sub%2Ffile.mp4"):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/media/%s/delete" % bad, data={"csrf_token": token}
+            )
+            self.assertIn(rv.status_code, (302, 404))
+            self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_11_relay_delete_rejects_bad_name_before_engine(self):
+        token = self._csrf()
+        rv = self.client.post(
+            "/console/streams/Bad_UP/delete", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_12_delete_buttons_use_danger_class(self):
+        for path in ("/console/streams", "/console/playlists", "/console/media"):
+            html = self.client.get(path).get_data(as_text=True)
+            self.assertIn("btn-danger", html, path)
+            self.assertIn("confirm(", html, path)
+
+
+class EditStreamSourceTests(unittest.TestCase):
+    """GUI-6A: edit the source URL of a stopped, URL-backed stream."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [
+                {"name": "news", "type": "remote-hls",
+                 "source": "https://old.example/live.m3u8",
+                 "active": "no", "enabled": "no", "health": "STOPPED",
+                 "destination_count": "1"},
+                {"name": "live", "type": "rtmp", "source": "rtmp://x/app",
+                 "active": "yes", "enabled": "no", "health": "HEALTHY",
+                 "destination_count": "0"},
+                {"name": "loopvid", "type": "local-file",
+                 "source": "/var/lib/bluestream/media/intro.mp4",
+                 "active": "no", "enabled": "no", "health": "STOPPED",
+                 "destination_count": "0"},
+            ],
+            "playlist_list": [],
+            "media_list": [],
+            "destination_list": [],
+            "playlist_cache_status": {
+                "total_bytes": "0", "artifact_count": "0", "protected_bytes": "0",
+                "protected_count": "0", "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+            },
+        }
+        self.engine = FakeEngine(self.payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _csrf(self, path):
+        m = CSRF_RE.search(self.client.get(path).get_data(as_text=True))
+        assert m, "no csrf on %s" % path
+        return m.group(1)
+
+    def test_01_edit_page_shows_form_for_stopped_url_stream(self):
+        html = self.client.get("/console/streams/news/edit-source").get_data(as_text=True)
+        self.assertIn("New source URL", html)
+        self.assertIn("https://old.example/live.m3u8", html)  # shown as context
+        # the input is NOT pre-filled with the (possibly credentialed) URL
+        self.assertNotRegex(html, r'name="url"[^>]*value="https://old')
+
+    def test_02_running_stream_shows_no_form(self):
+        html = self.client.get("/console/streams/live/edit-source").get_data(as_text=True)
+        self.assertNotIn("New source URL", html)
+        self.assertIn("running", html.lower())
+
+    def test_03_media_backed_stream_has_no_editor(self):
+        html = self.client.get("/console/streams/loopvid/edit-source").get_data(as_text=True)
+        self.assertIn("managed media", html.lower())
+        self.assertNotIn("New source URL", html)
+
+    def test_04_streams_list_shows_edit_source_only_for_url_streams(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("/console/streams/news/edit-source", html)
+        self.assertNotIn("/console/streams/loopvid/edit-source", html)
+
+    def test_05_save_calls_relay_set_source_and_prg(self):
+        token = self._csrf("/console/streams/news/edit-source")
+        rv = self.client.post(
+            "/console/streams/news/edit-source",
+            data={"csrf_token": token, "url": "https://new.example/live.m3u8"},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/streams", rv.headers["Location"])
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_set_source", "news", "https://new.example/live.m3u8")],
+        )
+
+    def test_06_save_requires_csrf(self):
+        rv = self.client.post(
+            "/console/streams/news/edit-source",
+            data={"url": "https://new.example/live.m3u8"},
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_07_invalid_url_rejected_before_engine(self):
+        token = self._csrf("/console/streams/news/edit-source")
+        for bad in ("file:///etc/passwd", "not a url", "https://x/`whoami`.m3u8"):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/streams/news/edit-source",
+                data={"csrf_token": token, "url": bad},
+            )
+            self.assertEqual(rv.status_code, 302)
+            self.assertEqual(self.engine.mutation_calls, [], bad)
+
+    def test_08_engine_not_stopped_reported(self):
+        self.engine.mutation_payloads[
+            ("relay_set_source", "news", "https://new.example/live.m3u8")
+        ] = EngineError("running", code="NOT_STOPPED")
+        token = self._csrf("/console/streams/news/edit-source")
+        rv = self.client.post(
+            "/console/streams/news/edit-source",
+            data={"csrf_token": token, "url": "https://new.example/live.m3u8"},
+            follow_redirects=True,
+        )
+        self.assertIn("Stop the stream", rv.get_data(as_text=True))
+
+    def test_09_engine_media_backed_reported(self):
+        self.engine.mutation_payloads[
+            ("relay_set_source", "news", "https://new.example/live.m3u8")
+        ] = EngineError("media", code="MEDIA_BACKED")
+        token = self._csrf("/console/streams/news/edit-source")
+        rv = self.client.post(
+            "/console/streams/news/edit-source",
+            data={"csrf_token": token, "url": "https://new.example/live.m3u8"},
+            follow_redirects=True,
+        )
+        self.assertIn("managed media", rv.get_data(as_text=True).lower())
+
+
+class PlaylistScheduleTests(unittest.TestCase):
+    """GUI-8A: one-time playlist start scheduling with timezone normalization."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [],
+            "playlist_list": [
+                {"name": "promo", "active": "no", "enabled": "no", "items": "3",
+                 "health": "STOPPED", "destination_count": "0",
+                 "scheduled": "yes", "scheduled_at": "4102400000",
+                 "scheduled_at_iso": "2099-12-31T00:00:00Z"},
+            ],
+            "media_list": [],
+            "destination_list": [],
+            "playlist_cache_status": {
+                "total_bytes": "0", "artifact_count": "0", "protected_bytes": "0",
+                "protected_count": "0", "reclaimable_bytes": "0",
+                "reclaimable_count": "0",
+            },
+            ("playlist_schedule_get", "promo"): {
+                "scheduled": "no", "start_at": "", "start_at_iso": "",
+            },
+        }
+        self.engine = FakeEngine(self.payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _csrf(self, path):
+        m = CSRF_RE.search(self.client.get(path).get_data(as_text=True))
+        assert m, "no csrf on %s" % path
+        return m.group(1)
+
+    def _future_iso(self, **kw):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) + timedelta(**kw)).isoformat()
+
+    def test_01_schedule_page_requires_auth(self):
+        rv = self.app.test_client().get("/console/playlists/promo/schedule")
+        self.assertEqual(rv.status_code, 302)
+
+    def test_02_schedule_page_renders_form(self):
+        html = self.client.get("/console/playlists/promo/schedule").get_data(as_text=True)
+        self.assertIn('type="datetime-local"', html)
+        self.assertIn('name="iso"', html)
+        self.assertIn("time zone", html.lower())
+
+    def test_03_valid_future_time_calls_engine_with_utc_epoch(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": self._future_iso(days=2)},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/console/playlists", rv.headers["Location"])
+        self.assertEqual(len(self.engine.mutation_calls), 1)
+        op, name, epoch, iso = self.engine.mutation_calls[0]
+        self.assertEqual((op, name), ("playlist_schedule_set", "promo"))
+        self.assertTrue(epoch.isdigit())
+        self.assertGreater(int(epoch), 1577836800)
+        self.assertTrue(iso.endswith("Z"))
+
+    def test_04_past_time_rejected_before_engine(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": self._future_iso(days=-1)},
+            follow_redirects=True,
+        )
+        self.assertIn("future", rv.get_data(as_text=True).lower())
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_05_naive_time_without_offset_rejected(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": "2099-01-01T12:00:00"},
+            follow_redirects=True,
+        )
+        self.assertIn("timezone", rv.get_data(as_text=True).lower())
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_06_garbage_time_rejected(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        for bad in ("not-a-date", "'; rm -rf /", "2099-13-45T99:99:99Z"):
+            self.engine.mutation_calls = []
+            rv = self.client.post(
+                "/console/playlists/promo/schedule",
+                data={"csrf_token": token, "iso": bad},
+            )
+            self.assertEqual(rv.status_code, 302)
+            self.assertEqual(self.engine.mutation_calls, [], bad)
+
+    def test_07_far_future_beyond_horizon_rejected(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": self._future_iso(days=900)},
+            follow_redirects=True,
+        )
+        self.assertIn("days", rv.get_data(as_text=True).lower())
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_08_schedule_requires_csrf(self):
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"iso": self._future_iso(days=2)},
+        )
+        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_09_cancel_calls_clear(self):
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule/cancel", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [("playlist_schedule_clear", "promo")])
+
+    def test_10_engine_past_error_surfaced(self):
+        self.engine.mutation_payloads[("playlist_schedule_set",)] = EngineError(
+            "past", code="SCHEDULE_IN_PAST"
+        )
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": self._future_iso(days=2)},
+            follow_redirects=True,
+        )
+        self.assertIn("past", rv.get_data(as_text=True).lower())
+
+    def test_11_playlists_list_shows_schedule_link_and_badge(self):
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("/console/playlists/promo/schedule", html)
+        self.assertIn("2099-12-31T00:00:00Z", html)  # <time> value, JS localizes
+
+    def test_12_existing_schedule_shows_cancel(self):
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": "4102400000",
+            "start_at_iso": "2099-12-31T00:00:00Z", "state": "pending",
+        }
+        html = self.client.get("/console/playlists/promo/schedule").get_data(as_text=True)
+        self.assertIn("/console/playlists/promo/schedule/cancel", html)
+        self.assertIn("Cancel Schedule", html)
+
+    # -- GUI-8A missed-time safety (Persistent=false) --------------------
+    def _past_epoch(self, minutes=90):
+        import time
+        return str(int(time.time()) - minutes * 60)
+
+    def test_13_missed_schedule_reported_as_missed_not_pending(self):
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": self._past_epoch(),
+            "start_at_iso": "2020-01-01T00:00:00Z", "state": "missed",
+        }
+        html = self.client.get("/console/playlists/promo/schedule").get_data(as_text=True)
+        self.assertIn("Missed", html)
+        # a missed schedule is NOT presented as still waiting to run
+        self.assertNotIn(">Pending<", html)
+        self.assertIn("never run late", html.lower())
+        # Change + Cancel remain available
+        self.assertIn("/console/playlists/promo/schedule/cancel", html)
+        self.assertIn('type="datetime-local"', html)
+
+    def test_14_missed_derived_from_past_epoch_when_state_absent(self):
+        # engine did not send a state field -> the app derives it from the epoch
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": self._past_epoch(),
+            "start_at_iso": "2020-01-01T00:00:00Z",
+        }
+        html = self.client.get("/console/playlists/promo/schedule").get_data(as_text=True)
+        self.assertIn("Missed", html)
+        self.assertNotIn(">Pending<", html)
+
+    def test_15_future_schedule_reported_as_pending(self):
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": "4102400000",
+            "start_at_iso": "2099-12-31T00:00:00Z", "state": "pending",
+        }
+        html = self.client.get("/console/playlists/promo/schedule").get_data(as_text=True)
+        self.assertIn("Pending", html)
+        self.assertNotIn("Missed", html)
+
+    def test_16_playlists_list_shows_missed_badge_not_time(self):
+        self.payloads["playlist_list"] = [
+            {"name": "promo", "active": "no", "enabled": "no", "items": "3",
+             "health": "STOPPED", "destination_count": "0",
+             "scheduled": "yes", "scheduled_at": self._past_epoch(),
+             "scheduled_at_iso": "2020-01-01T00:00:00Z",
+             "schedule_state": "missed"},
+        ]
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        self.assertIn("Missed", html)
+        self.assertNotIn("2020-01-01T00:00:00Z", html)
+
+    def test_17_reschedule_still_works_when_missed(self):
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": self._past_epoch(),
+            "start_at_iso": "2020-01-01T00:00:00Z", "state": "missed",
+        }
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule",
+            data={"csrf_token": token, "iso": self._future_iso(days=3)},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(len(self.engine.mutation_calls), 1)
+        self.assertEqual(self.engine.mutation_calls[0][:2],
+                         ("playlist_schedule_set", "promo"))
+
+    def test_18_cancel_still_works_when_missed(self):
+        self.payloads[("playlist_schedule_get", "promo")] = {
+            "scheduled": "yes", "start_at": self._past_epoch(),
+            "start_at_iso": "2020-01-01T00:00:00Z", "state": "missed",
+        }
+        token = self._csrf("/console/playlists/promo/schedule")
+        rv = self.client.post(
+            "/console/playlists/promo/schedule/cancel", data={"csrf_token": token}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls,
+                         [("playlist_schedule_clear", "promo")])
+
+
+class EngineScheduleValidationTests(unittest.TestCase):
+    def _client(self):
+        return EngineClient(web_ctl=Path(__file__), bash="/bin/sh")
+
+    def test_set_rejects_non_numeric_epoch(self):
+        with self.assertRaises(EngineError) as ctx:
+            self._client().playlist_schedule_set("promo", "not-a-number", "2099-01-01T00:00:00Z")
+        self.assertEqual(ctx.exception.code, "INVALID_SCHEDULE")
+
+    def test_set_rejects_out_of_range_epoch(self):
+        with self.assertRaises(EngineError):
+            self._client().playlist_schedule_set("promo", "10", "2099-01-01T00:00:00Z")
+
+    def test_set_rejects_unsafe_iso(self):
+        with self.assertRaises(EngineError) as ctx:
+            self._client().playlist_schedule_set("promo", "4000000000", "2099-01-01 $(id)")
+        self.assertEqual(ctx.exception.code, "INVALID_SCHEDULE")
+
+    def test_set_rejects_bad_name(self):
+        with self.assertRaises(EngineError):
+            self._client().playlist_schedule_set("../evil", "4000000000", "2099-01-01T00:00:00Z")
+
+    def test_clear_rejects_bad_name(self):
+        with self.assertRaises(EngineError):
+            self._client().playlist_schedule_clear("../evil")
+
+
+class EngineSafeDeleteValidationTests(unittest.TestCase):
+    def _client(self):
+        return EngineClient(web_ctl=Path(__file__), bash="/bin/sh")
+
+    def test_relay_delete_rejects_bad_name(self):
+        with self.assertRaises(EngineError) as ctx:
+            self._client().relay_delete("../evil")
+        self.assertEqual(ctx.exception.code, "INVALID_NAME")
+
+    def test_media_delete_rejects_bad_name(self):
+        with self.assertRaises(EngineError) as ctx:
+            self._client().media_delete("../evil")
+        self.assertEqual(ctx.exception.code, "INVALID_MEDIA")
+
+    def test_media_delete_rejects_separator(self):
+        with self.assertRaises(EngineError):
+            self._client().media_delete("sub/dir.mp4")
+
 
 if __name__ == "__main__":
     unittest.main()

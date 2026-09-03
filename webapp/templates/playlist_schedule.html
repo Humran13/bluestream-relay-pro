@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Schedule - {{ name }} - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Schedule &ndash; Playlist &ldquo;{{ name }}&rdquo;</h1>
+  <p class="muted">
+    Start this playlist automatically at one future date and time. This does
+    the equivalent of pressing <strong>Start</strong> once &mdash; it never
+    schedules a Stop and does not repeat. If the playlist is already running
+    when the time arrives, nothing extra happens.
+  </p>
+</div>
+
+<section class="card">
+  {% if schedule and schedule.scheduled %}
+  <dl class="grid">
+    <dt>Scheduled start</dt>
+    <dd>
+      <time datetime="{{ schedule.start_at_iso }}" data-epoch="{{ schedule.start_at }}"
+            class="js-localtime">{{ schedule.start_at_iso }}</time>
+      <span class="muted">(UTC; shown in your time zone above)</span>
+    </dd>
+    <dt>Status</dt>
+    <dd>
+      {% if schedule.missed %}
+      <span class="badge badge-failed">Missed</span>
+      {% else %}
+      <span class="badge badge-starting">Pending</span>
+      {% endif %}
+    </dd>
+  </dl>
+  {% if schedule.missed %}
+  <p class="muted">
+    This scheduled time has already passed and the playlist was <strong>not</strong>
+    started automatically (for example, the server was offline at that instant).
+    A missed schedule is never run late. Set a new time below, or cancel it.
+  </p>
+  {% endif %}
+  <form method="post" action="{{ url_for('console.playlist_schedule_cancel', name=name) }}"
+        onsubmit="return confirm('Cancel the scheduled start for this playlist?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn btn-danger">Cancel Schedule</button>
+  </form>
+  <h2 class="section-gap">{% if schedule.missed %}Reschedule{% else %}Change schedule{% endif %}</h2>
+  {% else %}
+  <p class="muted">This playlist has no scheduled start.</p>
+  {% endif %}
+
+  <form id="schedule-form" method="post" action="{{ url_for('console.playlist_schedule_post', name=name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="iso" id="schedule-iso">
+    <input type="hidden" name="tz" id="schedule-tz">
+    <label for="schedule-when">Start date &amp; time</label>
+    <input type="datetime-local" id="schedule-when" name="when" required>
+    <p class="muted">
+      Uses your device's time zone (<span id="schedule-tz-label">detecting&hellip;</span>).
+      Must be in the future and within {{ max_horizon_days }} days.
+    </p>
+    <div class="form-actions">
+      <button type="submit" class="btn">
+        {% if schedule and schedule.scheduled %}{% if schedule.missed %}Reschedule Start{% else %}Change Schedule{% endif %}{% else %}Schedule Start{% endif %}
+      </button>
+      <a class="btn btn-secondary" href="{{ url_for('console.playlists') }}">Cancel</a>
+    </div>
+  </form>
+</section>
+
+<p><a href="{{ url_for('console.playlists') }}">&laquo; Back to Playlists</a></p>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("schedule-form");
+  var when = document.getElementById("schedule-when");
+  var isoField = document.getElementById("schedule-iso");
+  var tzField = document.getElementById("schedule-tz");
+  var tzLabel = document.getElementById("schedule-tz-label");
+  var tz = "";
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { tz = ""; }
+  tzField.value = tz;
+  tzLabel.textContent = tz || "your device time zone";
+
+  // Sensible default: one hour from now, rounded to the minute, in local time.
+  (function setDefault() {
+    var d = new Date(Date.now() + 3600 * 1000);
+    d.setSeconds(0, 0);
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    when.value = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  })();
+
+  form.addEventListener("submit", function (event) {
+    // Interpret the datetime-local value in the BROWSER's local time zone and
+    // submit a full ISO-8601 instant WITH offset; the server normalizes to UTC.
+    var v = when.value;
+    if (!v) { return; }
+    var local = new Date(v);
+    if (isNaN(local.getTime())) { return; }
+    isoField.value = local.toISOString(); // always UTC 'Z' form
+  });
+  // (Already-scheduled instants are localized by the shared base.html script.)
+})();
+</script>
+{% endblock %}

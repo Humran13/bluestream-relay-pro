@@ -70,6 +70,10 @@ fi
 # --- stop and disable all instances ---
 printf 'Stopping and disabling relays/playlists...\n'
 systemctl stop 'bluestream-relay@*' 'bluestream-playlist@*' 2>/dev/null || true
+# GUI-8A: also disable any one-time playlist start timers.
+for u in $(systemctl list-unit-files --plain --no-legend 'bluestream-schedule-*.timer' 2>/dev/null | awk '{print $1}'); do
+    systemctl disable --now "$u" 2>/dev/null || true
+done
 for u in $(systemctl list-unit-files --plain --no-legend 'bluestream-relay@*.service' 'bluestream-playlist@*.service' 2>/dev/null | awk '{print $1}'); do
     systemctl disable "$u" 2>/dev/null || true
 done
@@ -77,6 +81,8 @@ done
 # --- remove systemd units and drop-ins ---
 rm -f /etc/systemd/system/bluestream-relay@.service
 rm -f /etc/systemd/system/bluestream-playlist@.service
+rm -f /etc/systemd/system/bluestream-playlist-start@.service
+rm -f /etc/systemd/system/bluestream-schedule-*.timer
 rm -rf /etc/systemd/system/bluestream-relay@*.service.d
 rm -rf /etc/systemd/system/bluestream-playlist@*.service.d
 systemctl daemon-reload 2>/dev/null || true

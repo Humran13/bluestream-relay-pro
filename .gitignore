@@ -13,3 +13,8 @@ Thumbs.db
 *.bak
 *.log
 *.tar.gz
+
+# Python bytecode / test caches
+__pycache__/
+*.pyc
+.pytest_cache/

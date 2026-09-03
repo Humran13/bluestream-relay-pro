@@ -25,6 +25,9 @@ PLAYLIST_NAME=""
 PLAYLIST_ENABLED="no"
 PLAYLIST_FILES=()
 PLAYLIST_CONF_FILE=""
+# Phase 1B: comma-separated destination IDs attached to this playlist (IDs
+# only, never a stream key / secret / publish URL).  Empty = none.
+PLAYLIST_DESTINATIONS=""
 # Ordered list of prepared (normalized/cached) artifact paths, one per
 # PLAYLIST_FILES entry. Populated by playlist_prepare_all (root runtime).
 PLAYLIST_ARTIFACTS=()
@@ -71,6 +74,7 @@ playlist_load_config() {
     PLAYLIST_NAME=""
     PLAYLIST_ENABLED="no"
     PLAYLIST_FILES=()
+    PLAYLIST_DESTINATIONS=""
     PLAYLIST_CONF_FILE="$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist"
     [ -f "$PLAYLIST_CONF_FILE" ] || return 1
     local line key val
@@ -84,8 +88,9 @@ playlist_load_config() {
                 val="${line#*=}"
                 key="${key#"${key%%[![:space:]]*}"}"
                 case "$key" in
-                    NAME)    PLAYLIST_NAME="$val" ;;
-                    ENABLED) PLAYLIST_ENABLED="$val" ;;
+                    NAME)         PLAYLIST_NAME="$val" ;;
+                    ENABLED)      PLAYLIST_ENABLED="$val" ;;
+                    DESTINATIONS) PLAYLIST_DESTINATIONS="$val" ;;
                 esac
                 ;;
             *)
@@ -101,6 +106,11 @@ playlist_load_config() {
     done < "$PLAYLIST_CONF_FILE"
     [ "$PLAYLIST_NAME" = "$name" ] || return 1
     case "$PLAYLIST_ENABLED" in yes|no) ;; *) return 1 ;; esac
+    PLAYLIST_DESTINATIONS="${PLAYLIST_DESTINATIONS//[[:space:]]/}"
+    case "$PLAYLIST_DESTINATIONS" in
+        '') ;;
+        *[!a-z0-9,_-]*) return 1 ;;
+    esac
     return 0
 }
 
@@ -116,6 +126,7 @@ playlist_save_config() {
         printf '# BlueStream Relay Pro playlist (root-only)\n'
         printf 'NAME=%s\n' "$PLAYLIST_NAME"
         printf 'ENABLED=%s\n' "$PLAYLIST_ENABLED"
+        printf 'DESTINATIONS=%s\n' "$PLAYLIST_DESTINATIONS"
         printf '# entries (media files from %s)\n' "$BLUESTREAM_MEDIA_DIR"
         local f
         for f in "${PLAYLIST_FILES[@]}"; do
@@ -705,6 +716,40 @@ playlist_remove() {
     bs_ok "Playlist '$name' removed"
 }
 
+# Authoritative NON-interactive playlist delete for the web console (GUI-5A).
+# Allowed ONLY when the unit is DEFINITIVELY stopped.  Removes ONLY this
+# playlist's own runtime/config artifacts: its root-only .playlist config, its
+# generated concat file, its preparation marker, and its HLS output directory.
+# NEVER deletes managed media originals, destination definitions, or the shared
+# normalization cache (unreferenced cache artifacts simply become reclaimable
+# through the existing "Clear Unused Cache" workflow).
+#   0 ok | 1 invalid name | 2 not found | 3 not definitively stopped |
+#   4 config removal failed
+playlist_delete() {
+    local name="$1" unit
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    playlist_exists "$name" || return 2
+    unit="$(bs_unit playlist "$name")"
+    bs_unit_definitively_stopped "$unit" || return 3
+    # GUI-8A: also cancel any one-time start schedule for this playlist so no
+    # orphaned timer/sidecar is left behind.
+    if command -v schedule_clear >/dev/null 2>&1; then
+        schedule_clear "$name" >/dev/null 2>&1 || true
+    else
+        rm -f "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.schedule"
+        rm -f "/etc/systemd/system/bluestream-schedule-$name.timer"
+    fi
+    systemctl disable "$unit" 2>/dev/null || true
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    rm -f "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist" || return 4
+    rm -f "$BLUESTREAM_RUN_DIR/$name.concat.txt"
+    rm -f "$BLUESTREAM_RUN_DIR/$name.prepare"
+    rm -rf "$(bs_hls_dir_for playlist "$name")"
+    systemctl daemon-reload 2>/dev/null || true
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Listing / contents / URLs / logs / health
 # ---------------------------------------------------------------------------
@@ -813,8 +858,39 @@ playlist_create_items() {
     done
     PLAYLIST_NAME="$name"
     PLAYLIST_ENABLED="no"
+    PLAYLIST_DESTINATIONS=""
     mkdir -p "$BLUESTREAM_PLAYLIST_CONF_DIR" 2>/dev/null || return 8
     playlist_save_config "$name" || return 8
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Phase 1B: playlist destination attachments (IDs only; never a stream key).
+# Changing attachments only rewrites the playlist config - the systemd unit is
+# never touched, so a running playlist is not restarted.
+# ---------------------------------------------------------------------------
+
+# Print the attached destination IDs for a playlist, one per line.
+# Returns 1 only when the playlist config cannot be read.
+playlist_get_destinations() {
+    local name="$1"
+    playlist_load_config "$name" || return 1
+    bs_csv_fields "$PLAYLIST_DESTINATIONS"
+    return 0
+}
+
+# Replace a playlist's attached destinations with the normalized ID list in
+# "$2" (comma-separated, may be empty to detach all).  Never restarts the unit.
+#   0 ok | 1 invalid name | 2 playlist not found | 3 invalid destination list |
+#   4 config save failed
+playlist_set_destinations() {
+    local name="$1" csv="${2:-}"
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    playlist_load_config "$name" || return 2
+    bs_dest_attach_normalize "$csv" || return 3
+    PLAYLIST_DESTINATIONS="$DEST_ATTACH_CSV"
+    playlist_save_config "$name" || return 4
     return 0
 }
 
@@ -860,6 +936,7 @@ playlist_create() {
     PLAYLIST_NAME="$name"
     PLAYLIST_ENABLED="no"
     PLAYLIST_FILES=()
+    PLAYLIST_DESTINATIONS=""
     playlist_save_config "$name"
     bs_ok "Playlist '$name' created."
     bs_info "Add media files with: Add Video to Playlist"

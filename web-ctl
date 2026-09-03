@@ -57,11 +57,52 @@
 #   web-ctl destination_enable  <id>
 #   web-ctl destination_disable <id>
 #   web-ctl destination_delete  <id>
+#       (refused while the destination is attached to a stream or playlist)
 #
-# The six lifecycle actions, the create/import operations above, and the two
-# cache operations are the ONLY write operations at any layer.  No
-# configuration editing, deletion, or user-management operations exist beyond
-# these.
+# GUI-4 Phase 1B destination ATTACHMENTS.  A stream/playlist config carries at
+# most one bounded line "DESTINATIONS=id1,id2,..." listing destination IDs
+# ONLY (never a stream key/secret/publish URL).  Attaching or detaching only
+# rewrites that config line - it NEVER starts, stops or restarts a running
+# stream/playlist, and never begins an outgoing RTMP push (that is Phase 1C):
+#
+#   web-ctl relay_destinations_get     <name>
+#   web-ctl relay_destinations_set     <name> <id,id,...|"">
+#   web-ctl playlist_destinations_get  <name>
+#   web-ctl playlist_destinations_set  <name> <id,id,...|"">
+#
+# GUI-5A SAFE DELETE.  Each deletes EXACTLY the named target's own artifacts
+# and ONLY when it is definitively stopped (relay/playlist) or unreferenced
+# (media).  Never a generic path, never a recursive directory removal, never a
+# symlink follow.  Media originals used by a stream/playlist and destination
+# definitions are never touched:
+#
+#   web-ctl relay_delete    <name>   (only when the unit is definitively stopped)
+#   web-ctl playlist_delete <name>   (only when the unit is definitively stopped)
+#   web-ctl media_delete    <file>   (only when no stream/playlist references it)
+#
+# GUI-6A EDIT SOURCE URL.  Changes ONLY the source URL (and the derived TYPE)
+# of a URL-backed stream, and ONLY while it is definitively stopped.  Media-
+# backed streams are rejected.  Name, attachments, note, loop, restart delay
+# and the public M3U8 / Web Player URLs are preserved.  The stream is NOT
+# started:
+#
+#   web-ctl relay_set_source <name> <url>
+#
+# GUI-8A ONE-TIME PLAYLIST START SCHEDULE.  Performs the equivalent of pressing
+# "Start" on a playlist at ONE validated future instant (UTC epoch, browser-
+# supplied ISO string is display-only and independently re-validated).  Never
+# schedules a Stop, never recurs, never schedules an arbitrary command - a
+# root-generated systemd timer targets a fixed oneshot service that runs the
+# authoritative playlist_start:
+#
+#   web-ctl playlist_schedule_get   <name>
+#   web-ctl playlist_schedule_set   <name> <epoch-utc> <iso-display>
+#   web-ctl playlist_schedule_clear <name>
+#
+# The lifecycle actions, the create/import operations above, the two cache
+# operations, the four attachment setters and the three safe-delete operations
+# are the ONLY write operations at any layer.  No generic configuration
+# editing, arbitrary-path deletion, or user-management operations exist.
 #
 # Output contract:
 #   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
@@ -126,7 +167,7 @@ fi
 # business logic (version, config parsing, discovery, service state, health)
 # stays in these libraries; Python is used only for JSON serialization.
 # ---------------------------------------------------------------------------
-for _bs_lib in common health probe relay playlist media destinations; do
+for _bs_lib in common health probe relay playlist media destinations schedule; do
     # shellcheck source=lib/common.sh
     . "$BS_ROOT/lib/$_bs_lib.sh" || {
         printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
@@ -174,7 +215,7 @@ wc_op_version() {
 
 wc_op_snapshot() {
     local ver hostname_str uptime_str domain https_conf nginx_active
-    local ffmpeg_ok ffprobe_ok relay_count playlist_count
+    local ffmpeg_ok ffprobe_ok ytdlp_ok relay_count playlist_count
     ver="$(bs_version)"
     hostname_str="$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'unknown')"
     uptime_str="$(uptime -p 2>/dev/null || uptime 2>/dev/null || printf 'unknown')"
@@ -184,6 +225,9 @@ wc_op_snapshot() {
     if [ "$(systemctl is-active nginx 2>/dev/null)" = "active" ]; then nginx_active="yes"; fi
     ffmpeg_ok="no";  command -v ffmpeg  >/dev/null 2>&1 && ffmpeg_ok="yes"
     ffprobe_ok="no"; command -v ffprobe >/dev/null 2>&1 && ffprobe_ok="yes"
+    # GUI-7A: yt-dlp is required only for TYPE=youtube (public YouTube Live)
+    # sources; every other source type works without it.
+    ytdlp_ok="no";   command -v yt-dlp  >/dev/null 2>&1 && ytdlp_ok="yes"
     relay_count="$(relay_list_names 2>/dev/null | grep -c . || true)"
     playlist_count="$(playlist_list_names 2>/dev/null | grep -c . || true)"
     [ -n "$relay_count" ] || relay_count="0"
@@ -197,13 +241,14 @@ wc_op_snapshot() {
         printf 'nginx_active\0%s\0'      "$nginx_active"
         printf 'ffmpeg_available\0%s\0'  "$ffmpeg_ok"
         printf 'ffprobe_available\0%s\0' "$ffprobe_ok"
+        printf 'ytdlp_available\0%s\0'   "$ytdlp_ok"
         printf 'relay_count\0%s\0'       "$relay_count"
         printf 'playlist_count\0%s\0'    "$playlist_count"
     } | wc_json object
 }
 
 wc_op_relay_list() {
-    local name unit active enabled type health source
+    local name unit active enabled type health source destcount
     for name in $(relay_list_names 2>/dev/null); do
         # Names come from validated relay config discovery ([a-z0-9_-]{1,48});
         # the for-loop word split is therefore safe.
@@ -215,28 +260,33 @@ wc_op_relay_list() {
         type="unknown"
         health="UNKNOWN"
         source=""
+        destcount="0"
         if relay_load_config "$name" 2>/dev/null; then
             type="$RELAY_TYPE"
             # Display-only representation: credentials/query tokens are redacted.
             source="$(bs_redact_url "$RELAY_URL")"
+            # Phase 1B: number of attached destinations (IDs only; the stream
+            # key is never loaded or emitted here).
+            destcount="$(bs_dest_attach_count "$RELAY_DESTINATIONS")"
             if health_state relay "$name" 2>/dev/null; then
                 health="$HEALTH_STATE"
             fi
         fi
         {
             printf '\0'
-            printf 'name\0%s\0'    "$name"
-            printf 'type\0%s\0'    "$type"
-            printf 'source\0%s\0'  "$source"
-            printf 'active\0%s\0'  "$active"
-            printf 'enabled\0%s\0' "$enabled"
-            printf 'health\0%s\0'  "$health"
+            printf 'name\0%s\0'              "$name"
+            printf 'type\0%s\0'              "$type"
+            printf 'source\0%s\0'            "$source"
+            printf 'active\0%s\0'            "$active"
+            printf 'enabled\0%s\0'           "$enabled"
+            printf 'health\0%s\0'            "$health"
+            printf 'destination_count\0%s\0' "$destcount"
         }
     done | wc_json array
 }
 
 wc_op_playlist_list() {
-    local name unit active enabled items health
+    local name unit active enabled items health destcount scheduled sched_at sched_iso sched_state
     for name in $(playlist_list_names 2>/dev/null); do
         # Names come from validated playlist config discovery ([a-z0-9_-]{1,48}).
         unit="$(bs_unit playlist "$name")"
@@ -247,16 +297,33 @@ wc_op_playlist_list() {
         # GUI-1D.1: item count and health re-use the engine's own config loader
         # and health classifier (never a second implementation in the web layer).
         items="0"
-        if playlist_load_config "$name" 2>/dev/null; then items="${#PLAYLIST_FILES[@]}"; fi
+        destcount="0"
+        if playlist_load_config "$name" 2>/dev/null; then
+            items="${#PLAYLIST_FILES[@]}"
+            destcount="$(bs_dest_attach_count "$PLAYLIST_DESTINATIONS")"
+        fi
         health="UNKNOWN"
         if health_state playlist "$name" 2>/dev/null; then health="$HEALTH_STATE"; fi
+        # GUI-8A: one-time start schedule (if any). Never emits anything but the
+        # absolute instant, its display string, and whether it is still pending
+        # or has already been missed (the instant has passed).
+        scheduled="no"; sched_at=""; sched_iso=""; sched_state=""
+        if schedule_load "$name" 2>/dev/null; then
+            scheduled="yes"; sched_at="$SCHEDULE_START_AT"; sched_iso="$SCHEDULE_START_AT_ISO"
+            sched_state="$(schedule_state "$SCHEDULE_START_AT")"
+        fi
         {
             printf '\0'
-            printf 'name\0%s\0'    "$name"
-            printf 'active\0%s\0'  "$active"
-            printf 'enabled\0%s\0' "$enabled"
-            printf 'items\0%s\0'   "$items"
-            printf 'health\0%s\0'  "$health"
+            printf 'name\0%s\0'               "$name"
+            printf 'active\0%s\0'             "$active"
+            printf 'enabled\0%s\0'            "$enabled"
+            printf 'items\0%s\0'              "$items"
+            printf 'health\0%s\0'             "$health"
+            printf 'destination_count\0%s\0'  "$destcount"
+            printf 'scheduled\0%s\0'          "$scheduled"
+            printf 'scheduled_at\0%s\0'       "$sched_at"
+            printf 'scheduled_at_iso\0%s\0'   "$sched_iso"
+            printf 'schedule_state\0%s\0'     "$sched_state"
         }
     done | wc_json array
 }
@@ -477,7 +544,7 @@ wc_op_lifecycle() {
 # is started.
 # ---------------------------------------------------------------------------
 wc_op_destination_list() {
-    local name display platform url enabled haskey
+    local name display platform url enabled haskey attached
     for name in $(dest_list_names 2>/dev/null); do
         # Names come from validated destination config discovery ([a-z0-9_-]);
         # the for-loop word split is therefore safe.
@@ -489,6 +556,10 @@ wc_op_destination_list() {
             enabled="$DEST_ENABLED"
             if [ -n "$DEST_STREAM_KEY" ]; then haskey="yes"; fi
         fi
+        # Phase 1B: how many streams/playlists this destination is attached to
+        # (0 = safe to delete). Never emits the stream key.
+        attached="$(dest_attached_targets "$name" 2>/dev/null | grep -c . || true)"
+        [ -n "$attached" ] || attached="0"
         {
             printf '\0'
             printf 'name\0%s\0'            "$name"
@@ -497,8 +568,77 @@ wc_op_destination_list() {
             printf 'server_url\0%s\0'      "$url"
             printf 'enabled\0%s\0'         "$enabled"
             printf 'has_stream_key\0%s\0'  "$haskey"
+            printf 'attached_count\0%s\0'  "$attached"
         }
     done | wc_json array
+}
+
+# ---------------------------------------------------------------------------
+# GUI-4 Phase 1B: destination attachments. Read the attached IDs for a target
+# and replace them with a validated, bounded, de-duplicated ID list. IDs ONLY
+# ever cross this boundary - never a stream key/secret/publish URL. No systemd
+# unit is touched, so a running stream/playlist is never restarted, and no
+# outgoing RTMP push is started (that is Phase 1C).
+# ---------------------------------------------------------------------------
+wc_op_target_destinations_get() {
+    local kind="$1" name="${2:-}" id
+    bs_valid_name "$name" || wc_fail "invalid ${kind} name" "INVALID_NAME"
+    if [ "$kind" = "relay" ]; then
+        relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+        {
+            while IFS= read -r id; do
+                [ -n "$id" ] || continue
+                printf '\0'
+                printf 'name\0%s\0' "$id"
+            done < <(relay_get_destinations "$name" 2>/dev/null || true)
+        } | wc_json array
+    else
+        playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+        {
+            while IFS= read -r id; do
+                [ -n "$id" ] || continue
+                printf '\0'
+                printf 'name\0%s\0' "$id"
+            done < <(playlist_get_destinations "$name" 2>/dev/null || true)
+        } | wc_json array
+    fi
+}
+
+wc_op_target_destinations_set() {
+    local kind="$1" name="${2:-}" csv="${3-}" rc
+    bs_valid_name "$name" || wc_fail "invalid ${kind} name" "INVALID_NAME"
+    if [ "$kind" = "relay" ]; then
+        relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    else
+        playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    fi
+    # Independently normalize/validate the ID list here (safe grammar, existing
+    # destinations, no duplicates, bounded count) before the engine setter runs.
+    bs_dest_attach_normalize "$csv"
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid destination id" "INVALID_DESTINATION" ;;
+        2) wc_fail "the same destination cannot be attached twice" "DUPLICATE_DESTINATION" ;;
+        3) wc_fail "one or more destinations do not exist" "DESTINATION_NOT_FOUND" ;;
+        4) wc_fail "too many destinations (maximum is $BLUESTREAM_MAX_TARGET_DESTINATIONS)" "TOO_MANY_DESTINATIONS" ;;
+        *) wc_fail "invalid destination list" "INVALID_DESTINATION" ;;
+    esac
+    if [ "$kind" = "relay" ]; then
+        ( relay_set_destinations "$name" "$DEST_ATTACH_CSV" ) >/dev/null 2>&1
+    else
+        ( playlist_set_destinations "$name" "$DEST_ATTACH_CSV" ) >/dev/null 2>&1
+    fi
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid ${kind} name" "INVALID_NAME" ;;
+        2) wc_fail "${kind} not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "invalid destination list" "INVALID_DESTINATION" ;;
+        *) wc_fail "could not update attachments" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0count\0%s\0' \
+        "${kind}_destinations_set" "$name" "$(bs_dest_attach_count "$DEST_ATTACH_CSV")" | wc_json object
 }
 
 wc_op_destination_create() {
@@ -559,8 +699,141 @@ wc_op_destination_delete() {
     dest_exists "$name" || wc_fail "destination not found: $name" "NOT_FOUND"
     ( dest_delete "$name" ) >/dev/null 2>&1
     rc=$?
-    [ "$rc" -eq 0 ] || wc_fail "destination deletion failed" "OPERATION_FAILED"
+    case "$rc" in
+        0) ;;
+        2) wc_fail "destination not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "Destination is attached to a stream or playlist. Detach it before deleting." "DESTINATION_ATTACHED" ;;
+        *) wc_fail "destination deletion failed" "OPERATION_FAILED" ;;
+    esac
     printf 'operation\0%s\0name\0%s\0' "destination_delete" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
+# GUI-5A: safe delete for a stream, a playlist, or a managed-media file.
+# Each operation is fixed, takes EXACTLY one validated name, deletes only that
+# target's own artifacts, and fails closed with a controlled code.
+# ---------------------------------------------------------------------------
+wc_op_relay_delete() {
+    local name="${1:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    ( relay_delete "$name" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        2) wc_fail "stream not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "This stream is not stopped. Stop it, then delete it." "NOT_STOPPED" ;;
+        *) wc_fail "stream deletion failed" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "relay_delete" "$name" | wc_json object
+}
+
+wc_op_playlist_delete() {
+    local name="${1:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid playlist name" "INVALID_NAME"
+    playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    ( playlist_delete "$name" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        2) wc_fail "playlist not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "This playlist is not stopped. Stop it, then delete it." "NOT_STOPPED" ;;
+        *) wc_fail "playlist deletion failed" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "playlist_delete" "$name" | wc_json object
+}
+
+wc_op_media_delete() {
+    local name="${1:-}" rc
+    bs_valid_media_name "$name" || wc_fail "invalid media file name" "INVALID_MEDIA"
+    ( media_delete "$name" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid media file name" "INVALID_MEDIA" ;;
+        2) wc_fail "media file not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "media entry is not a regular file" "NOT_REGULAR" ;;
+        4) wc_fail "This media file is used by a stream or playlist. Remove those first." "MEDIA_REFERENCED" ;;
+        *) wc_fail "media deletion failed" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "media_delete" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
+# GUI-6A: edit the source URL of a stopped, URL-backed stream. EXACTLY name +
+# URL. The URL is treated strictly as data (validated, never interpolated
+# into shell code). Media-backed streams and running streams are refused.
+# ---------------------------------------------------------------------------
+wc_op_relay_set_source() {
+    local name="${1:-}" url="${2:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    [ -n "$url" ] || wc_fail "missing source URL" "MISSING_URL"
+    bs_valid_url "$url" || wc_fail "unsupported or malformed source URL" "INVALID_URL"
+    bs_classify_source_type "$url" >/dev/null || wc_fail "unsupported source URL scheme" "UNSUPPORTED_URL"
+    ( relay_set_source "$name" "$url" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        2) wc_fail "stream not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "This stream is not stopped. Stop it, then edit the source." "NOT_STOPPED" ;;
+        4) wc_fail "This stream uses managed media, not a URL. Its source cannot be edited here." "MEDIA_BACKED" ;;
+        5) wc_fail "unsupported or malformed source URL" "INVALID_URL" ;;
+        *) wc_fail "could not update the stream source" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "relay_set_source" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
+# GUI-8A: one-time playlist start schedule. get is read-only; set takes a
+# validated future UTC epoch + a display-only ISO string; clear is idempotent.
+# A root-generated systemd timer targets a FIXED oneshot service - never a
+# browser-supplied command.
+# ---------------------------------------------------------------------------
+wc_op_playlist_schedule_get() {
+    local name="${1:-}" scheduled="no" at="" iso="" state=""
+    bs_valid_name "$name" || wc_fail "invalid playlist name" "INVALID_NAME"
+    playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    if schedule_load "$name" 2>/dev/null; then
+        scheduled="yes"; at="$SCHEDULE_START_AT"; iso="$SCHEDULE_START_AT_ISO"
+        # "pending" (still in the future) or "missed" (the instant has passed).
+        state="$(schedule_state "$SCHEDULE_START_AT")"
+    fi
+    {
+        printf 'scheduled\0%s\0'        "$scheduled"
+        printf 'start_at\0%s\0'         "$at"
+        printf 'start_at_iso\0%s\0'     "$iso"
+        printf 'state\0%s\0'            "$state"
+    } | wc_json object
+}
+
+wc_op_playlist_schedule_set() {
+    local name="${1:-}" epoch="${2:-}" iso="${3:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid playlist name" "INVALID_NAME"
+    playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    bs_valid_epoch "$epoch" || wc_fail "invalid schedule timestamp" "INVALID_SCHEDULE"
+    bs_valid_schedule_iso "$iso" || wc_fail "invalid schedule timestamp" "INVALID_SCHEDULE"
+    ( schedule_set "$name" "$epoch" "$iso" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) wc_fail "invalid playlist name" "INVALID_NAME" ;;
+        2) wc_fail "playlist not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "invalid schedule timestamp" "INVALID_SCHEDULE" ;;
+        4) wc_fail "The scheduled time is in the past." "SCHEDULE_IN_PAST" ;;
+        *) wc_fail "could not schedule the playlist start" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0start_at\0%s\0' "playlist_schedule_set" "$name" "$epoch" | wc_json object
+}
+
+wc_op_playlist_schedule_clear() {
+    local name="${1:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid playlist name" "INVALID_NAME"
+    playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    ( schedule_clear "$name" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "could not cancel the schedule" "OPERATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0' "playlist_schedule_clear" "$name" | wc_json object
 }
 
 # ---------------------------------------------------------------------------
@@ -674,8 +947,85 @@ wc_dispatch() {
                 relay_create_media) wc_op_relay_create_media "$name" "$value2" ;;
             esac
             ;;
+        relay_destinations_get|playlist_destinations_get)
+            # Phase 1B: EXACTLY operation + one validated target name (argv == 2).
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing target name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                relay_destinations_get)    wc_op_target_destinations_get relay "$name" ;;
+                playlist_destinations_get) wc_op_target_destinations_get playlist "$name" ;;
+            esac
+            ;;
+        relay_destinations_set|playlist_destinations_set)
+            # Phase 1B: EXACTLY operation + target name + ONE ID-list value
+            # (argv == 3). The list value may be the empty string (detach all)
+            # but must still be present as its own argv element.
+            if [ "$argcount" -lt 3 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt 3 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                relay_destinations_set)    wc_op_target_destinations_set relay "$name" "$value2" ;;
+                playlist_destinations_set) wc_op_target_destinations_set playlist "$name" "$value2" ;;
+            esac
+            ;;
+        relay_delete|playlist_delete|media_delete)
+            # GUI-5A: EXACTLY operation + one validated name (argv == 2). The
+            # operation is fixed here; the engine function deletes only that
+            # one target's own artifacts and fails closed otherwise.
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing target name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                relay_delete)    wc_op_relay_delete "$name" ;;
+                playlist_delete) wc_op_playlist_delete "$name" ;;
+                media_delete)    wc_op_media_delete "$name" ;;
+            esac
+            ;;
+        relay_set_source)
+            # GUI-6A: EXACTLY operation + name + URL (argv == 3).
+            if [ "$argcount" -lt 3 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt 3 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            wc_op_relay_set_source "$name" "$value2"
+            ;;
+        playlist_schedule_get|playlist_schedule_clear)
+            # GUI-8A: EXACTLY operation + one validated playlist name (argv == 2).
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing playlist name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                playlist_schedule_get)   wc_op_playlist_schedule_get "$name" ;;
+                playlist_schedule_clear) wc_op_playlist_schedule_clear "$name" ;;
+            esac
+            ;;
+        playlist_schedule_set)
+            # GUI-8A: EXACTLY operation + name + epoch + iso (argv == 4).
+            if [ "$argcount" -lt 4 ]; then
+                wc_fail "missing argument" "MISSING_ARGUMENT"
+            fi
+            if [ "$argcount" -gt 4 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            wc_op_playlist_schedule_set "$name" "$value2" "${4:-}"
+            ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

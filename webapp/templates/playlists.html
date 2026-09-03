@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Playlists - BlueStream Relay Pro{% endblock %}
 {% block content %}
-<h1>Playlists</h1>
-<p><a class="btn" href="{{ url_for('console.playlists_create') }}">+ Create Playlist</a></p>
+<div class="toolbar">
+  <h1>Playlists</h1>
+  <a class="btn" href="{{ url_for('console.playlists_create') }}">+ Create Playlist</a>
+</div>
 
 {% if engine_unavailable %}
 <p class="error">Playlist information is temporarily unavailable.</p>
@@ -10,9 +12,10 @@
 
 {% if playlists %}
 <section class="card">
+  <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Name</th><th>Items</th><th>Active</th><th>Enabled</th><th>Health</th><th>Links</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Items</th><th>Active</th><th>Enabled</th><th>Health</th><th>Schedule</th><th>Links</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for playlist in playlists %}
@@ -22,6 +25,17 @@
         <td>{{ playlist.get('active') }}</td>
         <td>{{ playlist.get('enabled') }}</td>
         <td><span class="badge badge-{{ playlist.get('health')|lower }}">{{ playlist.get('health') }}</span></td>
+        <td>
+          {% if playlist.get('scheduled') == 'yes' %}
+          {% if playlist.get('schedule_state') == 'missed' %}
+          <span class="badge badge-failed" title="Scheduled time passed; not started automatically">Missed</span>
+          {% else %}
+          <span class="badge badge-starting"><time datetime="{{ playlist.get('scheduled_at_iso') }}" class="js-localtime">{{ playlist.get('scheduled_at_iso') }}</time></span>
+          {% endif %}
+          {% else %}
+          <span class="muted">&mdash;</span>
+          {% endif %}
+        </td>
         <td class="links">
           {% if playlist.get('hls_url') %}
           <div class="link-row">
@@ -52,15 +66,24 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm">Restart</button>
           </form>
+          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_destinations', name=playlist.get('name')) }}">Destinations ({{ playlist.get('destination_count') or 0 }})</a>
+          <a class="btn btn-sm btn-secondary" href="{{ url_for('console.playlist_schedule', name=playlist.get('name')) }}">Schedule</a>
+          <form method="post" action="{{ url_for('console.playlist_delete_post', name=playlist.get('name')) }}"
+                onsubmit="return confirm('Delete this playlist? This removes its configuration and output (media files are kept) and cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-danger"
+                    {% if playlist.get('active') == 'yes' %}disabled title="Stop the playlist before deleting it."{% endif %}>Delete</button>
+          </form>
         </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% else %}
 <section class="card">
-  <p class="muted">No playlists yet. <a href="{{ url_for('console.playlists_create') }}">Create your first playlist</a>.</p>
+  <p class="empty-state">No playlists yet. <a href="{{ url_for('console.playlists_create') }}">Create your first playlist</a> from two or more media files.</p>
 </section>
 {% endif %}
 

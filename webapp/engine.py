@@ -37,6 +37,30 @@ ALLOWED_OPERATIONS = frozenset(
     }
 )
 
+# GUI-4 Phase 1B: read-only operations that take EXACTLY one validated target
+# name.  Never return a stream key/secret - only destination IDs.
+ALLOWED_READ_OPERATIONS = frozenset(
+    {
+        "relay_destinations_get",
+        "playlist_destinations_get",
+        # GUI-8A: one-time playlist start schedule (absolute instant only).
+        "playlist_schedule_get",
+    }
+)
+
+# GUI-4 Phase 1B: maximum destinations attachable to one stream/playlist.
+# Mirrors BLUESTREAM_MAX_TARGET_DESTINATIONS in lib/destinations.sh.
+MAX_TARGET_DESTINATIONS = 32
+
+# GUI-8A: absolute epoch bounds for a one-time schedule (mirrors
+# BLUESTREAM_SCHEDULE_EPOCH_MIN/MAX in lib/schedule.sh): ~[2020, 2100).
+SCHEDULE_EPOCH_MIN = 1577836800
+SCHEDULE_EPOCH_MAX = 4102444800
+
+# GUI-8A: display-only ISO-8601 string - bounded, safe subset only. The
+# authoritative instant is the epoch, revalidated engine-side.
+_SCHEDULE_ISO_RE = re.compile(r"^[0-9T:.Zz+-]{1,40}$")
+
 # GUI-1B.1/GUI-1C.1: exactly these controlled write operations, and nothing else.
 ALLOWED_MUTATION_OPERATIONS = frozenset(
     {
@@ -64,8 +88,44 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "destination_enable",
         "destination_disable",
         "destination_delete",
+        # GUI-4 Phase 1B: replace a stream/playlist's attached destination IDs
+        # (IDs only; never a stream key). No systemd unit is touched, so a
+        # running stream/playlist is never restarted; no outgoing RTMP push is
+        # started (that is Phase 1C).
+        "relay_destinations_set",
+        "playlist_destinations_set",
+        # GUI-5A: safe delete. Each removes ONLY the one named target's own
+        # artifacts and only when it is definitively stopped (relay/playlist)
+        # or unreferenced (media). No generic/arbitrary-path deletion exists.
+        "relay_delete",
+        "playlist_delete",
+        "media_delete",
+        # GUI-6A: edit the source URL of a stopped, URL-backed stream. Only the
+        # URL (and its derived type) change; the stream is not started.
+        "relay_set_source",
+        # GUI-8A: one-time playlist start schedule (set/replace + cancel). A
+        # root-generated systemd timer targets a FIXED oneshot service; no
+        # browser-supplied command is ever scheduled.
+        "playlist_schedule_set",
+        "playlist_schedule_clear",
     }
 )
+
+
+def valid_schedule_epoch(value) -> bool:
+    """True only for a bounded, digits-only future-capable UTC epoch string."""
+    if not isinstance(value, str) or not value.isdigit():
+        return False
+    try:
+        n = int(value)
+    except ValueError:
+        return False
+    return SCHEDULE_EPOCH_MIN <= n <= SCHEDULE_EPOCH_MAX
+
+
+def valid_schedule_iso(value) -> bool:
+    """True only for a bounded, safe-charset ISO-8601 display string."""
+    return isinstance(value, str) and bool(_SCHEDULE_ISO_RE.match(value))
 
 # GUI-1D.1: shared ceiling for playlist entries (mirrors
 # BLUESTREAM_PLAYLIST_MAX_ITEMS in lib/playlist.sh). Bounds privileged argv and
@@ -92,6 +152,22 @@ ALLOWED_UPLOAD_EXTENSIONS = (".mp4", ".mkv", ".mov", ".webm", ".m4v", ".ts")
 def valid_target_name(name) -> bool:
     """Return True only for names accepted by the engine's ``bs_valid_name``."""
     return isinstance(name, str) and bool(_NAME_RE.match(name))
+
+
+def _ids_to_csv(ids) -> str:
+    """Normalize a destination-ID collection to a bare comma-separated string.
+
+    Accepts a list/tuple of IDs or an already-joined string. Whitespace is
+    removed and empty entries are dropped; the value is validated element by
+    element in ``_validate_mutation_values`` before any subprocess runs.
+    """
+    if isinstance(ids, str):
+        parts = ids.split(",")
+    elif isinstance(ids, (list, tuple)):
+        parts = list(ids)
+    else:
+        parts = []
+    return ",".join(str(p).strip() for p in parts if str(p).strip())
 
 
 def valid_media_name(name) -> bool:
@@ -124,7 +200,7 @@ def valid_source_url(url) -> bool:
 # These are organisation/display values only - never authoritative platform
 # endpoints.  Mirrors DEST_PLATFORM_ALLOW in lib/destinations.sh.
 ALLOWED_PLATFORMS = frozenset(
-    {"youtube", "facebook", "twitch", "rumble", "instagram", "custom"}
+    {"youtube", "facebook", "twitch", "rumble", "instagram", "tiktok", "custom"}
 )
 
 # Destination field bounds (mirror lib/destinations.sh DEST_*_MAX).
@@ -320,6 +396,47 @@ class EngineClient:
             raise EngineError("engine returned an invalid response envelope")
         return doc["data"]
 
+    def read(self, operation: str, *values, timeout: float | None = None):
+        """Run one read-only web-ctl operation that takes validated arguments.
+
+        Like :meth:`call` but for operations that need a target name (e.g.
+        ``relay_destinations_get``). The operation string is fixed by the
+        calling explicit method (never browser input) and must be in
+        ALLOWED_READ_OPERATIONS; every value is validated before any subprocess
+        runs. Returns the ``data`` payload; never raw process output.
+        """
+        if operation not in ALLOWED_READ_OPERATIONS:
+            raise EngineError("unsupported operation: %r" % operation)
+        validated = self._validate_read_values(operation, values)
+        if self._production:
+            cmd = [SUDO_PATH, "-n", INSTALLED_WEB_CTL, operation, *validated]
+        else:
+            if not self._web_ctl.is_file():
+                raise EngineError("engine bridge not found")
+            cmd = [self._bash, str(self._web_ctl), operation, *validated]
+        rc, text = self._run_argv(cmd, timeout)
+        if rc != 0:
+            raise EngineError("engine command failed")
+        try:
+            doc = json.loads(text)
+        except ValueError as exc:
+            raise EngineError("engine returned invalid JSON") from exc
+        if not isinstance(doc, dict) or doc.get("ok") is not True or "data" not in doc:
+            raise EngineError("engine returned an invalid response envelope")
+        return doc["data"]
+
+    @staticmethod
+    def _validate_read_values(operation: str, values: tuple) -> list:
+        if operation in (
+            "relay_destinations_get",
+            "playlist_destinations_get",
+            "playlist_schedule_get",
+        ):
+            if len(values) != 1 or not valid_target_name(values[0]):
+                raise EngineError("invalid target name", code="INVALID_NAME")
+            return list(values)
+        raise EngineError("unsupported operation: %r" % operation)
+
     def _mutation(
         self,
         operation: str,
@@ -374,15 +491,22 @@ class EngineClient:
         if operation in (
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
+            # GUI-5A: safe delete of one stopped stream / stopped playlist.
+            "relay_delete", "playlist_delete",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
             return list(values)
-        if operation == "media_import_staged":
+        if operation in ("media_import_staged", "media_delete"):
             if len(values) != 1 or not valid_media_name(values[0]):
-                raise EngineError("invalid upload id", code="INVALID_STAGING")
+                code = (
+                    "INVALID_MEDIA"
+                    if operation == "media_delete"
+                    else "INVALID_STAGING"
+                )
+                raise EngineError("invalid media name", code=code)
             return list(values)
-        if operation == "relay_create_url":
+        if operation in ("relay_create_url", "relay_set_source"):
             if len(values) != 2:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
             name, url = values
@@ -472,11 +596,74 @@ class EngineClient:
             if enabled not in ("yes", "no"):
                 raise EngineError("invalid enabled value", code="INVALID_ENABLED")
             return [name, display, platform, url, enabled]
+        if operation in ("relay_destinations_set", "playlist_destinations_set"):
+            # GUI-4 Phase 1B: EXACTLY a validated target name + ONE ID-list
+            # value (comma-separated destination IDs, possibly empty to detach
+            # all). Every ID is re-validated against the engine name rule,
+            # de-duplicated and bounded BEFORE any subprocess starts, so an
+            # arbitrary path/secret/URL can never reach web-ctl.
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, raw = values
+            if not valid_target_name(name):
+                raise EngineError("invalid target name", code="INVALID_NAME")
+            if not isinstance(raw, str):
+                raise EngineError("invalid destination list", code="INVALID_DESTINATION")
+            ids = [part for part in raw.replace(" ", "").split(",") if part]
+            if len(ids) > MAX_TARGET_DESTINATIONS:
+                raise EngineError(
+                    "too many destinations (maximum is %d)" % MAX_TARGET_DESTINATIONS,
+                    code="TOO_MANY_DESTINATIONS",
+                )
+            seen = set()
+            for dest_id in ids:
+                if not valid_target_name(dest_id):
+                    raise EngineError(
+                        "invalid destination id", code="INVALID_DESTINATION"
+                    )
+                if dest_id in seen:
+                    raise EngineError(
+                        "the same destination cannot be attached twice",
+                        code="DUPLICATE_DESTINATION",
+                    )
+                seen.add(dest_id)
+            return [name, ",".join(ids)]
+        if operation == "playlist_schedule_set":
+            if len(values) != 3:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, epoch, iso = values
+            if not valid_target_name(name):
+                raise EngineError("invalid playlist name", code="INVALID_NAME")
+            if not valid_schedule_epoch(epoch):
+                raise EngineError(
+                    "invalid schedule timestamp", code="INVALID_SCHEDULE"
+                )
+            if not valid_schedule_iso(iso):
+                raise EngineError(
+                    "invalid schedule timestamp", code="INVALID_SCHEDULE"
+                )
+            return [name, epoch, iso]
+        if operation == "playlist_schedule_clear":
+            if len(values) != 1 or not valid_target_name(values[0]):
+                raise EngineError("invalid playlist name", code="INVALID_NAME")
+            return list(values)
         raise EngineError("unsupported operation: %r" % operation)
 
     # ------------------------------------------------------------------
     # GUI-1B.1: the ONLY lifecycle entry points (operation fixed per method).
     # ------------------------------------------------------------------
+    def relay_delete(self, name: str):
+        """Delete a definitively-stopped stream and only its own artifacts."""
+        return self._mutation("relay_delete", name)
+
+    def playlist_delete(self, name: str):
+        """Delete a definitively-stopped playlist and only its own artifacts."""
+        return self._mutation("playlist_delete", name)
+
+    def media_delete(self, name: str):
+        """Delete one unreferenced managed-media file (no arbitrary paths)."""
+        return self._mutation("media_delete", name)
+
     def relay_start(self, name: str):
         return self._mutation("relay_start", name)
 
@@ -503,6 +690,25 @@ class EngineClient:
 
     def relay_create_url(self, name: str, url: str):
         return self._mutation("relay_create_url", name, url)
+
+    def relay_set_source(self, name: str, url: str):
+        """Edit the source URL of a stopped, URL-backed stream (never starts it)."""
+        return self._mutation("relay_set_source", name, url)
+
+    # ------------------------------------------------------------------
+    # GUI-8A: one-time playlist start schedule.
+    # ------------------------------------------------------------------
+    def playlist_schedule_get(self, name: str):
+        """Return {scheduled, start_at, start_at_iso} for a playlist."""
+        return self.read("playlist_schedule_get", name)
+
+    def playlist_schedule_set(self, name: str, epoch: str, iso: str):
+        """Schedule (or replace) a one-time start at an absolute UTC instant."""
+        return self._mutation("playlist_schedule_set", name, str(epoch), iso)
+
+    def playlist_schedule_clear(self, name: str):
+        """Cancel a playlist's one-time start schedule (idempotent)."""
+        return self._mutation("playlist_schedule_clear", name)
 
     def relay_create_media(self, name: str, media: str):
         return self._mutation("relay_create_media", name, media)
@@ -566,3 +772,26 @@ class EngineClient:
 
     def destination_delete(self, name: str):
         return self._mutation("destination_delete", name)
+
+    # ------------------------------------------------------------------
+    # GUI-4 Phase 1B: destination <-> stream/playlist attachments. The setter
+    # only rewrites the target's config; it never starts/stops/restarts the
+    # unit and never begins an outgoing RTMP push (Phase 1C).
+    # ------------------------------------------------------------------
+    def relay_destinations_get(self, name: str) -> list:
+        """Return the list of destination IDs attached to a relay."""
+        data = self.read("relay_destinations_get", name)
+        return data if isinstance(data, list) else []
+
+    def playlist_destinations_get(self, name: str) -> list:
+        """Return the list of destination IDs attached to a playlist."""
+        data = self.read("playlist_destinations_get", name)
+        return data if isinstance(data, list) else []
+
+    def relay_destinations_set(self, name: str, ids):
+        """Replace a relay's attached destination IDs (list/str; empty detaches)."""
+        return self._mutation("relay_destinations_set", name, _ids_to_csv(ids))
+
+    def playlist_destinations_set(self, name: str, ids):
+        """Replace a playlist's attached destination IDs (list/str; empty detaches)."""
+        return self._mutation("playlist_destinations_set", name, _ids_to_csv(ids))
