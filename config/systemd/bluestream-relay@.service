@@ -35,7 +35,11 @@ RestrictRealtime=true
 
 # Narrow writable paths. FFmpeg publishes over the private local RTMP socket
 # only; nginx-rtmp (www-data) owns the HLS output tree, so FFmpeg requires no
-# writable filesystem path.
+# writable filesystem path. The run directory is writable ONLY for the root
+# bootstrap, which clears/writes the resolver start-failure diagnostic
+# (<name>.resolve-fail, 0600 root) before dropping privileges.
+ReadWritePaths=/var/lib/bluestream/run
+
 SyslogIdentifier=bluestream-relay-%i
 StandardOutput=journal
 StandardError=journal

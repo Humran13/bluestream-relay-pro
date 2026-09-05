@@ -13,8 +13,12 @@
     <p class="muted">Use a normal name - spaces and punctuation are converted to a safe internal ID automatically (e.g. &quot;My Promo Stream&quot; becomes &quot;my-promo-stream&quot;).</p>
     <label for="url">Source URL</label>
     <input type="text" id="url" name="url" required maxlength="4096" placeholder="https://example.com/live/index.m3u8">
-    <p class="muted">Supported sources: HLS (.m3u8), HTTP/HTTPS media, RTMP / RTMPS, RTSP, and public YouTube Live pages (youtube.com/watch, youtube.com/live, youtu.be). The URL is stored as data only and never executed by the shell.</p>
-    <p class="muted">YouTube Live: paste the public watch/live page URL. BlueStream re-resolves the current playable stream each time you press Start (requires yt-dlp on the server; public streams only).</p>
+    <p class="muted">Direct sources are handed straight to FFmpeg: HLS (.m3u8), HTTP/HTTPS media, RTMP / RTMPS and RTSP. The URL is stored as data only and never executed by the shell.</p>
+    <label class="checkbox">
+      <input type="checkbox" name="kind" value="webpage" id="kind-webpage">
+      This URL is a public webpage, not a direct media URL
+    </label>
+    <p class="muted">Public webpage sources supported by the installed resolver (yt-dlp) &mdash; for example YouTube Live pages (youtube.com/watch, youtube.com/live, youtu.be) or other public streaming pages. BlueStream re-resolves the current playable media URL each time you press Start (public content only). A plain website that the resolver does not support will not work.</p>
     <button type="submit" class="btn">Create</button>
   </form>
 </section>

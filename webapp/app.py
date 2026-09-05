@@ -72,6 +72,7 @@ from webapp.engine import (
     valid_media_name,
     valid_source_url,
     valid_target_name,
+    valid_webpage_url,
 )
 from webapp import metrics
 from webapp.security import (
@@ -220,6 +221,9 @@ TYPE_LABELS = {
     # GUI-7A: a public YouTube Live page URL, resolved to a playable media URL
     # by yt-dlp at start time (the page URL is what is stored).
     "youtube": "YouTube Live",
+    # GUI-7B: any other public webpage supported by the installed resolver
+    # (yt-dlp); the playable media URL is resolved fresh at Start time.
+    "web-resolver": "Public Webpage",
 }
 
 # GUI-4 Phase 1A: display labels for the stable internal platform values.
@@ -254,6 +258,28 @@ _UPLOAD_ERROR_MESSAGES = {
     "IMPORT_FAILED": "Media import failed. Please try again.",
     "STAGING_NOT_FOUND": "The uploaded file could not be found for import.",
     "INVALID_STAGING": "The upload was rejected.",
+}
+
+# GUI-7B: safe high-level start diagnostics for public-webpage (resolver)
+# sources. Written engine-side (run-relay.sh) as a single bounded code per
+# relay; raw yt-dlp output, signed URLs, cookies and secrets never reach the
+# browser. Every message is operator-facing and intentionally non-technical.
+RESOLVE_ERROR_MESSAGES = {
+    "RESOLVER_UNAVAILABLE": (
+        "The public webpage resolver (yt-dlp) is not installed on this server. "
+        "Public webpage sources need it; direct media sources are unaffected."
+    ),
+    "UNSUPPORTED_PAGE": (
+        "This source is not a supported public webpage URL. Only public pages "
+        "supported by the installed resolver can be used."
+    ),
+    "RESOLUTION_INVALID": (
+        "The resolver did not return exactly one usable public media URL."
+    ),
+    "RESOLUTION_FAILED": (
+        "Could not resolve the public webpage into a playable media URL. The "
+        "source may be offline or unavailable to the public."
+    ),
 }
 
 
@@ -1071,6 +1097,9 @@ def _register_console_routes(app: Flask) -> None:
                 name = relay.get("name") or ""
                 relay["hls_url"] = relay_hls_url(snapshot, name)
                 relay["player_url"] = relay_player_url(snapshot, name)
+                # GUI-7B: safe high-level resolver start-failure diagnostic.
+                code = relay.get("resolve_error") or ""
+                relay["resolve_message"] = RESOLVE_ERROR_MESSAGES.get(code, "")
         return render_template(
             "streams.html",
             relays=relays,
@@ -1096,6 +1125,40 @@ def _register_console_routes(app: Flask) -> None:
             flash("We could not create a safe stream name from that value.", "error")
             return redirect(url_for("console.streams_create"))
         url = (request.form.get("url") or "").strip()
+        # Source-ingest classification: DIRECT media/stream URLs (HLS, HTTP
+        # media, RTMP/RTMPS/RTSP) are validated as direct sources and handed
+        # straight to FFmpeg. A source the operator explicitly marks as a
+        # PUBLIC WEBPAGE (HTML that needs resolving) is validated separately
+        # and created with resolver semantics (TYPE=youtube / web-resolver);
+        # its playable media URL is resolved fresh at Start time and never
+        # stored. YouTube page URLs remain auto-detected either way.
+        if request.form.get("kind") == "webpage":
+            if not valid_webpage_url(url):
+                flash(
+                    "Public webpage sources must be http:// or https:// page "
+                    "URLs. Use a direct media URL (HLS, RTMP/RTMPS, RTSP, "
+                    "HTTP media) for anything FFmpeg can open directly.",
+                    "error",
+                )
+                return redirect(url_for("console.streams_create"))
+            engine = current_app.extensions["bluestream_engine"]
+            try:
+                engine.relay_create_webpage(name, url)
+            except EngineError as exc:
+                current_app.logger.warning(
+                    "relay_create_webpage '%s' failed: %s", name, exc
+                )
+                if exc.code == "ALREADY_EXISTS":
+                    flash("A stream named '%s' already exists." % name, "error")
+                else:
+                    flash(_create_error_message(exc, "Stream creation failed."), "error")
+                return redirect(url_for("console.streams_create"))
+            flash(
+                "Stream '%s' created as a public webpage source. It is stopped "
+                "- press Start to resolve and begin." % name,
+                "success",
+            )
+            return redirect(url_for("console.streams"))
         if not valid_source_url(url):
             flash(
                 "Unsupported or malformed source URL. Supported: http(s), rtmp(s), rtsp.",
@@ -1438,9 +1501,13 @@ def _register_console_routes(app: Flask) -> None:
             # deleted and the artifacts are conservatively still protected.
             blocked = _cache_status_int(result.get("blocked"))
         if freed_count > 0:
+            # Professional, authoritative success message: freed_count is the
+            # privileged engine's own deletion count (never subtracted or
+            # guessed client-side), and the redirected GET that follows re-reads
+            # fresh cache status so the pre-clear numbers never re-render.
             flash(
-                "Cleared %s from the playlist cache (%d files)."
-                % (human_size(freed_bytes), freed_count),
+                "Cleared %d unused cache file%s (%s)."
+                % (freed_count, "" if freed_count == 1 else "s", human_size(freed_bytes)),
                 "success",
             )
         elif blocked:
@@ -1930,6 +1997,8 @@ def _register_console_routes(app: Flask) -> None:
             name=name,
             current_source=relay.get("source") or "",
             type_label=TYPE_LABELS.get(rtype, rtype),
+            type_code=rtype,
+            resolver_backed=(rtype in ("youtube", "web-resolver")),
             media_backed=(rtype == "local-file"),
             running=(relay.get("active") == "yes"),
         )
@@ -1942,6 +2011,42 @@ def _register_console_routes(app: Flask) -> None:
             flash("That stream name is not valid.", "error")
             return redirect(url_for("console.streams"))
         url = (request.form.get("url") or "").strip()
+        # A public-webpage edit keeps resolver semantics (TYPE stays youtube /
+        # web-resolver); a direct-media edit re-derives the type from the URL.
+        if request.form.get("kind") == "webpage":
+            if not valid_webpage_url(url):
+                flash(
+                    "Public webpage sources must be http:// or https:// page URLs.",
+                    "error",
+                )
+                return redirect(url_for("console.relay_edit_source", name=name))
+            engine = current_app.extensions["bluestream_engine"]
+            try:
+                engine.relay_set_source_webpage(name, url)
+            except EngineError as exc:
+                current_app.logger.warning(
+                    "relay_set_source_webpage '%s' failed: %s", name, exc
+                )
+                messages = {
+                    "NOT_STOPPED": "Stop the stream before editing its source.",
+                    "MEDIA_BACKED": (
+                        "This stream uses managed media, not a URL - its source "
+                        "cannot be edited here."
+                    ),
+                    "NOT_FOUND": "That stream no longer exists.",
+                    "INVALID_URL": "Unsupported or malformed webpage URL.",
+                }
+                flash(
+                    messages.get(exc.code or "", "The source could not be updated."),
+                    "error",
+                )
+                return redirect(url_for("console.relay_edit_source", name=name))
+            flash(
+                "Source updated for stream '%s' (public webpage). It is still "
+                "stopped - press Start when ready." % name,
+                "success",
+            )
+            return redirect(url_for("console.streams"))
         if not valid_source_url(url):
             flash(
                 "Unsupported or malformed source URL. Supported: http(s), "

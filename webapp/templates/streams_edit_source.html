@@ -34,12 +34,27 @@
     <label for="url">New source URL</label>
     <input type="text" id="url" name="url" required maxlength="4096"
            placeholder="https://example.com/live/index.m3u8" autocomplete="off">
+    {% if resolver_backed %}
+    <label class="checkbox">
+      <input type="checkbox" name="kind" value="webpage" id="kind-webpage" checked>
+      Keep this a public webpage source (resolved by yt-dlp at Start)
+    </label>
+    <p class="muted">
+      This stream currently uses a public webpage source ({{ type_label or 'resolver' }}).
+      Leave the box checked to keep resolver behaviour; uncheck it to switch to a
+      direct media URL (HLS, HTTP/HTTPS media, RTMP / RTMPS, RTSP). Public webpage
+      sources supported by the installed resolver (yt-dlp) only &mdash; a plain
+      website the resolver does not support will not work. The playable URL is
+      resolved fresh at Start time and is never stored.
+    </p>
+    {% else %}
     <p class="muted">
       Supported: HLS (.m3u8), HTTP/HTTPS media, RTMP / RTMPS, RTSP. The type is
       re-detected from the new URL. The URL is stored as data only and never
       executed by the server. The full current URL is hidden above to protect
       any embedded credentials &mdash; enter the complete new URL.
     </p>
+    {% endif %}
     <div class="form-actions">
       <button type="submit" class="btn">Save Source</button>
       <a class="btn btn-secondary" href="{{ url_for('console.streams') }}">Cancel</a>

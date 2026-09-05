@@ -25,7 +25,7 @@
         <td class="source">{{ relay.get('source') or '-' }}</td>
         <td>{{ relay.get('active') }}</td>
         <td>{{ relay.get('enabled') }}</td>
-        <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span></td>
+        <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span>{% if relay.get('resolve_message') and relay.get('health') == 'FAILED' %}<p class="muted">{{ relay.get('resolve_message') }}</p>{% endif %}</td>
         <td class="links">
           {% if relay.get('hls_url') %}
           <div class="link-row">

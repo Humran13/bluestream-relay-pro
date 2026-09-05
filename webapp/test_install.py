@@ -518,6 +518,10 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "media_delete",
                     # GUI-6A: edit one stopped, URL-backed stream's source URL
                     "relay_set_source",
+                    # GUI-7B: create/edit a PUBLIC WEBPAGE source (resolved by
+                    # yt-dlp at Start time; never a direct media URL)
+                    "relay_create_webpage",
+                    "relay_set_source_webpage",
                     # GUI-8A: one-time playlist start schedule (set/replace +
                     # cancel); a root-generated timer targets a FIXED oneshot
                     # service, never a browser-supplied command
@@ -546,7 +550,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_destinations_get", "relay_destinations_set",
             "playlist_destinations_get", "playlist_destinations_set",
             "relay_delete", "playlist_delete", "media_delete",
-            "relay_set_source",
+            "relay_set_source", "relay_set_source_webpage",
+            "relay_create_webpage",
             "playlist_schedule_get", "playlist_schedule_set",
             "playlist_schedule_clear",
         ):
@@ -578,6 +583,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_delete", "playlist_delete", "media_delete",
             # GUI-6A edit one stopped, URL-backed stream's source URL
             "relay_set_source",
+            # GUI-7B create/edit a PUBLIC WEBPAGE source
+            "relay_create_webpage", "relay_set_source_webpage",
             # GUI-8A one-time playlist start schedule
             "playlist_schedule_get", "playlist_schedule_set",
             "playlist_schedule_clear",

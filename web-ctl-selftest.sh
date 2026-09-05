@@ -559,9 +559,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10.10 GUI-7A public YouTube Live classification (engine-side, no network):
-#       a YouTube page URL classifies as its own TYPE, look-alike hosts do
-#       not, and the resolver in lib/youtube.sh uses a fixed argv (no eval).
+# 10.10 GUI-7A/7B public-webpage source classification (engine-side, no
+#      network): a YouTube page URL classifies as its own TYPE, look-alike
+#      hosts do not, explicit public-webpage URLs become TYPE=web-resolver,
+#      and the generic resolver in lib/resolver.sh uses a fixed argv (no
+#      eval / bash -c / cookies / config) for BOTH youtube and web-resolver.
 # ---------------------------------------------------------------------------
 _ok=1
 ( . "$SCRIPT_DIR/lib/common.sh" 2>/dev/null
@@ -571,10 +573,15 @@ _ok=1
   bs_is_youtube_url "http://www.youtube.com/watch?v=x"    && exit 1
   [ "$(bs_classify_source_type 'https://www.youtube.com/live/x')" = "youtube" ] || exit 1
   [ "$(bs_classify_source_type 'https://cdn.example/a.m3u8')" = "remote-hls" ] || exit 1
+  [ "$(bs_webpage_type 'https://www.youtube.com/live/x')" = "youtube" ] || exit 1
+  [ "$(bs_webpage_type 'https://www.twitch.tv/somechannel')" = "web-resolver" ] || exit 1
+  [ "$(bs_webpage_type 'https://cdn.example/a.m3u8')" = "web-resolver" ] || exit 1
+  bs_webpage_type "rtmp://host/app/key" && exit 1
+  bs_webpage_type "https://x/a b"       && exit 1
   exit 0 ) || _ok=0
 # The resolver must never build a shell string / use eval / read cookies.
 # Inspect executable lines only (comments describe the safety rules verbatim).
-_yt_code="$(grep -v '^[[:space:]]*#' "$SCRIPT_DIR/lib/youtube.sh")"
+_yt_code="$(grep -v '^[[:space:]]*#' "$SCRIPT_DIR/lib/resolver.sh")"
 printf '%s' "$_yt_code" | grep -q 'eval ' && _ok=0
 printf '%s' "$_yt_code" | grep -qE 'bash -c|sh -c' && _ok=0
 printf '%s' "$_yt_code" | grep -q -- '--no-cookies' || _ok=0
@@ -582,9 +589,34 @@ printf '%s' "$_yt_code" | grep -q -- '--ignore-config' || _ok=0
 printf '%s' "$_yt_code" | grep -q 'local -a cmd=(' || _ok=0
 unset _yt_code
 if [ "$_ok" -eq 1 ]; then
-    check "youtube: classification + resolver is fixed-argv, no-cookies, no eval" 0
+    check "public-webpage sources: classification + generic resolver is fixed-argv, no-cookies, no eval" 0
 else
-    check "youtube: classification + resolver is fixed-argv, no-cookies, no eval" 1
+    check "public-webpage sources: classification + generic resolver is fixed-argv, no-cookies, no eval" 1
+fi
+unset _ok
+
+# ---------------------------------------------------------------------------
+# 10.10b public-webpage create/edit plumbing (static): run-relay.sh resolves
+#       BOTH youtube and web-resolver with the generic resolver and writes a
+#       bounded root-only diagnostic on failure; relay.sh / web-ctl expose the
+#       two fixed ops. The resolved playable URL is never persisted anywhere.
+# ---------------------------------------------------------------------------
+_ok=1
+grep -q 'youtube|web-resolver)' "$SCRIPT_DIR/config/systemd/run-relay.sh" || _ok=0
+grep -q 'bs_web_resolve "$RELAY_URL"' "$SCRIPT_DIR/config/systemd/run-relay.sh" || _ok=0
+grep -q '\.resolve-fail' "$SCRIPT_DIR/config/systemd/run-relay.sh" || _ok=0
+grep -q 'relay_set_page_source()' "$SCRIPT_DIR/lib/relay.sh" || _ok=0
+grep -q 'bs_webpage_type()' "$SCRIPT_DIR/lib/common.sh" || _ok=0
+grep -q 'web-resolver' "$SCRIPT_DIR/lib/common.sh" || _ok=0
+grep -q 'relay_create_webpage' "$SCRIPT_DIR/web-ctl" || _ok=0
+grep -q 'relay_set_source_webpage' "$SCRIPT_DIR/web-ctl" || _ok=0
+# No resolved playable URL is ever written back into a relay config by the
+# wrapper (it never calls the config writer).
+grep -q 'relay_save_config' "$SCRIPT_DIR/config/systemd/run-relay.sh" && _ok=0
+if [ "$_ok" -eq 1 ]; then
+    check "public-webpage plumbing: youtube+web-resolver resolve at start, never persisted" 0
+else
+    check "public-webpage plumbing: youtube+web-resolver resolve at start, never persisted" 1
 fi
 unset _ok
 

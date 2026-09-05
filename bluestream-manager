@@ -424,9 +424,9 @@ cli_relay_add() {
             *) bs_die "Unknown option: $1" ;;
         esac
     done
-    [ -n "$name" ] || bs_die "Usage: relay add <name> --type <type> --url <url> [--loop yes|no] [--restart-sec N] [--start] [--enable]"
-    [ -n "$type" ] || bs_die "--type is required (local-file|remote-hls|rtmp|rtmps|rtsp|http-file)"
+    [ -n "$type" ] || bs_die "Usage: relay add <name> --type <type> --url <url> [--loop yes|no] [--restart-sec N] [--start] [--enable]"
     [ -n "$url" ] || bs_die "--url is required"
+    # Valid types: local-file|remote-hls|rtmp|rtmps|rtsp|http-file|youtube|web-resolver
     bs_valid_name "$name" || bs_die "Invalid relay name"
     bs_valid_type "$type" || bs_die "Invalid relay type: $type"
     case "$loop" in yes|no) ;; *) bs_die "Invalid --loop (yes|no)" ;; esac

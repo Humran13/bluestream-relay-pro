@@ -32,6 +32,13 @@
 #   web-ctl relay_create_media <name> <mediafile>
 #   web-ctl media_import_staged <stagingid>
 #
+# GUI-7B public-WEBPAGE source operations (the operator explicitly marks the
+# http(s) URL as a public webpage; the playable media URL is resolved fresh at
+# Start time by run-relay.sh with yt-dlp and is NEVER stored):
+#
+#   web-ctl relay_create_webpage     <name> <public-http(s)-page-url>
+#   web-ctl relay_set_source_webpage <name> <public-http(s)-page-url>
+#
 # GUI-1D.1 playlist creation (fixed argv only; the operation is fixed, the
 # name and every media item are independently revalidated, nothing is ever
 # interpolated into shell code):
@@ -248,7 +255,7 @@ wc_op_snapshot() {
 }
 
 wc_op_relay_list() {
-    local name unit active enabled type health source destcount
+    local name unit active enabled type health source destcount resolve_error
     for name in $(relay_list_names 2>/dev/null); do
         # Names come from validated relay config discovery ([a-z0-9_-]{1,48});
         # the for-loop word split is therefore safe.
@@ -268,6 +275,12 @@ wc_op_relay_list() {
             # Phase 1B: number of attached destinations (IDs only; the stream
             # key is never loaded or emitted here).
             destcount="$(bs_dest_attach_count "$RELAY_DESTINATIONS")"
+            # Source-ingest diagnostics: a bounded, high-level start-failure
+            # code written by run-relay.sh when a public-webpage source could
+            # not be resolved (never raw yt-dlp stderr, never a signed URL).
+            resolve_error=""
+            [ -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" ] && \
+                resolve_error="$(head -n 1 "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null | tr -dc 'A-Z_' | cut -c1-64)"
             if health_state relay "$name" 2>/dev/null; then
                 health="$HEALTH_STATE"
             fi
@@ -281,6 +294,7 @@ wc_op_relay_list() {
             printf 'enabled\0%s\0'           "$enabled"
             printf 'health\0%s\0'            "$health"
             printf 'destination_count\0%s\0' "$destcount"
+            printf 'resolve_error\0%s\0'     "$resolve_error"
         }
     done | wc_json array
 }
@@ -361,6 +375,28 @@ wc_op_relay_create_url() {
     rc=$?
     [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
     printf 'operation\0%s\0name\0%s\0type\0%s\0' "relay_create_url" "$name" "$type" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
+# Create a stream from a PUBLIC WEBPAGE source (a URL the operator explicitly
+# marked as a webpage that needs resolving, never a direct media URL). EXACTLY
+# name + http(s) URL. The URL is treated strictly as data (validated, never
+# interpolated into shell code). The stored TYPE is 'youtube' for known YouTube
+# hosts and 'web-resolver' for every other supported public page; the playable
+# media URL is resolved fresh at Start time by run-relay.sh and is NEVER
+# persisted. Direct media URLs must go through relay_create_url instead.
+# ---------------------------------------------------------------------------
+wc_op_relay_create_webpage() {
+    local name="${1:-}" url="${2:-}" type="" rc
+    [ -n "$name" ] || wc_fail "missing stream name" "MISSING_TARGET"
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    [ -n "$url" ] || wc_fail "missing source URL" "MISSING_URL"
+    type="$(bs_webpage_type "$url")" || wc_fail "unsupported webpage URL (public webpage sources must be http:// or https:// pages)" "INVALID_URL"
+    relay_exists "$name" && wc_fail "stream already exists: $name" "ALREADY_EXISTS"
+    ( relay_create "$name" "$type" "$url" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0type\0%s\0' "relay_create_webpage" "$name" "$type" | wc_json object
 }
 
 wc_op_relay_create_media() {
@@ -785,6 +821,31 @@ wc_op_relay_set_source() {
 }
 
 # ---------------------------------------------------------------------------
+# GUI-6A/B: edit the source of a stopped stream while KEEPING it a PUBLIC
+# WEBPAGE source (resolver semantics preserved; TYPE stays 'youtube' for known
+# YouTube hosts or becomes the generic 'web-resolver' for other supported
+# pages). EXACTLY name + http(s) URL. Media-backed streams and running streams
+# are refused; the playable URL is never stored.
+# ---------------------------------------------------------------------------
+wc_op_relay_set_source_webpage() {
+    local name="${1:-}" url="${2:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    bs_webpage_type "$url" >/dev/null || wc_fail "unsupported or malformed webpage URL" "INVALID_URL"
+    ( relay_set_page_source "$name" "$url" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        2) wc_fail "stream not found: $name" "NOT_FOUND" ;;
+        3) wc_fail "This stream is not stopped. Stop it, then edit the source." "NOT_STOPPED" ;;
+        4) wc_fail "This stream uses managed media, not a URL. Its source cannot be edited here." "MEDIA_BACKED" ;;
+        5) wc_fail "unsupported or malformed webpage URL" "INVALID_URL" ;;
+        *) wc_fail "could not update the stream source" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0' "relay_set_source_webpage" "$name" | wc_json object
+}
+
+# ---------------------------------------------------------------------------
 # GUI-8A: one-time playlist start schedule. get is read-only; set takes a
 # validated future UTC epoch + a display-only ISO string; clear is idempotent.
 # A root-generated systemd timer targets a FIXED oneshot service - never a
@@ -934,7 +995,7 @@ wc_dispatch() {
                 *) wc_op_destination_state "$operation" "$name" ;;
             esac
             ;;
-        relay_create_url|relay_create_media)
+        relay_create_url|relay_create_media|relay_create_webpage)
             # EXACTLY operation + two arguments (shell argv count == 3).
             if [ "$argcount" -lt 3 ]; then
                 wc_fail "missing argument" "MISSING_ARGUMENT"
@@ -943,8 +1004,9 @@ wc_dispatch() {
                 wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
             fi
             case "$operation" in
-                relay_create_url)  wc_op_relay_create_url  "$name" "$value2" ;;
-                relay_create_media) wc_op_relay_create_media "$name" "$value2" ;;
+                relay_create_url)     wc_op_relay_create_url     "$name" "$value2" ;;
+                relay_create_media)   wc_op_relay_create_media   "$name" "$value2" ;;
+                relay_create_webpage) wc_op_relay_create_webpage "$name" "$value2" ;;
             esac
             ;;
         relay_destinations_get|playlist_destinations_get)
@@ -991,15 +1053,18 @@ wc_dispatch() {
                 media_delete)    wc_op_media_delete "$name" ;;
             esac
             ;;
-        relay_set_source)
-            # GUI-6A: EXACTLY operation + name + URL (argv == 3).
+        relay_set_source|relay_set_source_webpage)
+            # GUI-6A/B: EXACTLY operation + name + URL (argv == 3).
             if [ "$argcount" -lt 3 ]; then
                 wc_fail "missing argument" "MISSING_ARGUMENT"
             fi
             if [ "$argcount" -gt 3 ]; then
                 wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
             fi
-            wc_op_relay_set_source "$name" "$value2"
+            case "$operation" in
+                relay_set_source)        wc_op_relay_set_source        "$name" "$value2" ;;
+                relay_set_source_webpage) wc_op_relay_set_source_webpage "$name" "$value2" ;;
+            esac
             ;;
         playlist_schedule_get|playlist_schedule_clear)
             # GUI-8A: EXACTLY operation + one validated playlist name (argv == 2).
@@ -1025,7 +1090,7 @@ wc_dispatch() {
             wc_op_playlist_schedule_set "$name" "$value2" "${4:-}"
             ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|relay_create_webpage|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|relay_set_source_webpage|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

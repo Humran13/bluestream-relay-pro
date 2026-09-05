@@ -103,6 +103,13 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         # GUI-6A: edit the source URL of a stopped, URL-backed stream. Only the
         # URL (and its derived type) change; the stream is not started.
         "relay_set_source",
+        # GUI-7B / source-ingest: create or edit a PUBLIC WEBPAGE source
+        # (http(s) HTML page resolved to a playable media URL by yt-dlp at
+        # Start time - never a direct media URL). The stored TYPE is 'youtube'
+        # for known YouTube hosts and 'web-resolver' for other supported
+        # public pages; the resolved playable URL is never persisted.
+        "relay_create_webpage",
+        "relay_set_source_webpage",
         # GUI-8A: one-time playlist start schedule (set/replace + cancel). A
         # root-generated systemd timer targets a FIXED oneshot service; no
         # browser-supplied command is ever scheduled.
@@ -186,6 +193,29 @@ def valid_source_url(url) -> bool:
     if len(url) > 4096:
         return False
     if not url.startswith(_SUPPORTED_URL_SCHEMES):
+        return False
+    for ch in url:
+        o = ord(ch)
+        if o < 0x21 or o == 0x7F:
+            return False
+    if any(ch in url for ch in '`"\\<>{}[]'):
+        return False
+    return True
+
+
+def valid_webpage_url(url) -> bool:
+    """Treat a PUBLIC WEBPAGE source URL strictly as data (never executed).
+
+    A webpage source must be a plain http(s) page URL - HTML that a resolver
+    (yt-dlp) turns into a playable media URL at Start time. Direct media/stream
+    schemes (rtmp/rtmps/rtsp) and local paths are never webpage sources.
+    Mirrors ``bs_webpage_type`` in lib/common.sh.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    if len(url) > 4096:
+        return False
+    if not (url.startswith("http://") or url.startswith("https://")):
         return False
     for ch in url:
         o = ord(ch)
@@ -515,6 +545,21 @@ class EngineClient:
             if not valid_source_url(url):
                 raise EngineError("unsupported or malformed source URL", code="INVALID_URL")
             return [name, url]
+        if operation in ("relay_create_webpage", "relay_set_source_webpage"):
+            # PUBLIC WEBPAGE source: exactly name + one http(s) page URL. The
+            # playable media URL is resolved engine-side at Start time and is
+            # never stored; the page URL travels only as validated argv data.
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, url = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_webpage_url(url):
+                raise EngineError(
+                    "unsupported or malformed webpage URL",
+                    code="INVALID_URL",
+                )
+            return [name, url]
         if operation == "relay_create_media":
             if len(values) != 2:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
@@ -691,9 +736,17 @@ class EngineClient:
     def relay_create_url(self, name: str, url: str):
         return self._mutation("relay_create_url", name, url)
 
+    def relay_create_webpage(self, name: str, url: str):
+        """Create a PUBLIC WEBPAGE source stream (resolved to media at Start)."""
+        return self._mutation("relay_create_webpage", name, url)
+
     def relay_set_source(self, name: str, url: str):
         """Edit the source URL of a stopped, URL-backed stream (never starts it)."""
         return self._mutation("relay_set_source", name, url)
+
+    def relay_set_source_webpage(self, name: str, url: str):
+        """Edit a stopped stream's source while keeping it a PUBLIC WEBPAGE."""
+        return self._mutation("relay_set_source_webpage", name, url)
 
     # ------------------------------------------------------------------
     # GUI-8A: one-time playlist start schedule.

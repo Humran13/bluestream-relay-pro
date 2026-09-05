@@ -32,19 +32,52 @@ bs_load_server_conf
 relay_load_config "$NAME" || exit 1
 relay_config_validate || exit 1
 
-# GUI-7A: a TYPE=youtube relay stores the PUBLIC YouTube *page* URL, which is
-# HTML - not a media stream. Resolve the CURRENT playable media URL fresh on
-# every start with yt-dlp. Nothing is stored back; fails closed if yt-dlp is
-# missing or the page cannot be resolved as public content.
+# GUI-7A / source-ingest: a TYPE=youtube or TYPE=web-resolver relay stores a
+# PUBLIC WEBPAGE *page* URL, which is HTML - not a media stream. Resolve the
+# CURRENT playable media URL fresh on every start with yt-dlp (public content
+# only; fixed argv; no cookies/config/eval). Nothing is stored back; the
+# config keeps the original public page URL and is re-resolved on every start.
+# Direct media sources (remote-hls/http-file/rtmp/rtmps/rtsp/local-file) never
+# enter this path and work with or without yt-dlp.
 RELAY_RESOLVED_URL=""
-if [ "$RELAY_TYPE" = "youtube" ]; then
-    # shellcheck source=lib/youtube.sh
-    source "$LIBDIR/youtube.sh" || exit 1
-    RELAY_RESOLVED_URL="$(bs_youtube_resolve "$RELAY_URL")" || {
-        bs_error "Relay '$NAME': could not resolve the YouTube Live source. Only PUBLIC YouTube URLs are supported, and yt-dlp must be installed on this server."
-        exit 1
-    }
-fi
+case "$RELAY_TYPE" in
+    youtube|web-resolver)
+        # shellcheck source=lib/resolver.sh
+        source "$LIBDIR/resolver.sh" || exit 1
+        if RELAY_RESOLVED_URL="$(bs_web_resolve "$RELAY_URL")"; then
+            rm -f "$BLUESTREAM_RUN_DIR/$NAME.resolve-fail" 2>/dev/null || true
+        else
+            _rc=$?
+            # A safe, bounded, high-level start diagnostic for the web console
+            # (never raw yt-dlp stderr, never a signed URL, never a secret).
+            # Written root-only under the managed run directory and cleared on
+            # the next successful resolve/start (relay_start/stop/restart/
+            # delete also clear it).
+            mkdir -p "$BLUESTREAM_RUN_DIR" 2>/dev/null || true
+            _code="RESOLUTION_FAILED"
+            case "$_rc" in
+                1) _code="UNSUPPORTED_PAGE" ;;
+                2) _code="RESOLVER_UNAVAILABLE" ;;
+                4) _code="RESOLUTION_INVALID" ;;
+            esac
+            printf '%s\n' "$_code" > "$BLUESTREAM_RUN_DIR/$NAME.resolve-fail" 2>/dev/null || true
+            chmod 0600 "$BLUESTREAM_RUN_DIR/$NAME.resolve-fail" 2>/dev/null || true
+            case "$_code" in
+                RESOLVER_UNAVAILABLE)
+                    bs_error "Relay '$NAME': the public webpage resolver (yt-dlp) is not installed on this server. Public webpage sources need it; every direct media source works without it." ;;
+                UNSUPPORTED_PAGE)
+                    bs_error "Relay '$NAME': the configured source is not a supported public webpage URL. Only public pages supported by the installed resolver (yt-dlp) can be used." ;;
+                RESOLUTION_INVALID)
+                    bs_error "Relay '$NAME': the resolver did not return exactly one usable public media URL." ;;
+                *)
+                    bs_error "Relay '$NAME': could not resolve the public webpage into a playable media URL. The source may be offline or unavailable to the public; only PUBLIC content is supported." ;;
+            esac
+            unset _rc _code
+            exit 1
+        fi
+        unset _rc
+        ;;
+esac
 
 # nginx-rtmp (www-data) owns all HLS output; FFmpeg publishes over the
 # private local RTMP socket and never writes the HLS filesystem directly,

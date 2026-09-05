@@ -112,6 +112,77 @@ preflight() {
 }
 
 # ---------------------------------------------------------------------------
+# Public-webpage resolver (yt-dlp) - SAFE, maintainable install/update.
+#
+# yt-dlp is OPTIONAL: it is needed ONLY for public-webpage source URLs
+# (TYPE=youtube / TYPE=web-resolver). Every direct media source (HLS, HTTP
+# media, RTMP/RTMPS, RTSP, local media) works without it, so resolver
+# installation can never fail the whole BlueStream install.
+#
+# Strategy (no curl|bash, no stale Ubuntu package as the long-term answer, no
+# system-Python mutation):
+#   1. If yt-dlp is already on PATH: report it (with version) and stop.
+#   2. Otherwise install/refresh yt-dlp inside an ISOLATED virtualenv at
+#      /usr/local/lib/bluestream/resolver-venv and expose it through a
+#      /usr/local/bin/yt-dlp symlink. The venv never touches system Python
+#      and can be updated later with:
+#        /usr/local/lib/bluestream/resolver-venv/bin/python -m pip install -U yt-dlp
+#   3. Fallbacks (still isolated where possible): pipx, then the Ubuntu
+#      package, each reported as best-effort.
+# ---------------------------------------------------------------------------
+RESOLVER_VENV="/usr/local/lib/bluestream/resolver-venv"
+
+resolver_install_venv() {
+    # Create/refresh the isolated venv and install the CURRENT yt-dlp from
+    # PyPI. Requires python3-venv + python3-pip (installed on demand).
+    command -v python3 >/dev/null 2>&1 || return 1
+    if [ ! -x "$RESOLVER_VENV/bin/python" ]; then
+        os_pkg_install python3-venv python3-pip >/dev/null 2>&1 || true
+        python3 -m venv "$RESOLVER_VENV" 2>/dev/null || return 1
+    fi
+    "$RESOLVER_VENV/bin/python" -m pip install --disable-pip-version-check \
+        --quiet --upgrade yt-dlp 2>/dev/null || return 1
+    if [ ! -x "$RESOLVER_VENV/bin/yt-dlp" ]; then
+        return 1
+    fi
+    if [ ! -e /usr/local/bin/yt-dlp ] || [ ! -L /usr/local/bin/yt-dlp ]; then
+        ln -sf "$RESOLVER_VENV/bin/yt-dlp" /usr/local/bin/yt-dlp 2>/dev/null || return 1
+    fi
+    return 0
+}
+
+install_resolver() {
+    bs_step "Checking the public-webpage resolver (yt-dlp)"
+    local ytdlp_path="" ytdlp_ver=""
+    if command -v yt-dlp >/dev/null 2>&1; then
+        ytdlp_path="$(command -v yt-dlp)"
+        ytdlp_ver="$(yt-dlp --version 2>/dev/null | head -n 1 || true)"
+        bs_ok "yt-dlp available: ${ytdlp_path}${ytdlp_ver:+ (version ${ytdlp_ver})}"
+        return 0
+    fi
+    # Not installed: prefer the isolated managed venv.
+    if resolver_install_venv; then
+        ytdlp_ver="$(yt-dlp --version 2>/dev/null | head -n 1 || true)"
+        bs_ok "yt-dlp installed in an isolated venv${ytdlp_ver:+ (version ${ytdlp_ver})}"
+        return 0
+    fi
+    # Best-effort fallbacks - never fatal.
+    if command -v pipx >/dev/null 2>&1; then
+        pipx install --quiet yt-dlp 2>/dev/null && {
+            bs_ok "yt-dlp installed via pipx"
+            return 0
+        }
+    fi
+    os_pkg_install yt-dlp 2>/dev/null || true
+    if command -v yt-dlp >/dev/null 2>&1; then
+        bs_ok "yt-dlp installed from the Ubuntu package (consider the managed venv for newer versions)"
+    else
+        bs_warn "yt-dlp not installed - public 'webpage' source URLs (YouTube Live and other public pages supported by the resolver) will not resolve until you install it. All direct media source types are unaffected."
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Package installation
 # ---------------------------------------------------------------------------
 install_packages() {
@@ -126,18 +197,7 @@ install_packages() {
         || bs_die "Failed to install base packages."
     web_verify_packages
 
-    # GUI-7A: yt-dlp is OPTIONAL - it is needed ONLY for public "YouTube Live"
-    # source URLs. Every other source type works without it, so a missing
-    # package is a warning, never a fatal error. Ubuntu 22.04+ ships a yt-dlp
-    # package; on older releases install it with pipx (pipx install yt-dlp).
-    if ! command -v yt-dlp >/dev/null 2>&1; then
-        os_pkg_install yt-dlp 2>/dev/null || true
-    fi
-    if command -v yt-dlp >/dev/null 2>&1; then
-        bs_ok "yt-dlp available (enables public YouTube Live sources)"
-    else
-        bs_warn "yt-dlp not installed - public 'YouTube Live' source URLs will not work until you install it (apt-get install yt-dlp, or: pipx install yt-dlp). All other source types are unaffected."
-    fi
+    install_resolver
 
     if [ "$SSL_REQUESTED" = "1" ]; then
         bs_step "Installing certbot for Let's Encrypt SSL"

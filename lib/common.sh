@@ -244,7 +244,7 @@ bs_valid_name() {
 
 bs_valid_type() {
     case "$1" in
-        local-file|remote-hls|rtmp|rtmps|rtsp|http-file|youtube) return 0 ;;
+        local-file|remote-hls|rtmp|rtmps|rtsp|http-file|youtube|web-resolver) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -256,7 +256,7 @@ bs_valid_type() {
 # so FFmpeg cannot ingest it directly (this is why pasting one as a plain
 # source URL fails). BlueStream stores the page URL as TYPE=youtube and the
 # systemd runtime wrapper resolves the CURRENT playable media URL fresh on
-# every start with yt-dlp (see lib/youtube.sh). PUBLIC content only.
+# every start with yt-dlp (see lib/resolver.sh). PUBLIC content only.
 # ---------------------------------------------------------------------------
 BLUESTREAM_YOUTUBE_HOSTS="www.youtube.com youtube.com m.youtube.com music.youtube.com youtu.be"
 
@@ -326,6 +326,27 @@ bs_classify_source_type() {
             ;;
         *) return 1 ;;
     esac
+    return 0
+}
+
+# Choose the relay TYPE for a URL the operator explicitly marked as a PUBLIC
+# WEBPAGE source (HTML that must be resolved to a playable media URL at start
+# time, never treated as a direct media URL). Known YouTube hosts keep the
+# original TYPE=youtube; every other http(s) webpage becomes the generic
+# TYPE=web-resolver (resolved by the same safe yt-dlp pipeline). Returns 1 for
+# anything that is not an http(s) URL.
+bs_webpage_type() {
+    local url="$1"
+    case "$url" in
+        http://*|https://*) ;;
+        *) return 1 ;;
+    esac
+    bs_valid_url "$url" || return 1
+    if bs_is_youtube_url "$url"; then
+        printf 'youtube'
+    else
+        printf 'web-resolver'
+    fi
     return 0
 }
 

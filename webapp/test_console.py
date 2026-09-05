@@ -100,8 +100,14 @@ class FakeEngine:
     def relay_create_url(self, name, url):
         return self._mutation("relay_create_url", name, url)
 
+    def relay_create_webpage(self, name, url):
+        return self._mutation("relay_create_webpage", name, url)
+
     def relay_set_source(self, name, url):
         return self._mutation("relay_set_source", name, url)
+
+    def relay_set_source_webpage(self, name, url):
+        return self._mutation("relay_set_source_webpage", name, url)
 
     def relay_create_media(self, name, media):
         return self._mutation("relay_create_media", name, media)
@@ -929,6 +935,9 @@ class EngineClientTests(unittest.TestCase):
             "media_delete",
             # GUI-6A: edit source URL of a stopped, URL-backed stream
             "relay_set_source",
+            # GUI-7B: public-webpage (resolver) create/edit
+            "relay_create_webpage",
+            "relay_set_source_webpage",
             # GUI-8A: one-time playlist start schedule
             "playlist_schedule_get",
             "playlist_schedule_set",
@@ -977,6 +986,10 @@ class EngineClientTests(unittest.TestCase):
                     # GUI-6A: edit the source URL of a stopped, URL-backed
                     # stream (URL treated strictly as data; never starts it).
                     "relay_set_source",
+                    # GUI-7B: create/edit a PUBLIC WEBPAGE source (resolved by
+                    # yt-dlp at Start time; never a direct media URL).
+                    "relay_create_webpage",
+                    "relay_set_source_webpage",
                     # GUI-8A: one-time playlist start schedule (set/replace +
                     # cancel). A root-generated timer targets a FIXED oneshot
                     # service - never a browser-supplied command.
@@ -1993,7 +2006,13 @@ class ProductionModeTests(unittest.TestCase):
             "printf '%s\\n' '{\"ok\": true, \"data\": {\"version\": \"0.1.0\"}}'\n",
         )
         fake_sudo = Path(self._tmp.name) / "sudo"
-        fake_sudo.write_text("#!/usr/bin/env bash\nexec \"$@\"\n", encoding="utf-8")
+        # The production EngineClient always invokes ``sudo -n <web-ctl> <op>``,
+        # so a faithful fake must drop the -n flag and then run the (non-
+        # executable, plain-script) fake web-ctl through bash, mirroring how a
+        # real ``sudo -n`` would execute the installed web-ctl.
+        fake_sudo.write_text(
+            "#!/usr/bin/env bash\nshift\nexec bash \"$@\"\n", encoding="utf-8"
+        )
         fake_sudo.chmod(0o700)
         orig_sudo = engine_module.SUDO_PATH
         orig_wctl = engine_module.INSTALLED_WEB_CTL
@@ -2852,7 +2871,7 @@ class Gui3PlaylistCacheTests(unittest.TestCase):
             self.engine.mutation_calls, [("playlist_cache_clear_unused",)]
         )
         html = self.client.get("/console/playlists").get_data(as_text=True)
-        self.assertIn("Cleared 780.0 MiB from the playlist cache (3 files).", html)
+        self.assertIn("Cleared 3 unused cache files (780.0 MiB).", html)
 
     def test_07_clear_nothing_to_clear_message(self):
         self._login()
@@ -3024,8 +3043,43 @@ class Gui3PlaylistCacheTests(unittest.TestCase):
                 "playlist_cache_clear_unused",
             ],
         )
-        self.assertIn("Cleared 8.1 MiB from the playlist cache (2 files).", html)
+        self.assertIn("Cleared 2 unused cache files (8.1 MiB).", html)
         self.assertNotIn("No unused playlist cache files to clear.", html)
+        # The exact message must never contain the old pre-clear phrasing.
+        self.assertNotIn("Cleared 8.1 MiB from the playlist cache", html)
+
+    def test_12b_post_clear_prg_renders_fresh_authoritative_status(self):
+        # After a successful clear (freed_count > 0) the POST redirects (PRG)
+        # and the redirected GET re-reads FRESH cache status from the engine.
+        # The pre-clear numbers must never be subtracted client-side or re-used;
+        # whatever the engine reports after the mutation is what renders.
+        self._login()
+        self.engine.mutation_payloads[("playlist_cache_clear_unused",)] = {
+            "operation": "playlist_cache_clear_unused",
+            "freed_bytes": "8516825",
+            "freed_count": "2",
+            "reclaimable_bytes": "0",
+            "reclaimable_count": "0",
+            "blocked": "0",
+        }
+        rv = self._clear_post()
+        self.assertEqual(rv.status_code, 302)
+        # The authoritative cache status now reads zero (engine state after the
+        # privileged deletion) - this is the value the redirected GET must show.
+        self.engine.payloads["playlist_cache_status"] = self.EMPTY_CACHE_STATUS
+        html = self.client.get("/console/playlists").get_data(as_text=True)
+        # Success flash from the clear response.
+        self.assertIn("Cleared 2 unused cache files (8.1 MiB).", html)
+        # Fresh authoritative numbers: 0 bytes / 0 artifacts / 0 reclaimable.
+        self.assertIn("0 B", html)
+        self.assertIn("Artifacts</dt><dd>0</dd>", html)
+        self.assertIn("Reclaimable</dt><dd>0 B</dd>", html)
+        # Pre-clear stale values never render anywhere in the cache card.
+        self.assertNotIn("Reclaimable</dt><dd>8.1 MiB</dd>", html)
+        self.assertNotIn("Artifacts</dt><dd>2</dd>", html)
+        self.assertNotIn("Cached media</dt><dd>8.1 MiB</dd>", html)
+        # The clear button is disabled again because nothing is reclaimable.
+        self.assertIn("disabled", html)
 
     def test_13_real_envelope_nothing_reclaimable_shows_no_unused(self):
         # freed_count=0, blocked=0: nothing was reclaimable. This is exactly
@@ -4393,6 +4447,17 @@ class DestinationsWorkflowTests(unittest.TestCase):
         html = client2.get("/console/destinations").get_data(as_text=True)
         self.assertIn("No streaming destinations configured yet.", html)
         self.assertIn("+ Add Destination", html)
+        # Milestone D: the empty-state box must no longer carry its own duplicate
+        # clickable CTA - only the single top-right "+ Add Destination" remains.
+        self.assertEqual(html.count('href="/console/destinations/create"'), 1)
+        self.assertIn(
+            "Use &ldquo;+ Add Destination&rdquo; above to create your first one.", html
+        )
+        self.assertNotIn("Add your first destination", html)
+        empty_state = re.search(r'<p class="empty-state">(.*?)</p>', html, re.S)
+        self.assertIsNotNone(empty_state)
+        self.assertNotIn("<a ", empty_state.group(1))
+
 
         html = self._list_html()
         self.assertIn("Main YouTube", html)
@@ -4945,6 +5010,10 @@ class YouTubeLiveSupportTests(unittest.TestCase):
                  "source": "https://www.youtube.com/watch?v=LIVE",
                  "active": "no", "enabled": "no", "health": "STOPPED",
                  "destination_count": "0"},
+                {"name": "wb", "type": "web-resolver",
+                 "source": "https://www.twitch.tv/somechannel",
+                 "active": "no", "enabled": "no", "health": "FAILED",
+                 "destination_count": "0", "resolve_error": "RESOLUTION_FAILED"},
             ],
             "playlist_list": [],
             "media_list": [],
@@ -4977,6 +5046,123 @@ class YouTubeLiveSupportTests(unittest.TestCase):
 
     def test_04_type_label_map_has_youtube(self):
         self.assertEqual(app_module.TYPE_LABELS.get("youtube"), "YouTube Live")
+        # GUI-7B: the generic public-webpage resolver type is surfaced too.
+        self.assertEqual(app_module.TYPE_LABELS.get("web-resolver"), "Public Webpage")
+
+    def test_05_streams_list_labels_webpage_and_shows_safe_diagnostic(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("Public Webpage", html)
+        # The safe high-level start diagnostic is rendered next to FAILED.
+        self.assertIn(
+            "Could not resolve the public webpage into a playable media URL", html
+        )
+        # Raw resolver output / signed URLs never reach the browser.
+        self.assertNotIn("videoplayback", html)
+        self.assertNotIn("yt-dlp stderr", html)
+
+    def test_06_create_webpage_stream_uses_webpage_op(self):
+        rv = self.client.post(
+            "/console/streams/create",
+            data={
+                "csrf_token": get_csrf(self.client, path="/console/streams/create"),
+                "name": "Page X",
+                "url": "https://www.twitch.tv/somechannel",
+                "kind": "webpage",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [
+                (
+                    "relay_create_webpage",
+                    "page-x",
+                    "https://www.twitch.tv/somechannel",
+                )
+            ],
+        )
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("created as a public webpage source", html)
+
+    def test_07_create_webpage_rejects_direct_stream_url(self):
+        rv = self.client.post(
+            "/console/streams/create",
+            data={
+                "csrf_token": get_csrf(self.client, path="/console/streams/create"),
+                "name": "bad",
+                "url": "rtmp://host/app/key",
+                "kind": "webpage",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+        html = self.client.get("/console/streams/create").get_data(as_text=True)
+        self.assertIn(
+            "Public webpage sources must be http:// or https:// page URLs", html
+        )
+
+    def test_08_direct_create_flow_is_unchanged_without_webpage_kind(self):
+        # Regression: pasting a direct YouTube page URL WITHOUT the webpage
+        # checkbox still uses the original auto-classifying create operation.
+        rv = self.client.post(
+            "/console/streams/create",
+            data={
+                "csrf_token": get_csrf(self.client, path="/console/streams/create"),
+                "name": "Second YT",
+                "url": "https://www.youtube.com/watch?v=OTHER",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [
+                (
+                    "relay_create_url",
+                    "second-yt",
+                    "https://www.youtube.com/watch?v=OTHER",
+                )
+            ],
+        )
+
+    def test_09_edit_source_page_offers_keep_webpage_for_resolver(self):
+        html = self.client.get("/console/streams/wb/edit-source").get_data(as_text=True)
+        self.assertIn("Keep this a public webpage source", html)
+        self.assertIn('name="kind" value="webpage" id="kind-webpage" checked', html)
+
+    def test_10_edit_source_post_webpage_preserves_resolver(self):
+        rv = self.client.post(
+            "/console/streams/wb/edit-source",
+            data={
+                "csrf_token": get_csrf(self.client, path="/console/streams/wb/edit-source"),
+                "url": "https://www.youtube.com/watch?v=NEW",
+                "kind": "webpage",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [
+                (
+                    "relay_set_source_webpage",
+                    "wb",
+                    "https://www.youtube.com/watch?v=NEW",
+                )
+            ],
+        )
+
+    def test_11_edit_source_plain_url_uses_original_set_source(self):
+        rv = self.client.post(
+            "/console/streams/yt/edit-source",
+            data={
+                "csrf_token": get_csrf(self.client, path="/console/streams/yt/edit-source"),
+                "url": "https://cdn.example/live/index.m3u8",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_set_source", "yt", "https://cdn.example/live/index.m3u8")],
+        )
 
 
 class SafeDeleteWorkflowTests(unittest.TestCase):

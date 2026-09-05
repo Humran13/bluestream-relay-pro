@@ -67,6 +67,12 @@ relay_config_validate() {
             # resolved to a playable media URL at start time (never stored).
             bs_is_youtube_url "$RELAY_URL" || return 1
             ;;
+        web-resolver)
+            # A generic PUBLIC webpage URL (any http(s) page the installed
+            # yt-dlp resolver supports). Never treated as a direct media URL.
+            bs_valid_url "$RELAY_URL" || return 1
+            case "$RELAY_URL" in http://*|https://*) ;; *) return 1 ;; esac
+            ;;
         rtmp)
             bs_valid_url "$RELAY_URL" || return 1
             case "$RELAY_URL" in rtmp://*) ;; *) return 1 ;; esac
@@ -211,6 +217,30 @@ relay_set_source() {
 }
 
 # ---------------------------------------------------------------------------
+# Edit the source of a STOPPED relay while PRESERVING resolver semantics.
+#
+# Used when the operator explicitly keeps the source a PUBLIC WEBPAGE: the new
+# URL stays a resolver source (TYPE=youtube for known YouTube hosts, otherwise
+# the generic TYPE=web-resolver) instead of being re-detected as a direct
+# media URL. Same state guards and return codes as relay_set_source. This
+# never stores a resolved playable URL - only the original public page URL.
+# ---------------------------------------------------------------------------
+relay_set_page_source() {
+    local name="$1" url="${2:-}" newtype=""
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    relay_load_config "$name" || return 2
+    [ "$RELAY_TYPE" = "local-file" ] && return 4
+    bs_unit_definitively_stopped "$(bs_unit relay "$name")" || return 3
+    newtype="$(bs_webpage_type "$url")" || return 5
+    RELAY_TYPE="$newtype"
+    RELAY_URL="$url"
+    relay_config_validate || return 5
+    relay_save_config "$name" || return 6
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # ffmpeg argument construction (stream copy / remux)
 # ---------------------------------------------------------------------------
 relay_build_ffmpeg_args() {
@@ -241,9 +271,10 @@ relay_build_ffmpeg_args() {
             input+=( -fflags +genpts -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 30 )
             input+=( -i "$url" )
             ;;
-        youtube)
-            # RELAY_URL is the YouTube page URL; RELAY_RESOLVED_URL is the
-            # fresh playable media URL set by run-relay.sh at start time.
+        youtube|web-resolver)
+            # TYPE=youtube / TYPE=web-resolver store a PUBLIC webpage URL;
+            # RELAY_RESOLVED_URL is the fresh playable media URL set by
+            # run-relay.sh at start time (never persisted).
             local resolved="${RELAY_RESOLVED_URL:-}"
             [ -n "$resolved" ] || return 1
             case "$resolved" in http://*|https://*) ;; *) return 1 ;; esac
@@ -303,6 +334,9 @@ relay_start() {
     relay_config_validate || bs_die "Relay '$name' failed configuration validation"
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
+    # A fresh start clears any stale start-failure diagnostic from an earlier
+    # attempt; run-relay.sh re-writes it only if resolution fails again.
+    rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     systemctl start "$(bs_unit relay "$name")" || bs_die "Failed to start relay '$name'"
     bs_ok "Relay '$name' started"
 }
@@ -319,6 +353,8 @@ relay_stop() {
     # exact validated unit; genuine runtime failures outside an explicit
     # BlueStream Stop are untouched, and restart behavior is unchanged.
     systemctl reset-failed "$unit" 2>/dev/null || true
+    # Clear the resolver start-failure diagnostic: the relay is now stopped.
+    rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     bs_ok "Relay '$name' stopped"
 }
 
@@ -329,6 +365,7 @@ relay_restart() {
     relay_config_validate || bs_die "Relay '$name' failed configuration validation"
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
+    rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     systemctl restart "$(bs_unit relay "$name")" || bs_die "Failed to restart relay '$name'"
     bs_ok "Relay '$name' restarted"
 }
@@ -363,6 +400,7 @@ relay_remove() {
     rm -f "$BLUESTREAM_RELAY_CONF_DIR/$name.conf"
     rm -rf "/etc/systemd/system/$(bs_unit relay "$name").d"
     rm -rf "$(bs_hls_dir_for relay "$name")"
+    rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     bs_ok "Relay '$name' removed"
 }
 
@@ -386,6 +424,7 @@ relay_delete() {
     rm -f "$BLUESTREAM_RELAY_CONF_DIR/$name.conf" || return 4
     rm -rf "/etc/systemd/system/$unit.d"
     rm -rf "$(bs_hls_dir_for relay "$name")"
+    rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     return 0
 }

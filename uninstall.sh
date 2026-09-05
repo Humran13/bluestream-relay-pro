@@ -93,6 +93,11 @@ web_uninstall
 # --- remove installed project files ---
 rm -f /usr/local/sbin/bluestream-manager
 rm -f /usr/local/bin/bluestream-status
+# Remove only the resolver symlink we manage (never a distro-managed binary).
+if [ -L /usr/local/bin/yt-dlp ] && \
+   [ "$(readlink /usr/local/bin/yt-dlp 2>/dev/null || true)" = "/usr/local/lib/bluestream/resolver-venv/bin/yt-dlp" ]; then
+    rm -f /usr/local/bin/yt-dlp
+fi
 rm -rf /usr/local/lib/bluestream
 
 # --- remove nginx site config and RTMP include (keep nginx itself) ---

@@ -133,7 +133,7 @@
     <dt>FFmpeg</dt><dd>{{ snap.get('ffmpeg_available') }}</dd>
     <dt>ffprobe</dt><dd>{{ snap.get('ffprobe_available') }}</dd>
     {% if snap.get('ytdlp_available') is not none %}
-    <dt>yt-dlp</dt><dd>{{ snap.get('ytdlp_available') }} <span class="muted">(YouTube Live)</span></dd>
+    <dt>yt-dlp</dt><dd>{{ snap.get('ytdlp_available') }} <span class="muted">(public webpage resolver)</span></dd>
     {% endif %}
     <dt>HTTPS</dt><dd>{{ snap.get('https_configured') }}</dd>
   </dl>

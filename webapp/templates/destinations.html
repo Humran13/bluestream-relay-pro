@@ -58,7 +58,8 @@
 </section>
 {% else %}
 <section class="card">
-  <p class="empty-state">No streaming destinations configured yet. <a href="{{ url_for('console.destinations_create') }}">Add your first destination</a>.</p>
+  <p class="empty-state">No streaming destinations configured yet.<br>
+  Use &ldquo;+ Add Destination&rdquo; above to create your first one.</p>
 </section>
 {% endif %}
 {% endblock %}
