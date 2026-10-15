@@ -19,8 +19,8 @@ describes the model used by version 0.1.0.
 | Path | Owner:Group | Mode |
 | --- | --- | --- |
 | `/etc/bluestream/` | root:root | 0700 |
-| `/etc/bluestream/relays/`, `playlists/` | root:root | 0700 |
-| individual relay/playlist configs | root:root | 0600 |
+| `/etc/bluestream/relays/`, `playlists/`, `destinations/` | root:root | 0700 |
+| individual relay/playlist/destination configs | root:root | 0600 |
 | `/etc/bluestream/server.conf` | root:root | 0600 |
 | `/var/lib/bluestream/media/` | root:bluestream-relay | 0750 |
 | imported media files | root:bluestream-relay | 0640 |
@@ -60,9 +60,60 @@ processes. This is standard Linux behaviour. BlueStream does **not** change
 global `/proc` settings such as `hidepid` automatically — that is an
 operating-system-level decision for the administrator.
 
+## Outbound publisher (Phase 1C) stream-key handling
+
+A destination's stream key is written **only** to its root-only config file
+(`/etc/bluestream/destinations/<id>.conf`, root:root 0600) and is delivered
+through the privileged bridge **exclusively over stdin** — never as a CLI
+argument, environment variable, or URL. It is never present in:
+
+- the HTML, an API response, or any listing/status returned to the browser
+  (only a `has_stream_key` boolean and, for a running publisher, a derived
+  state like `LIVE`/`FAILED` — never the key or the destination server URL);
+- application logs, flash messages, or exception text;
+- a diagnostic dump — `publisher_dump_ffmpeg_args` (the only place the
+  publisher's FFmpeg argv is ever printed) explicitly redacts the entire
+  destination URL rather than relying on field-level redaction, because the
+  key lives in the URL's **path**, not a query string `bs_redact_url` could
+  mask.
+
+**Where it unavoidably exists in plaintext:** FFmpeg must receive the
+complete `rtmp(s)://server/.../<key>` URL as one of its own process
+arguments to publish to your destination. For the lifetime of that one
+process, the key is therefore visible:
+
+- to **root** via `/proc/<pid>/cmdline` (root already holds the plaintext key
+  in the destination config, so this grants nothing new);
+- to **other processes running as the same `bluestream-relay` account** —
+  i.e. the source relay/playlist's own FFmpeg process and any sibling
+  publisher process for a *different* destination — because Linux process
+  visibility (`/proc/<pid>/cmdline`, ptrace) is governed primarily by UID
+  match, and `ProtectProc=invisible` (set on every relay/playlist/publisher
+  unit) hides process details from *other* users, not from another process
+  running under the *same* UID.
+
+**What this does NOT expose:** `bluestream-relay` cannot read a destination's
+stream key from disk — destination configs stay root:root 0600 with no group
+access for that account. The exposure above is live-process-only and
+requires the `bluestream-relay` account itself to already be running
+attacker-controlled code (at which point there are more direct problems);
+it is never reachable from the web user, from the network, or from a
+different destination's own publisher logic.
+
+**Mitigations applied:** the account runs *only* BlueStream's own fixed
+`ffmpeg` invocations (no shell, no login, `NoNewPrivileges`), each publisher
+unit gets the full relay/playlist hardening profile plus `ProtectProc=invisible`
+and `ProcSubset=pid`, and a publisher unit is granted **zero** `ReadWritePaths`
+(it never touches a local file at all). Full per-destination process isolation
+(a unique UID per destination via a provisioned system account, so no two
+FFmpeg processes under BlueStream ever share a UID) would close this
+residual gap entirely; it is a larger architectural change than this phase's
+scope and is **not implemented yet** — this is stated here honestly rather
+than silently left out.
+
 ## systemd hardening
 
-Relay and playlist units apply:
+Relay, playlist and outbound publisher units apply:
 
 - `NoNewPrivileges=true`
 - `ProtectSystem=strict`
@@ -76,7 +127,10 @@ Relay and playlist units apply:
 - `RestrictSUIDSGID=true`
 - `RestrictRealtime=true`
 - Narrow `ReadWritePaths` (HLS output and, for playlists, the run directory
-  and the normalization cache)
+  and the normalization cache; a publisher unit gets **none at all** - it
+  never touches a local file)
+- `ProtectProc=invisible` and `ProcSubset=pid` on relay/playlist/publisher
+  units (systemd >= 247 / Ubuntu 22.04+; silently ignored on older systemd)
 
 These directives are compatible with systemd >= 231 (all supported Ubuntu
 releases).

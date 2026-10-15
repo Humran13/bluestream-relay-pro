@@ -2,11 +2,26 @@
 
 **Version 0.1.0 — foundation release**
 
-BlueStream Relay Pro is a **self-hosted 24/7 media relay server** for Ubuntu
-VPS systems. You install it on your own VPS, point it at a supported media
-source, and it exposes a clean, stable **HLS/M3U8 output URL** you can use in
-WordPress sites, HTML5/hls.js players, VLC, IPTV players, custom websites and
-mobile apps.
+## One-Line Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Humran13/bluestream-relay-pro/main/bootstrap.sh | sudo bash
+```
+
+This clones the project to `/usr/local/src/bluestream-relay-pro` and runs its
+`install.sh`. It never touches existing BlueStream data on re-run (relays,
+playlists, media, destinations, schedules, backups, web admin state). Pass
+installer flags after `--`, e.g.
+`... | sudo bash -s -- --domain video.example.com --assume-yes`.
+
+BlueStream Relay Pro is a **self-hosted 24/7 media relay AND multistream
+server** for Ubuntu VPS systems. You install it on your own VPS, point it at
+a supported media source, and it exposes a clean, stable **HLS/M3U8 output
+URL** you can use in WordPress sites, HTML5/hls.js players, VLC, IPTV
+players, custom websites and mobile apps — and, independently, pushes the
+same source to any number of your own streaming destinations (YouTube,
+Facebook, Twitch, Rumble, Instagram, TikTok, or any custom RTMP/RTMPS
+endpoint).
 
 ```text
 M3U8:   https://example.com/hls/relay/news/index.m3u8
@@ -34,6 +49,7 @@ temporarily reconnects.
 - [Installation](#installation)
 - [Manager usage](#manager-usage)
 - [Web console](#web-console)
+- [Destinations & outbound publishing](#destinations--outbound-publishing)
 - [Playlists](#playlists)
 - [WordPress / websites](#wordpress--websites)
 - [Security model](#security-model)
@@ -63,29 +79,40 @@ served by nginx. This keeps CPU use low and supports high-resolution sources.
 ## Architecture
 
 ```text
-Source (local file / playlist / HLS / RTMP / RTMPS / RTSP / HTTP media)
+Source (local file / playlist / HLS / RTMP / RTMPS / RTSP / HTTP media /
+        YouTube or other public webpage, resolved via yt-dlp)
    |
    v
-FFmpeg  (stream copy, HLS muxer, runs as unprivileged bluestream-relay)
+FFmpeg  (stream copy, runs as unprivileged bluestream-relay)
    |
    v
-/var/www/bluestream/hls/relay/<name>/index.m3u8  (fresh sliding window)
-   |
-   v
-nginx   (MIME types, cache headers, CORS, HTTPS via Let's Encrypt)
-   |
-   v
-https://DOMAIN/hls/relay/<name>/index.m3u8
-https://DOMAIN/player/?relay=<name>
+PRIVATE LOCAL RTMP BUS (nginx-rtmp, loopback-only)
+   |-- nginx-rtmp HLS  -> /var/www/bluestream/hls/relay/<name>/index.m3u8
+   |                       -> nginx -> https://DOMAIN/hls/relay/<name>/index.m3u8
+   |-- publisher  -> your YouTube Live ingest
+   |-- publisher  -> your Facebook Live ingest
+   |-- publisher  -> your Twitch ingest
+   |-- publisher  -> your Rumble / Instagram / TikTok / custom RTMP(S) ingest
+   `-- ... one independent publisher process per attached, enabled destination
 ```
+
+Every destination has its own FFmpeg process. If one destination's
+connection drops, only that destination reconnects (fast, automatic) —
+the website HLS output, the source relay/playlist itself, and every other
+destination are completely unaffected.
 
 Key components:
 
-- **systemd** supervises every relay and playlist (restart with backoff,
-  boot enable/disable, journald logs).
-- **Nginx** serves HLS with correct MIME types, cache headers and CORS.
-- **FFmpeg / ffprobe** does the pulling, probing and HLS packaging.
-- **Bash** manager (`bluestream-manager`) is the administration interface.
+- **systemd** supervises every relay, playlist and outbound publisher
+  (restart with backoff, boot enable/disable, journald logs). A publisher's
+  generated `BindsTo=`/`After=` drop-in stops it automatically when its
+  source relay/playlist stops.
+- **Nginx** serves HLS with correct MIME types, cache headers and CORS, and
+  also runs the private loopback RTMP ingest/distribution bus (`nginx-rtmp`).
+- **FFmpeg / ffprobe** does the pulling, probing, HLS packaging and outbound
+  publishing.
+- **Bash** manager (`bluestream-manager`) and an optional authenticated
+  **web console** are the administration interfaces.
 - **No frameworks** — no React, Node dashboard, Electron or mobile apps.
 
 ## Supported source types
@@ -147,8 +174,27 @@ sudo bash install.sh \
 ```
 
 Re-running `install.sh` repairs/updates the installation **without**
-destroying existing relays, playlists or media. See `docs/installation.md`
-for full details.
+destroying existing relays, playlists, destinations, media or schedules. See
+`docs/installation.md` for full details.
+
+### Domain input
+
+The public-domain prompt (and `--domain`) accepts `stream.example.com`,
+`http://stream.example.com`, `https://stream.example.com`, and a trailing
+slash — it normalizes to the bare hostname before validating. A path, query
+string, embedded credentials, a port, or shell-hostile characters are
+rejected rather than silently stripped.
+
+### Internal web console port
+
+Gunicorn always binds `127.0.0.1:<port>` only — never a public address.
+`install.sh` selects the port automatically: **8080 if it is free**,
+otherwise the first free port from a small fixed candidate list. The
+selection is persisted in `/etc/bluestream/server.conf` (`WEB_PORT=`) and
+**reused as-is on every reinstall/update** — it never changes just because
+something else now happens to be using 8080. nginx's `/console/` reverse
+proxy and the Gunicorn unit are always rendered from this one value, so they
+can never drift apart.
 
 ## Manager usage
 
@@ -180,32 +226,70 @@ sudo bluestream-manager relay url news
 
 ## Web console
 
-An optional authenticated **web console** (Gunicorn + Flask, `127.0.0.1:8080`
-behind nginx at `https://DOMAIN/console/`) provides a professional dashboard
-for the most common tasks. All management remains available through
-`bluestream-manager`; the console never bypasses the root-only engine.
+An optional authenticated **web console** (Gunicorn + Flask behind nginx at
+`https://DOMAIN/console/`) provides a professional dashboard for the most
+common tasks. All management remains available through `bluestream-manager`;
+the console never bypasses the root-only engine. Gunicorn listens on an
+**auto-selected loopback port** (127.0.0.1 only, never public) — see
+[Internal web console port](#internal-web-console-port).
 
-Available pages (GUI-1C.1):
+Available pages:
 
-- **Dashboard** — server/engine overview and quick actions.
-- **Streams** — list relays, start/stop/restart, and **create a stream** from a
-  source URL (HLS, HTTP media, RTMP/RTMPS, RTSP). The URL is stored as data
-  only and displayed redacted; new streams start **stopped**.
+- **Dashboard** — server/engine overview, live CPU/RAM/storage metrics and
+  quick actions.
+- **Streams** — list relays, start/stop/restart, **create a stream** from a
+  source URL (HLS, HTTP media, RTMP/RTMPS, RTSP, or a public YouTube/webpage
+  URL resolved via yt-dlp), edit its source, and attach destinations.
 - **Media Library** — list managed media, **upload** a video file, and create a
   local-file stream from it. Uploads are staged in a narrow web-writable
   directory, probed with ffprobe, and imported by the root bridge — a file is
   never overwritten and the staged copy is removed after every import attempt.
-- **Playlists** — list playlists and control them (start/stop/restart).
+- **Playlists** — create/list playlists, control them (start/stop/restart),
+  schedule a one-time future start, and attach destinations.
+- **Destinations** — create/enable/disable/delete outbound streaming
+  destinations and see live per-destination publish status (see next
+  section).
 
 Security properties:
 
 - Every write is a POST guarded by CSRF tokens and authentication, and follows
   Post/Redirect/Get (no mutation on refresh).
-- Source URLs, stream names and media names are validated against the engine's
-  own rules (and again by the engine) before any bridge call.
+- Source URLs, stream names, media names and destination fields are validated
+  against the engine's own rules (and again by the engine) before any bridge
+  call.
 - Uploads are capped (10 GiB default, configurable via server.conf and mirrored in nginx) and restricted to
   common media extensions; the web process can only write the upload staging
   directory, never managed media.
+- A destination's stream key is written only to a root-only config file,
+  delivered to the engine over stdin (never argv/env/URL), and is **never**
+  shown in the console, an API response, a log, or a flash message.
+
+## Destinations & outbound publishing
+
+Attach one or more **destinations** to a stream or playlist and BlueStream
+pushes that same source to all of them simultaneously, independently of the
+website HLS output:
+
+- Supported platform labels: YouTube, Facebook, Twitch, Rumble, Instagram,
+  TikTok, and Custom RTMP/RTMPS. The platform value is a label only — you
+  always supply your own server URL and stream key exactly as the platform
+  gives them to you for manual/encoder publishing. BlueStream never hard-codes
+  an ingest URL and never automates a platform login.
+- Each attached + enabled destination runs its **own** FFmpeg process reading
+  from the private local RTMP bus and publishing to your destination. One
+  destination disconnecting/reconnecting never affects the website HLS feed,
+  the source relay/playlist, or any other destination.
+- Per-destination status: **Disabled**, **Stopped** (source not running),
+  **Starting**, **Live** (real data flow confirmed, not just "process
+  exists"), **Reconnecting**, or **Failed**, plus a restart count and a
+  bounded, non-sensitive failure reason. The stream key and destination server
+  URL are never part of this status.
+- Starting/stopping/restarting the source, attaching/detaching a destination,
+  and enabling/disabling a destination all reconcile the running publisher set
+  automatically — there is no separate "start publishing" button to forget.
+
+See `docs/security.md` for the full write-up on how the stream key is
+protected end-to-end, including the one documented residual limitation.
 
 ## WordPress / websites
 
@@ -229,15 +313,23 @@ Full details, including a no-plugin WordPress workflow, are in
 ## Security model
 
 - FFmpeg runs as the unprivileged `bluestream-relay` user via a `setpriv`
-  privilege drop that **fails closed**.
-- Config directories are root-only (0700/0600). No `chmod 777` anywhere.
-- Names, paths and URLs are strictly validated; no `eval`, no sourcing of
-  untrusted config files.
-- Source URL credentials are redacted in output and never written to M3U8.
-- systemd hardening is applied to relay/playlist units.
+  privilege drop that **fails closed** — for the source relay/playlist AND
+  for every outbound publisher.
+- Config directories are root-only (0700/0600), including destination configs
+  (stream keys). No `chmod 777` anywhere.
+- Names, paths and URLs are strictly validated; no `eval`, no `shell=True`, no
+  sourcing of untrusted config files, no generic command execution anywhere
+  in the browser → web-ctl → engine chain.
+- Source URL credentials are redacted in output and never written to M3U8. A
+  destination's stream key is never exposed in the console, an API response,
+  a log, a flash message, or a diagnostic dump.
+- systemd hardening is applied to relay/playlist/publisher units; a publisher
+  additionally gets no writable filesystem path at all.
 - Backups are root-only; restore validates archive contents.
 
-See `docs/security.md` for the full model.
+See `docs/security.md` for the full model, including the honestly-documented
+residual stream-key exposure (same-service-account `/proc` visibility between
+BlueStream's own FFmpeg processes) and how it is bounded.
 
 ## Bandwidth considerations
 
@@ -286,15 +378,27 @@ See `docs/troubleshooting.md`.
 
 ## Limitations
 
-- **No** DRM, website scraping, YouTube/Twitch download bypass, proprietary
-  CDN, DASH, recording archive, GPU transcoding, cluster management, billing,
-  accounts or web admin dashboard in version 1.
+- **No** DRM bypass, authenticated/private-content scraping, proprietary CDN,
+  DASH, recording archive, GPU transcoding, cluster management, billing,
+  accounts, OAuth platform integrations, or browser-based scene/studio
+  compositor (overlays, scenes, transitions, webcam/screen mixing) yet.
+- Outbound publishing requires the server URL + stream key the destination
+  platform gives you for manual/encoder publishing; BlueStream does not log
+  into any platform account on your behalf.
+- No generic "reconnect while keeping the same process" exists for an
+  outbound RTMP publish (ffmpeg has none); a destination disconnect ends that
+  one publisher process and systemd restarts it within seconds — this is by
+  design, not a gap, but it means a few seconds of a destination going dark on
+  a bad connection is expected and normal.
 - Ubuntu 18.04 is not officially supported.
 - No real-VPS validation has been performed yet (see below).
 
 Deferred roadmap possibilities (documented but not built): CDN/reverse-proxy
 mode, hardware-accelerated compatibility transcoding, recording archive,
-multi-server orchestration, web dashboard, billing/accounts.
+multi-server orchestration, billing/accounts, OAuth platform integrations,
+and "BlueStream Studio" (a browser-based scene compositor sitting between the
+source and the private RTMP bus — the publisher architecture was designed to
+leave room for this without rework).
 
 ## Validation status
 
@@ -321,9 +425,11 @@ them running for 48 hours while monitoring health.
 
 ```text
 .
+├── bootstrap.sh         # public one-line installer (clones + runs install.sh)
 ├── install.sh
 ├── uninstall.sh
 ├── bluestream-manager
+├── web-ctl              # root-only JSON bridge used by the web console
 ├── status.sh
 ├── VERSION
 ├── README.md
@@ -333,19 +439,31 @@ them running for 48 hours while monitoring health.
 │   ├── common.sh        # paths, validation, logging, safe config parsing
 │   ├── relay.sh         # relay CRUD, lifecycle, ffmpeg args
 │   ├── playlist.sh      # playlist CRUD, compat checks, concat handling
+│   ├── destinations.sh  # outbound destination CRUD + stream/playlist attachments
+│   ├── publisher.sh     # Phase 1C: outbound multistream publisher engine
+│   ├── schedule.sh      # one-time future playlist start scheduling
+│   ├── resolver.sh       # public-webpage (yt-dlp) source resolver
+│   ├── youtube.sh       # YouTube URL classification helpers
 │   ├── media.sh         # managed media import/list/inspect/remove
 │   ├── probe.sh         # ffprobe probing, compat report, bandwidth math
 │   ├── health.sh        # HEALTHY/STARTING/STALE/... state logic
 │   ├── nginx.sh         # nginx config generation, validation
+│   ├── webconsole.sh    # web console account/state/port/unit provisioning
 │   ├── ssl.sh           # certbot management
 │   ├── firewall.sh      # UFW management
 │   ├── osdetect.sh      # Ubuntu version detection
 │   ├── diagnostics.sh   # diagnostics checklist
 │   ├── backup.sh        # config backup/restore
-│   └── selftest.sh      # end-to-end self-test
+│   └── selftest.sh      # end-to-end self-test (relay + publisher)
 ├── config/
-│   ├── nginx/           # site templates + HLS/player location snippets
+│   ├── nginx/           # site templates + HLS/player/console location snippets
 │   └── systemd/         # unit templates + runtime privilege-drop wrappers
+│       ├── bluestream-relay@.service / run-relay.sh
+│       ├── bluestream-playlist@.service / run-playlist.sh
+│       ├── bluestream-playlist-start@.service / run-playlist-start.sh
+│       ├── bluestream-publisher@.service / run-publisher.sh
+│       └── bluestream-web.service.template
+├── webapp/              # Flask web console (app.py, engine.py, templates/)
 ├── docs/                # installation, sources, playlists, wordpress,
 │                        # troubleshooting, security
 └── web/                 # bundled hls.js player (index.html, player.js, style.css)

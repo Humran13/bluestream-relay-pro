@@ -13,9 +13,20 @@ officially supported by 0.1.0. **No version has been real-VPS tested yet.**
 - A domain name pointed at the server (recommended; HTTPS works best).
 - Ports 80 and 443 reachable from the internet.
 
-## 1. Upload the project
+## 1. Get the project onto the server
 
-Copy the project directory to the server, for example:
+**One-line installer (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Humran13/bluestream-relay-pro/main/bootstrap.sh | sudo bash
+```
+
+This clones the public repository to `/usr/local/src/bluestream-relay-pro`
+(never your BlueStream runtime data) and runs `install.sh` for you. Pass
+installer flags after `--`, e.g. `... | sudo bash -s -- --domain
+video.example.com --assume-yes`.
+
+**Manual upload (if you prefer):**
 
 ```bash
 scp -r bluestream-relay-pro root@SERVER:/opt/
@@ -27,6 +38,9 @@ scp -r bluestream-relay-pro root@SERVER:/opt/
 cd /opt/bluestream-relay-pro
 sudo bash install.sh
 ```
+
+(Skip this step if you used the one-line bootstrap installer above — it
+already ran `install.sh` for you.)
 
 The installer will:
 
