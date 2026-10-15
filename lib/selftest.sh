@@ -190,13 +190,26 @@ run_selftest() {
         check "HLS output created by nginx-rtmp (www-data)" 1
     fi
 
-    # 6. Fetch the public M3U8 URL via nginx.
+    # 6. Fetch the public M3U8 URL via nginx. Connects to loopback directly
+    #    and sets the Host header explicitly (matching the web-console checks
+    #    further below) so this never depends on the configured domain
+    #    actually resolving in DNS - it still exercises the real nginx
+    #    server_name vhost match. The HLS/player locations on port 80 are
+    #    served directly regardless of SSL state (only /console/ redirects to
+    #    HTTPS when SSL is enabled - see bluestream-site.conf.template), so a
+    #    plain http://127.0.0.1 request is correct in both cases.
+    m3u8_url="http://127.0.0.1/hls/relay/$name/index.m3u8"
+    host_header=()
+    ffprobe_headers=()
     if [ -n "$BLUESTREAM_DOMAIN" ]; then
-        base="$(bs_public_base)"
-    else
-        base="http://127.0.0.1"
+        host_header=(-H "Host: $BLUESTREAM_DOMAIN")
+        # ffmpeg/ffprobe's -headers value needs a REAL CRLF terminator, not
+        # the two literal characters '\' 'r' '\' 'n' a double-quoted string
+        # would produce - use ANSI-C quoting ($'...') so bash expands \r\n to
+        # actual control characters before ffprobe ever sees the argument.
+        ffprobe_headers=(-headers $'Host: '"$BLUESTREAM_DOMAIN"$'\r\n')
     fi
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$base/hls/relay/$name/index.m3u8" 2>/dev/null)"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${host_header[@]}" "$m3u8_url" 2>/dev/null)"
     if [ "$code" = "200" ]; then
         check "public M3U8 URL reachable (HTTP 200)" 0
     else
@@ -205,10 +218,62 @@ run_selftest() {
     fi
 
     # 7. Confirm the output playlist is decodable.
-    if ffprobe -v error "$base/hls/relay/$name/index.m3u8" >/dev/null 2>&1; then
+    if ffprobe -v error "${ffprobe_headers[@]}" "$m3u8_url" >/dev/null 2>&1; then
         check "output decodable by ffprobe" 0
     else
         check "output decodable by ffprobe" 1
+    fi
+
+    # 8. Phase 1C: outbound publisher. The destination points back at THIS
+    #    SAME private nginx-rtmp bus under a different stream name - a real
+    #    loopback RTMP publish/subscribe round trip with no external
+    #    dependency, mirroring the deterministic local-sink acceptance test.
+    #    Verifies: the publisher unit activates, status reaches LIVE (real
+    #    data flow, not just "unit exists"), detaching stops it, and the
+    #    relay/website HLS output is completely unaffected throughout.
+    if command -v dest_create >/dev/null 2>&1 && command -v publisher_sync_target >/dev/null 2>&1; then
+        local destid="selftest-pub-$ts" destsink="selftest-sink-$ts" pubunit pub_ok="" i
+        dest_exists "$destid" && dest_delete "$destid" >/dev/null 2>&1
+        if dest_create "$destid" "Self-test sink" "custom" \
+            "${BLUESTREAM_RTMP_BASE}/${BLUESTREAM_RTMP_APP_RELAY}" "$destsink" "yes" >/dev/null 2>&1; then
+            check "create temporary publisher test destination" 0
+        else
+            check "create temporary publisher test destination" 1
+        fi
+        if relay_set_destinations "$name" "$destid" >/dev/null 2>&1; then
+            check "attach test destination to relay" 0
+        else
+            check "attach test destination to relay" 1
+        fi
+        pubunit="$(publisher_unit relay "$name" "$destid")"
+        for i in $(seq 1 20); do
+            [ "$(systemctl is-active "$pubunit" 2>/dev/null)" = "active" ] && { pub_ok=1; break; }
+            sleep 1
+        done
+        check "publisher unit activates ($pubunit)" "$([ -n "$pub_ok" ] && printf 0 || printf 1)"
+        if [ -n "$pub_ok" ]; then
+            local live_ok=""
+            for i in $(seq 1 20); do
+                publisher_status relay "$name" "$destid"
+                [ "$PUBLISHER_STATE" = "LIVE" ] && { live_ok=1; break; }
+                sleep 1
+            done
+            check "publisher reaches LIVE (real data flow observed)" "$([ -n "$live_ok" ] && printf 0 || printf 1)"
+        fi
+        # Detach: the publisher must stop; the relay/HLS must be unaffected.
+        relay_set_destinations "$name" "" >/dev/null 2>&1
+        local detach_ok=""
+        for i in $(seq 1 10); do
+            [ "$(systemctl is-active "$pubunit" 2>/dev/null)" != "active" ] && { detach_ok=1; break; }
+            sleep 1
+        done
+        check "publisher stops on detach" "$([ -n "$detach_ok" ] && printf 0 || printf 1)"
+        check "relay/HLS output unaffected by publisher lifecycle" "$([ "$(systemctl is-active "$unit" 2>/dev/null)" = "active" ] && printf 0 || printf 1)"
+        publisher_remove relay "$name" "$destid" >/dev/null 2>&1
+        dest_delete "$destid" >/dev/null 2>&1
+        rm -rf "$(bs_hls_dir_for relay "$destsink")" 2>/dev/null || true
+    else
+        bs_warn "Phase 1C publisher libraries not loaded; skipping publisher self-test"
     fi
 
     # Cleanup: remove only the exact temporary test artifacts.
@@ -234,20 +299,21 @@ run_selftest() {
         else
             check "web-ctl via sudo boundary (bluestream-web -> root) returns valid JSON" 1
         fi
-        if command -v ss >/dev/null 2>&1; then
-            sslines="$(ss -ltn 2>/dev/null | grep ':8080 ' || true)"
+        local wport="${BLUESTREAM_WEB_PORT:-8080}"
+        if command -v ss >/dev/null 2>&1 && bs_valid_port "$wport"; then
+            sslines="$(ss -ltn 2>/dev/null | grep ":${wport} " || true)"
             case "$sslines" in
-                *127.0.0.1:8080*)
-                    check "Gunicorn listener on 127.0.0.1:8080" 0
+                *"127.0.0.1:${wport}"*)
+                    check "Gunicorn listener on 127.0.0.1:${wport}" 0
                     case "$sslines" in
-                        *'0.0.0.0:8080'*|*'[::]:8080'*) check "Gunicorn listener loopback only" 1 ;;
+                        *"0.0.0.0:${wport}"*|*"[::]:${wport}"*) check "Gunicorn listener loopback only" 1 ;;
                         *) check "Gunicorn listener loopback only" 0 ;;
                     esac
                     ;;
-                *) check "Gunicorn listener on 127.0.0.1:8080" 1 ;;
+                *) check "Gunicorn listener on 127.0.0.1:${wport}" 1 ;;
             esac
         else
-            bs_warn "ss not available; skipping web console listener checks"
+            bs_warn "ss not available (or no valid web port configured); skipping web console listener checks"
         fi
         if bs_have_cmd curl && nginx_running; then
             # Local loopback check against the configured BlueStream domain.

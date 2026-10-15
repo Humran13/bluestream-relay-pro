@@ -25,6 +25,12 @@ source "$LIBDIR/common.sh" || exit 1
 source "$LIBDIR/probe.sh" || exit 1
 # shellcheck source=lib/relay.sh
 source "$LIBDIR/relay.sh" || exit 1
+# shellcheck source=lib/destinations.sh
+source "$LIBDIR/destinations.sh" || exit 1
+# shellcheck source=lib/playlist.sh
+source "$LIBDIR/playlist.sh" || exit 1
+# shellcheck source=lib/publisher.sh
+source "$LIBDIR/publisher.sh" || exit 1
 
 bs_detect_install
 bs_load_server_conf
@@ -101,6 +107,13 @@ if [ "${BS_DEBUG_ARGS:-0}" = "1" ]; then
     bs_info "Sanitized FFmpeg argv for relay '$NAME':"
     bs_dump_ffmpeg_args
 fi
+
+# Phase 1C: (re)start this relay's attached+enabled outbound publishers. Runs
+# on EVERY start of this unit - web console, CLI, systemd's own
+# Restart=on-failure, or a normal boot - so publisher recovery never depends
+# on which code path triggered the restart. Best-effort: a publisher sync
+# failure must never block the relay itself from starting.
+publisher_sync_target relay "$NAME" 2>/dev/null || true
 
 # Final umask so HLS segments are 0640 (group-readable by nginx).
 umask 0027

@@ -740,6 +740,11 @@ playlist_delete() {
         rm -f "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.schedule"
         rm -f "/etc/systemd/system/bluestream-schedule-$name.timer"
     fi
+    # Phase 1C: remove every generated publisher drop-in for this playlist
+    # (see the matching comment in relay_delete).
+    if command -v publisher_remove_all_for_target >/dev/null 2>&1; then
+        publisher_remove_all_for_target playlist "$name" 2>/dev/null || true
+    fi
     systemctl disable "$unit" 2>/dev/null || true
     systemctl reset-failed "$unit" 2>/dev/null || true
     rm -f "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist" || return 4
@@ -891,6 +896,11 @@ playlist_set_destinations() {
     bs_dest_attach_normalize "$csv" || return 3
     PLAYLIST_DESTINATIONS="$DEST_ATTACH_CSV"
     playlist_save_config "$name" || return 4
+    # Phase 1C: reconcile outbound publishers immediately (see the matching
+    # comment in relay_set_destinations).
+    if command -v publisher_sync_target >/dev/null 2>&1; then
+        publisher_sync_target playlist "$name" 2>/dev/null || true
+    fi
     return 0
 }
 

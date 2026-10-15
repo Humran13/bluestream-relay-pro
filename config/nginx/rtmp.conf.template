@@ -14,6 +14,11 @@ rtmp {
             live on;
             allow publish 127.0.0.1;
             deny publish all;
+            # Phase 1C: outbound publisher processes PLAY (subscribe to) this
+            # exact stream as loopback RTMP clients to fan it out to each
+            # attached destination. Still never reachable for play from
+            # anywhere but this host - only the loopback allowance is added.
+            allow play 127.0.0.1;
             deny play all;
 
             hls on;
@@ -29,6 +34,8 @@ rtmp {
             live on;
             allow publish 127.0.0.1;
             deny publish all;
+            # Phase 1C: see the matching comment in bluestream-relay above.
+            allow play 127.0.0.1;
             deny play all;
 
             hls on;

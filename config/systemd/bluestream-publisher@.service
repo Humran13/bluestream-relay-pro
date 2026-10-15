@@ -1,0 +1,58 @@
+# BlueStream Relay Pro - Phase 1C outbound destination publisher unit template.
+# Instantiated as: bluestream-publisher@<kind>:<target>:<destid>.service
+# Installed to:    /etc/systemd/system/bluestream-publisher@.service
+#
+# One instance per attached + enabled destination of one relay/playlist. The
+# wrapper reads the root-only destination config (stream key), builds the
+# FFmpeg argv (source = private local RTMP bus, destination = the operator's
+# own RTMP/RTMPS server), then permanently drops privileges with setpriv
+# before exec'ing FFmpeg. FFmpeg never runs as root.
+#
+# A generated per-instance drop-in (written by publisher_sync_dropin in
+# lib/publisher.sh, under bluestream-publisher@<instance>.service.d/) supplies
+# BindsTo=/After= on this instance's source relay/playlist unit, so it stops
+# automatically when its source stops - no other destination and no other
+# part of BlueStream is affected by one destination's state.
+#
+# NOTE: ProtectProc/ProcSubset require systemd >= 247 (Ubuntu 22.04+). Older
+# systemd (Ubuntu 20.04, systemd 245) logs an "unknown directive" warning for
+# these two lines and ignores them; every other hardening directive here is
+# supported since systemd 231 (Ubuntu 20.04+), matching the relay/playlist
+# unit templates.
+
+[Unit]
+Description=BlueStream Relay Pro - outbound publisher %i
+Documentation=file:/usr/local/lib/bluestream/docs/security.md
+StartLimitIntervalSec=120
+StartLimitBurst=15
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/bluestream/run-publisher.sh %i
+Restart=on-failure
+RestartSec=3
+
+# --- Hardening (directives available since systemd 231; OK on Ubuntu 20.04+;
+# ProtectProc/ProcSubset need systemd >= 247, see note above) -----------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ProtectProc=invisible
+ProcSubset=pid
+
+# No ReadWritePaths: the publisher reads its source over the loopback RTMP
+# bus and writes only to its external destination over the network. It never
+# touches a local file, so ProtectSystem=strict's read-only root is never
+# relaxed for this unit.
+
+SyslogIdentifier=bluestream-publisher-%i
+StandardOutput=journal
+StandardError=journal

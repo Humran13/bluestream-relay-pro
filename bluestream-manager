@@ -22,7 +22,7 @@ else
     exit 1
 fi
 
-for _bs_lib in common osdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest; do
+for _bs_lib in common osdetect probe health relay playlist media destinations publisher nginx ssl firewall backup diagnostics selftest; do
     # shellcheck source=lib/common.sh
     # shellcheck source=lib/relay.sh
     # shellcheck source=lib/playlist.sh

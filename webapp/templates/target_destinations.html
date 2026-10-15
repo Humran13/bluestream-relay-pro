@@ -31,7 +31,8 @@
           <th>Destination</th>
           <th>Platform</th>
           <th>Server URL</th>
-          <th>Status</th>
+          <th>Enabled</th>
+          <th>Publishing</th>
         </tr>
       </thead>
       <tbody>
@@ -54,6 +55,16 @@
             <span class="badge badge-stopped">Disabled</span>
             {% endif %}
           </td>
+          <td>
+            {% if d.attached and d.publish %}
+            <span class="badge {{ d.publish.badge_class }}" title="{{ d.publish.detail }}">{{ d.publish.state_label }}</span>
+            {% if d.publish.restarts > 0 %}<span class="muted"> &middot; {{ d.publish.restarts }} restart{{ '' if d.publish.restarts == 1 else 's' }}</span>{% endif %}
+            {% elif d.attached %}
+            <span class="badge badge-unknown">Unknown</span>
+            {% else %}
+            <span class="muted">&mdash;</span>
+            {% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -61,8 +72,9 @@
     </div>
     <p class="muted">
       A disabled destination may still be attached &mdash; it is not detached
-      automatically. Up to {{ max_destinations }} destinations per {{ noun }}.
-      The stream key is never shown here.
+      automatically, but no publisher runs for it. Up to {{ max_destinations }}
+      destinations per {{ noun }}. The stream key is never shown here.
+      Publishing status refreshes when you reload this page.
     </p>
     <div class="form-actions">
       <button type="submit" class="btn">Save Attachments</button>

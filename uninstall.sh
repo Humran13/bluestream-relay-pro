@@ -68,13 +68,16 @@ if [ "$answer" != "bluestream" ]; then
 fi
 
 # --- stop and disable all instances ---
-printf 'Stopping and disabling relays/playlists...\n'
+printf 'Stopping and disabling relays/playlists/publishers...\n'
+# Phase 1C: stop every outbound publisher BEFORE the relays/playlists they
+# read from, so nothing is left trying (and failing) to reconnect mid-removal.
+systemctl stop 'bluestream-publisher@*' 2>/dev/null || true
 systemctl stop 'bluestream-relay@*' 'bluestream-playlist@*' 2>/dev/null || true
 # GUI-8A: also disable any one-time playlist start timers.
 for u in $(systemctl list-unit-files --plain --no-legend 'bluestream-schedule-*.timer' 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null || true
 done
-for u in $(systemctl list-unit-files --plain --no-legend 'bluestream-relay@*.service' 'bluestream-playlist@*.service' 2>/dev/null | awk '{print $1}'); do
+for u in $(systemctl list-unit-files --plain --no-legend 'bluestream-relay@*.service' 'bluestream-playlist@*.service' 'bluestream-publisher@*.service' 2>/dev/null | awk '{print $1}'); do
     systemctl disable "$u" 2>/dev/null || true
 done
 
@@ -82,9 +85,11 @@ done
 rm -f /etc/systemd/system/bluestream-relay@.service
 rm -f /etc/systemd/system/bluestream-playlist@.service
 rm -f /etc/systemd/system/bluestream-playlist-start@.service
+rm -f /etc/systemd/system/bluestream-publisher@.service
 rm -f /etc/systemd/system/bluestream-schedule-*.timer
 rm -rf /etc/systemd/system/bluestream-relay@*.service.d
 rm -rf /etc/systemd/system/bluestream-playlist@*.service.d
+rm -rf /etc/systemd/system/bluestream-publisher@*.service.d
 systemctl daemon-reload 2>/dev/null || true
 
 # --- remove the web console service, sudoers policy and nginx snippet ---

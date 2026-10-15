@@ -420,6 +420,60 @@ def _present_destination(item) -> dict | None:
     }
 
 
+# Phase 1C: publisher states the template may style/badge. Anything else
+# (an engine version skew, a future state) falls back to a plain label.
+_PUBLISH_STATE_LABELS = {
+    "DISABLED": "Disabled",
+    "STOPPED": "Stopped",
+    "STARTING": "Starting",
+    "LIVE": "Live",
+    "RECONNECTING": "Reconnecting",
+    "FAILED": "Failed",
+    "UNKNOWN": "Unknown",
+}
+
+# Reuses the existing badge palette (console.css) - no new colors introduced.
+_PUBLISH_STATE_BADGE = {
+    "DISABLED": "badge-disabled",
+    "STOPPED": "badge-stopped",
+    "STARTING": "badge-starting",
+    "LIVE": "badge-healthy",
+    "RECONNECTING": "badge-stale",
+    "FAILED": "badge-failed",
+    "UNKNOWN": "badge-unknown",
+}
+
+
+def _present_publish_status(item) -> dict | None:
+    """Shape one safe engine publisher-status record for the template.
+
+    Never includes a stream key or the destination server URL - web-ctl
+    itself never emits them for this operation.
+    """
+    if not isinstance(item, dict):
+        return None
+    dest_id = (item.get("id") or "").strip()
+    if not dest_id:
+        return None
+    state = (item.get("state") or "UNKNOWN").strip() or "UNKNOWN"
+    try:
+        restarts = int(item.get("restarts") or 0)
+    except (TypeError, ValueError):
+        restarts = 0
+    try:
+        uptime_seconds = int(item.get("uptime_seconds") or 0)
+    except (TypeError, ValueError):
+        uptime_seconds = 0
+    return {
+        "state": state,
+        "state_label": _PUBLISH_STATE_LABELS.get(state, state.title()),
+        "badge_class": _PUBLISH_STATE_BADGE.get(state, "badge-unknown"),
+        "detail": item.get("detail") or "",
+        "restarts": max(restarts, 0),
+        "uptime_seconds": max(uptime_seconds, 0),
+    }
+
+
 # GUI-3A: the web-ctl JSON helper serializes all values as strings; the console
 # normalizes the six cache-stat fields to ints before rendering/persisting.
 _CACHE_STATUS_FIELDS = (
@@ -1667,6 +1721,7 @@ def _register_console_routes(app: Flask) -> None:
             "exists_op": "relay_list",
             "get": "relay_destinations_get",
             "set": "relay_destinations_set",
+            "publisher_status": "relay_publisher_status",
             "list_endpoint": "console.streams",
             "get_endpoint": "console.relay_destinations",
             "post_endpoint": "console.relay_destinations_post",
@@ -1676,6 +1731,7 @@ def _register_console_routes(app: Flask) -> None:
             "exists_op": "playlist_list",
             "get": "playlist_destinations_get",
             "set": "playlist_destinations_set",
+            "publisher_status": "playlist_publisher_status",
             "list_endpoint": "console.playlists",
             "get_endpoint": "console.playlist_destinations",
             "post_endpoint": "console.playlist_destinations_post",
@@ -1706,11 +1762,30 @@ def _register_console_routes(app: Flask) -> None:
         attached = set(
             i for i in attached_ids if isinstance(i, str) and valid_target_name(i)
         )
+        # Phase 1C: publish status per attached destination. Best-effort -
+        # a status read failure must never block the destinations page from
+        # rendering (it only means the status badges fall back to "Unknown").
+        publish_status = {}
+        if attached:
+            try:
+                status_rows = getattr(engine, spec["publisher_status"])(name) or []
+            except EngineError as exc:
+                current_app.logger.warning(
+                    "%s '%s' failed: %s", spec["publisher_status"], name, exc
+                )
+                status_rows = []
+            for row in status_rows:
+                presented_status = _present_publish_status(row)
+                if presented_status is not None and isinstance(row, dict):
+                    row_id = (row.get("id") or "").strip()
+                    if row_id:
+                        publish_status[row_id] = presented_status
         destinations = []
         for presented in (_present_destination(item) for item in all_items):
             if presented is None:
                 continue
             presented["attached"] = presented["name"] in attached
+            presented["publish"] = publish_status.get(presented["name"])
             destinations.append(presented)
         # Stale IDs (destination deleted out-of-band, which the guard prevents
         # in normal use) are surfaced so the operator can clear them on save.

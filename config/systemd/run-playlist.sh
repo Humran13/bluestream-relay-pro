@@ -29,6 +29,12 @@ source "$LIBDIR/common.sh" || exit 1
 source "$LIBDIR/probe.sh" || exit 1
 # shellcheck source=lib/playlist.sh
 source "$LIBDIR/playlist.sh" || exit 1
+# shellcheck source=lib/destinations.sh
+source "$LIBDIR/destinations.sh" || exit 1
+# shellcheck source=lib/relay.sh
+source "$LIBDIR/relay.sh" || exit 1
+# shellcheck source=lib/publisher.sh
+source "$LIBDIR/publisher.sh" || exit 1
 
 bs_detect_install
 bs_load_server_conf
@@ -97,6 +103,11 @@ if [ "${BS_DEBUG_ARGS:-0}" = "1" ]; then
     bs_info "Sanitized FFmpeg argv for playlist '$NAME':"
     bs_dump_ffmpeg_args
 fi
+
+# Phase 1C: (re)start this playlist's attached+enabled outbound publishers
+# (see the matching comment in run-relay.sh). Best-effort: a publisher sync
+# failure must never block the playlist itself from starting.
+publisher_sync_target playlist "$NAME" 2>/dev/null || true
 
 # Preparation is complete: HLS output begins once FFmpeg publishes. Clear the
 # marker so health transitions to HEALTHY/STARTING as normal.

@@ -51,9 +51,39 @@ nginx_assert_no_placeholders() {
     return 0
 }
 
+# Phase 1C: nginx-rtmp-module keeps each live application's publisher/player
+# state PER WORKER PROCESS (there is no cross-worker shared memory for live
+# stream routing). With the package default (`worker_processes auto;` - one
+# worker per CPU core) an outbound publisher's PLAY connection to the private
+# RTMP bus is accepted by whichever worker next calls accept() - often a
+# DIFFERENT worker than the one holding the source relay/playlist's PUBLISH
+# connection - and the two are never linked: the publisher process connects
+# successfully but never receives any data and hangs until its own read
+# timeout. Pinning nginx to a single worker is the standard, documented fix
+# for this nginx-rtmp-module constraint. This only affects nginx's own HTTP
+# serving concurrency (BlueStream's HLS/console traffic is lightweight; the
+# real bottleneck is always FFmpeg CPU/bandwidth, never nginx) - if this host
+# runs other, independent, high-traffic nginx sites, review this trade-off
+# before installing BlueStream alongside them.
+nginx_ensure_single_worker() {
+    local conf="/etc/nginx/nginx.conf"
+    [ -f "$conf" ] || return 0
+    if grep -qE '^[[:space:]]*worker_processes[[:space:]]' "$conf"; then
+        if grep -qE '^[[:space:]]*worker_processes[[:space:]]+1;[[:space:]]*$' "$conf"; then
+            return 0
+        fi
+        sed -i -E 's/^[[:space:]]*worker_processes[[:space:]]+[^;]+;/worker_processes 1;/' "$conf"
+    else
+        sed -i '1i worker_processes 1;' "$conf"
+    fi
+    bs_info "nginx worker_processes pinned to 1 (required for the private RTMP bus: nginx-rtmp keeps live-stream state per worker, so a publisher's play connection and the source's publish connection must land on the same worker)."
+    return 0
+}
+
 nginx_gen_config() {
     bs_require_root
     bs_require_cmd nginx
+    nginx_ensure_single_worker
     local template dest domain https_block
     template="$(nginx_site_template)"
     dest="$NGINX_SITE_FILE"
@@ -95,11 +125,19 @@ nginx_gen_config() {
     # Web console reverse-proxy snippet (fixed loopback upstream). The upload
     # body cap is rendered from the SINGLE authoritative MAX_MEDIA_UPLOAD_MB
     # value (validated digits-only, so it can never inject nginx directives).
+    # Step 8: the proxy target port is rendered from the SINGLE authoritative
+    # BLUESTREAM_WEB_PORT value (validated digits-only in range), matching
+    # exactly the port Gunicorn is told to bind in bluestream-web.service.
     if ! bs_valid_upload_mb "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"; then
         bs_error "Invalid MAX_MEDIA_UPLOAD_MB in server.conf: $BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
         return 1
     fi
+    if ! bs_valid_port "${BLUESTREAM_WEB_PORT:-}"; then
+        bs_error "Invalid or unset WEB_PORT in server.conf: ${BLUESTREAM_WEB_PORT:-<empty>}"
+        return 1
+    fi
     sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
+        -e "s|__WEB_PORT__|${BLUESTREAM_WEB_PORT}|g" \
         "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" > "$NGINX_SNIPPET_DIR/console-location.conf.tmp"
     mv -f "$NGINX_SNIPPET_DIR/console-location.conf.tmp" "$NGINX_SNIPPET_DIR/console-location.conf"
     chmod 0644 "$NGINX_SNIPPET_DIR/console-location.conf"
@@ -110,6 +148,7 @@ nginx_gen_config() {
         cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-redirect-http.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
     else
         sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
+            -e "s|__WEB_PORT__|${BLUESTREAM_WEB_PORT}|g" \
             "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" > "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
     fi
     mv -f "$NGINX_SNIPPET_DIR/console-http.conf.tmp" "$NGINX_SNIPPET_DIR/console-http.conf"
@@ -176,6 +215,17 @@ nginx_site_enable() {
     [ -f "$NGINX_SITE_FILE" ] || bs_die "Site file missing: $NGINX_SITE_FILE"
     mkdir -p /etc/nginx/sites-enabled 2>/dev/null || true
     ln -sf "$NGINX_SITE_FILE" "$NGINX_SITE_LINK"
+    # The stock Ubuntu nginx package ships sites-enabled/default (server_name
+    # _; a catch-all vhost). Left enabled, it silently answers any request
+    # whose Host header doesn't exactly match the configured BlueStream
+    # domain (a bare IP, a typo, DNS not yet propagated) with nginx's default
+    # page/404 instead of BlueStream's site. Only the ENABLED symlink is
+    # removed - sites-available/default is left completely untouched, so this
+    # is trivially reversible (re-create the symlink) and never deletes data.
+    if [ -L /etc/nginx/sites-enabled/default ]; then
+        rm -f /etc/nginx/sites-enabled/default
+        bs_info "Disabled the stock nginx default site (sites-available/default is preserved, untouched)."
+    fi
 }
 
 nginx_test() {

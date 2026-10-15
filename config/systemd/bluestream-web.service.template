@@ -1,11 +1,14 @@
-# BlueStream Relay Pro - web console systemd unit template (GUI-1A.3A).
+# BlueStream Relay Pro - web console systemd unit TEMPLATE (GUI-1A.3A).
 #
-# Installed by GUI-1A.3B as:  /etc/systemd/system/bluestream-web.service
+# Rendered (Step 8: __WEB_PORT__ -> the auto-selected loopback port; see
+# web_select_port / web_install_unit in lib/webconsole.sh) and installed by
+# GUI-1A.3B as:  /etc/systemd/system/bluestream-web.service
 #
 # The web console runs unprivileged as bluestream-web, listens ONLY on
-# 127.0.0.1:8080, and reaches the root-owned BlueStream engine through the
-# narrowly scoped sudoers entry (config/sudoers/bluestream-web). nginx is the
-# only front-end; Gunicorn is never exposed publicly.
+# 127.0.0.1:__WEB_PORT__, and reaches the root-owned BlueStream engine through
+# the narrowly scoped sudoers entry (config/sudoers/bluestream-web). nginx is
+# the only front-end; Gunicorn is never exposed publicly and is never bound
+# to a public or wildcard address under any configuration.
 #
 # PATH/VERIFICATION NOTES (GUI-1A.3B must verify on the real Ubuntu host):
 #   - /usr/bin/gunicorn is the Debian/Ubuntu python3-gunicorn path; if
@@ -33,7 +36,7 @@ WorkingDirectory=/usr/local/lib/bluestream
 # hardening for an unprivileged web user). PYTHONUNBUFFERED keeps logs flowing.
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONNOUSERSITE=1
-ExecStart=/usr/bin/gunicorn --workers 1 --bind 127.0.0.1:8080 webapp.wsgi:application
+ExecStart=/usr/bin/gunicorn --workers 1 --bind 127.0.0.1:__WEB_PORT__ webapp.wsgi:application
 Restart=on-failure
 RestartSec=5
 
@@ -53,10 +56,11 @@ ProtectSystem=strict
 # unable to write any of these paths):
 #   /run/sudo               - sudo timestamp directory (NOPASSWD)
 #   /etc/systemd/system     - relay/playlist dropin override.conf writes
-#                             (relay_sync_dropin) and GUI-8A generated
+#                             (relay_sync_dropin), GUI-8A generated
 #                             bluestream-schedule-<name>.timer units
-#                             (schedule_set / schedule_clear); root:root 0644,
-#                             so only the sudo-root web-ctl child can write them
+#                             (schedule_set / schedule_clear), and Phase 1C
+#                             generated bluestream-publisher@<instance>.service.d
+#                             drop-ins (publisher_sync_dropin / publisher_remove)
 #   /etc/bluestream/relays  - relay config create/save (relay_create /
 #                             relay_save_config); on disk root:root 0600, so
 #                             only the sudo-root web-ctl child can write

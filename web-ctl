@@ -106,10 +106,22 @@
 #   web-ctl playlist_schedule_set   <name> <epoch-utc> <iso-display>
 #   web-ctl playlist_schedule_clear <name>
 #
+# Phase 1C OUTBOUND PUBLISHER STATUS (read-only).  Per-destination publish
+# state for one relay/playlist (never the stream key, never the destination
+# server URL - only the destination id, display name, platform and state):
+#
+#   web-ctl relay_publisher_status    <name>
+#   web-ctl playlist_publisher_status <name>
+#
+# No write operation exists here: publishers are started/stopped ONLY as a
+# side effect of the existing lifecycle/attachment/destination operations
+# above (relay_start/stop, *_destinations_set, destination_enable/disable).
+#
 # The lifecycle actions, the create/import operations above, the two cache
-# operations, the four attachment setters and the three safe-delete operations
-# are the ONLY write operations at any layer.  No generic configuration
-# editing, arbitrary-path deletion, or user-management operations exist.
+# operations, the four attachment setters, the three safe-delete operations
+# and the publisher status reads are the ONLY operations at any layer.  No
+# generic configuration editing, arbitrary-path deletion, or user-management
+# operations exist.
 #
 # Output contract:
 #   success -> {"ok": true,  "data": ...}                    on stdout, exit 0
@@ -174,7 +186,7 @@ fi
 # business logic (version, config parsing, discovery, service state, health)
 # stays in these libraries; Python is used only for JSON serialization.
 # ---------------------------------------------------------------------------
-for _bs_lib in common health probe relay playlist media destinations schedule; do
+for _bs_lib in common health probe relay playlist media destinations schedule publisher; do
     # shellcheck source=lib/common.sh
     . "$BS_ROOT/lib/$_bs_lib.sh" || {
         printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
@@ -677,6 +689,47 @@ wc_op_target_destinations_set() {
         "${kind}_destinations_set" "$name" "$(bs_dest_attach_count "$DEST_ATTACH_CSV")" | wc_json object
 }
 
+# ---------------------------------------------------------------------------
+# Phase 1C: outbound publisher status for one relay/playlist's attached
+# destinations. NEVER emits a stream key or the destination's server URL -
+# only the destination id, display name, platform and derived publish state.
+# ---------------------------------------------------------------------------
+wc_op_target_publisher_status() {
+    local kind="$1" name="${2:-}" id display platform
+    bs_valid_name "$name" || wc_fail "invalid ${kind} name" "INVALID_NAME"
+    if [ "$kind" = "relay" ]; then
+        relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    else
+        playlist_exists "$name" || wc_fail "playlist not found: $name" "NOT_FOUND"
+    fi
+    {
+        while IFS= read -r id; do
+            [ -n "$id" ] || continue
+            display=""; platform=""
+            if dest_load_config "$id" 2>/dev/null; then
+                display="$DEST_DISPLAY"
+                platform="$DEST_PLATFORM"
+            fi
+            publisher_status "$kind" "$name" "$id"
+            printf '\0'
+            printf 'id\0%s\0'               "$id"
+            printf 'display_name\0%s\0'     "$display"
+            printf 'platform\0%s\0'         "$platform"
+            printf 'state\0%s\0'            "$PUBLISHER_STATE"
+            printf 'detail\0%s\0'           "$PUBLISHER_DETAIL"
+            printf 'restarts\0%s\0'         "$PUBLISHER_RESTARTS"
+            printf 'uptime_seconds\0%s\0'   "$PUBLISHER_UPTIME"
+            printf 'last_connected\0%s\0'   "$PUBLISHER_LAST_CONNECTED"
+        done < <(
+            if [ "$kind" = "relay" ]; then
+                relay_get_destinations "$name" 2>/dev/null
+            else
+                playlist_get_destinations "$name" 2>/dev/null
+            fi
+        )
+    } | wc_json array
+}
+
 wc_op_destination_create() {
     local name="${1:-}" display="${2:-}" platform="${3:-}" url="${4:-}"
     local enabled="${5:-}" key="" rc
@@ -1089,8 +1142,21 @@ wc_dispatch() {
             fi
             wc_op_playlist_schedule_set "$name" "$value2" "${4:-}"
             ;;
+        relay_publisher_status|playlist_publisher_status)
+            # Phase 1C: EXACTLY operation + one validated target name (argv == 2).
+            if [ "$argcount" -lt 2 ]; then
+                wc_fail "missing target name" "MISSING_TARGET"
+            fi
+            if [ "$argcount" -gt 2 ]; then
+                wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            fi
+            case "$operation" in
+                relay_publisher_status)    wc_op_target_publisher_status relay "$name" ;;
+                playlist_publisher_status) wc_op_target_publisher_status playlist "$name" ;;
+            esac
+            ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|relay_create_webpage|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|relay_set_source_webpage|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|relay_create_webpage|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|relay_set_source_webpage|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear|relay_publisher_status|playlist_publisher_status)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

@@ -37,8 +37,12 @@ RestrictRealtime=true
 # only; nginx-rtmp (www-data) owns the HLS output tree, so FFmpeg requires no
 # writable filesystem path. The run directory is writable ONLY for the root
 # bootstrap, which clears/writes the resolver start-failure diagnostic
-# (<name>.resolve-fail, 0600 root) before dropping privileges.
-ReadWritePaths=/var/lib/bluestream/run
+# (<name>.resolve-fail, 0600 root) before dropping privileges. /etc/systemd/
+# system is writable ONLY for the root bootstrap's Phase 1C publisher sync
+# (publisher_sync_target writes/removes bluestream-publisher@<instance>.
+# service.d/override.conf drop-ins) - it runs before the privilege drop, on
+# every start of this unit, regardless of what triggered it.
+ReadWritePaths=/var/lib/bluestream/run /etc/systemd/system
 
 SyslogIdentifier=bluestream-relay-%i
 StandardOutput=journal

@@ -182,6 +182,14 @@ relay_set_destinations() {
     bs_dest_attach_normalize "$csv" || return 3
     RELAY_DESTINATIONS="$DEST_ATTACH_CSV"
     relay_save_config "$name" || return 4
+    # Phase 1C: reconcile outbound publishers immediately (start newly
+    # attached+enabled destinations if the relay is active, stop/remove
+    # detached ones). A no-op when lib/publisher.sh is not loaded (e.g. a
+    # harness that sources relay.sh alone), so this never breaks Phase 1B
+    # callers that only exercise attachment bookkeeping.
+    if command -v publisher_sync_target >/dev/null 2>&1; then
+        publisher_sync_target relay "$name" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -419,6 +427,13 @@ relay_delete() {
     relay_exists "$name" || return 2
     unit="$(bs_unit relay "$name")"
     bs_unit_definitively_stopped "$unit" || return 3
+    # Phase 1C: remove every generated publisher drop-in for this relay before
+    # its config disappears. The relay is already definitively stopped, so
+    # BindsTo has already stopped every attached publisher; this only cleans
+    # up the per-instance drop-in directories so they never accumulate.
+    if command -v publisher_remove_all_for_target >/dev/null 2>&1; then
+        publisher_remove_all_for_target relay "$name" 2>/dev/null || true
+    fi
     systemctl disable "$unit" 2>/dev/null || true
     systemctl reset-failed "$unit" 2>/dev/null || true
     rm -f "$BLUESTREAM_RELAY_CONF_DIR/$name.conf" || return 4

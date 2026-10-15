@@ -62,7 +62,7 @@ class FakeEngine:
     def call(self, operation):
         self.calls.append(operation)
         if operation not in self.payloads:
-            raise EngineError("unsupported in fake: %s" % operation)
+            raise EngineError("unsupported in fake: %r" % (operation,))
         value = self.payloads[operation]
         if isinstance(value, Exception):
             raise value
@@ -153,6 +153,13 @@ class FakeEngine:
 
     def playlist_destinations_set(self, name, ids):
         return self._mutation("playlist_destinations_set", name, tuple(ids))
+
+    # Phase 1C: outbound publisher status (read-only).
+    def relay_publisher_status(self, name):
+        return self.call(("relay_publisher_status", name))
+
+    def playlist_publisher_status(self, name):
+        return self.call(("playlist_publisher_status", name))
 
     # GUI-5A: safe delete.
     def relay_delete(self, name):
@@ -2027,22 +2034,22 @@ class ProductionModeTests(unittest.TestCase):
         self.assertEqual(data, {"version": "0.1.0"})
 
     def test_gunicorn_template_binds_loopback_only(self):
-        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service.template").read_text(
             encoding="utf-8"
         )
-        self.assertIn("127.0.0.1:8080", text)
+        self.assertIn("127.0.0.1:__WEB_PORT__", text)
         self.assertNotIn("0.0.0.0", text)
         self.assertIn("--workers 1", text)
 
     def test_gunicorn_template_runs_as_bluestream_web(self):
-        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service.template").read_text(
             encoding="utf-8"
         )
         self.assertIn("User=bluestream-web", text)
         self.assertIn("Group=bluestream-web", text)
 
     def test_service_template_does_not_break_sudo(self):
-        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service").read_text(
+        text = (self.repo_root / "config" / "systemd" / "bluestream-web.service.template").read_text(
             encoding="utf-8"
         )
         # Inspect active directives only (comments may legitimately discuss
@@ -4811,6 +4818,18 @@ class Phase1bDestinationAttachmentTests(unittest.TestCase):
             "destination_list": self.RELAY_DEST_LIST,
             ("relay_destinations_get", "news"): ["main-youtube"],
             ("playlist_destinations_get", "promo"): [],
+            ("relay_publisher_status", "news"): [
+                {
+                    "id": "main-youtube",
+                    "display_name": "Main YouTube",
+                    "platform": "youtube",
+                    "state": "LIVE",
+                    "detail": "publishing (data flowing to the destination)",
+                    "restarts": "0",
+                    "uptime_seconds": "120",
+                    "last_connected": "1700000000",
+                }
+            ],
             "playlist_cache_status": {
                 "total_bytes": "0", "artifact_count": "0",
                 "protected_bytes": "0", "protected_count": "0",

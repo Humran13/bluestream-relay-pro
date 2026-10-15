@@ -45,6 +45,10 @@ ALLOWED_READ_OPERATIONS = frozenset(
         "playlist_destinations_get",
         # GUI-8A: one-time playlist start schedule (absolute instant only).
         "playlist_schedule_get",
+        # Phase 1C: outbound publisher status (never a stream key or server
+        # URL - only destination id/display/platform and derived state).
+        "relay_publisher_status",
+        "playlist_publisher_status",
     }
 )
 
@@ -461,6 +465,8 @@ class EngineClient:
             "relay_destinations_get",
             "playlist_destinations_get",
             "playlist_schedule_get",
+            "relay_publisher_status",
+            "playlist_publisher_status",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
@@ -848,3 +854,17 @@ class EngineClient:
     def playlist_destinations_set(self, name: str, ids):
         """Replace a playlist's attached destination IDs (list/str; empty detaches)."""
         return self._mutation("playlist_destinations_set", name, _ids_to_csv(ids))
+
+    # ------------------------------------------------------------------
+    # Phase 1C: outbound publisher status (read-only; never a stream key or
+    # destination server URL).
+    # ------------------------------------------------------------------
+    def relay_publisher_status(self, name: str) -> list:
+        """Return per-attached-destination publish state for a relay."""
+        data = self.read("relay_publisher_status", name)
+        return data if isinstance(data, list) else []
+
+    def playlist_publisher_status(self, name: str) -> list:
+        """Return per-attached-destination publish state for a playlist."""
+        data = self.read("playlist_publisher_status", name)
+        return data if isinstance(data, list) else []

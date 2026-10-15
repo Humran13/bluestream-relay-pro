@@ -348,6 +348,8 @@ install_files() {
     install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-playlist.sh" "$libdir/run-playlist.sh"
     # GUI-8A: one-time scheduled playlist start wrapper.
     install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-playlist-start.sh" "$libdir/run-playlist-start.sh"
+    # Phase 1C: outbound destination publisher wrapper.
+    install -o root -g root -m 0755 "$BS_ROOT/config/systemd/run-publisher.sh" "$libdir/run-publisher.sh"
     cp -f "$BS_ROOT/VERSION" "$libdir/VERSION"
     cp -f "$BS_ROOT/CHANGELOG.md" "$libdir/CHANGELOG.md"
     cp -f "$BS_ROOT/README.md" "$libdir/README.md"
@@ -367,6 +369,10 @@ install_files() {
     # GUI-8A: one-time playlist start oneshot template (triggered only by a
     # generated bluestream-schedule-<name>.timer).
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-playlist-start@.service" /etc/systemd/system/bluestream-playlist-start@.service
+    # Phase 1C: outbound destination publisher template (per-instance drop-in
+    # that binds a given instance's lifecycle to its source relay/playlist is
+    # generated on demand by publisher_sync_dropin - never installed here).
+    install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-publisher@.service" /etc/systemd/system/bluestream-publisher@.service
 
     # Web console application + web-ctl (GUI-1A.3B). web_install_files also
     # installs the systemd unit and the sudoers source; sudoers itself is
@@ -375,7 +381,7 @@ install_files() {
 
     # Verify the production runners: present, root:root owned, executable.
     local _runner _runner_owner
-    for _runner in run-relay.sh run-playlist.sh run-playlist-start.sh; do
+    for _runner in run-relay.sh run-playlist.sh run-playlist-start.sh run-publisher.sh; do
         if [ ! -f "$libdir/$_runner" ]; then
             bs_die "Installed runner missing: $libdir/$_runner"
         fi
@@ -421,7 +427,22 @@ configure_server_conf() {
         bs_prompt new_domain "Public domain for HLS URLs (e.g. video.example.com)" "$new_domain" || return 1
     fi
     if [ -n "$new_domain" ]; then
-        bs_valid_domain "$new_domain" || bs_die "Invalid domain: $new_domain"
+        # Step 9: accept "video.example.com", "http(s)://video.example.com" and
+        # a trailing slash; normalize to the bare hostname before validating,
+        # rather than rejecting the common copy-pasted forms outright.
+        local normalized_domain
+        normalized_domain="$(bs_normalize_domain "$new_domain")" || bs_die "Invalid domain: $new_domain"
+        new_domain="$normalized_domain"
+    fi
+
+    # Step 8: internal web console port. Reuses the existing selection on a
+    # reinstall/update; otherwise auto-selects the first free loopback port
+    # (preferring 8080). Never prompts, never exposed publicly, never 0.0.0.0.
+    if [ -n "${BLUESTREAM_WEB_PORT:-}" ] && bs_valid_port "$BLUESTREAM_WEB_PORT"; then
+        bs_ok "Reusing existing web console port: $BLUESTREAM_WEB_PORT"
+    else
+        BLUESTREAM_WEB_PORT="$(web_select_port)" || bs_die "Could not find a free loopback port for the web console (tried: $BLUESTREAM_WEB_PORT_CANDIDATES)."
+        bs_info "Selected internal web console port: $BLUESTREAM_WEB_PORT"
     fi
 
     if [ -n "$EMAIL" ]; then
@@ -472,6 +493,9 @@ configure_web_console() {
     # Fix ownership of freshly-created admin.json/secret_key (security.py runs
     # as root) to root:bluestream-web 0640, and ensure /run/sudo exists.
     web_create_state
+    # Step 8: render + install the Gunicorn unit with the port finalized by
+    # configure_server_conf (always BEFORE this function runs).
+    web_install_unit
     web_manage_service
     return 0
 }

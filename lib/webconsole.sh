@@ -33,6 +33,60 @@ BLUESTREAM_WEB_UNIT="/etc/systemd/system/bluestream-web.service"
 BLUESTREAM_WEB_SERVICE="bluestream-web.service"
 BLUESTREAM_WEB_GUNICORN="/usr/bin/gunicorn"
 BLUESTREAM_WEB_CONF="${BLUESTREAM_WEB_STATE_DIR}/web.conf"
+BLUESTREAM_WEB_UNIT_TEMPLATE="${BLUESTREAM_WEB_INSTALL_ROOT}/config/systemd/bluestream-web.service.template"
+
+# Step 8: safe automatic internal-port allocation. 8080 is tried first (the
+# historical default); the rest are quiet, uncommonly-used loopback ports that
+# avoid common local dev servers (3000/5000/8000/8888/9000 etc.).
+BLUESTREAM_WEB_PORT_CANDIDATES="8080 8180 8280 8380 8480 18080 28080 38080"
+
+# ---------------------------------------------------------------------------
+# Step 8: pick the internal Gunicorn/nginx-proxy port.
+#
+#   - a valid existing BLUESTREAM_WEB_PORT (set by bs_load_server_conf from
+#     server.conf) is REUSED as-is - this is the reinstall/update path, and it
+#     never changes just because something else now happens to be using it;
+#   - otherwise the first free loopback candidate is selected (8080 first).
+#
+# Never binds, never kills or hijacks a listener, never selects 0.0.0.0.
+# Returns 1 only if every candidate is occupied (extremely unlikely).
+# ---------------------------------------------------------------------------
+web_select_port() {
+    if [ -n "${BLUESTREAM_WEB_PORT:-}" ] && bs_valid_port "$BLUESTREAM_WEB_PORT"; then
+        printf '%s' "$BLUESTREAM_WEB_PORT"
+        return 0
+    fi
+    local p
+    for p in $BLUESTREAM_WEB_PORT_CANDIDATES; do
+        if ! bs_port_in_use "$p"; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Render the Gunicorn unit template with the selected port and install it.
+# Called from configure_web_console (install.sh) AFTER BLUESTREAM_WEB_PORT is
+# finalized, so the unit always matches the port persisted in server.conf and
+# the one rendered into the nginx console proxy snippet.
+web_install_unit() {
+    bs_require_root
+    bs_valid_port "${BLUESTREAM_WEB_PORT:-}" || bs_die "No valid web console port selected; cannot install bluestream-web.service."
+    [ -f "$BLUESTREAM_WEB_UNIT_TEMPLATE" ] || bs_die "Web console unit template missing: $BLUESTREAM_WEB_UNIT_TEMPLATE"
+    local tmp="${BLUESTREAM_WEB_UNIT}.tmp.$$"
+    sed -e "s|__WEB_PORT__|$BLUESTREAM_WEB_PORT|g" "$BLUESTREAM_WEB_UNIT_TEMPLATE" > "$tmp"
+    if grep -q '__WEB_PORT__' "$tmp"; then
+        rm -f "$tmp"
+        bs_die "Unresolved placeholder in generated web console unit."
+    fi
+    mv -f "$tmp" "$BLUESTREAM_WEB_UNIT"
+    chown root:root "$BLUESTREAM_WEB_UNIT"
+    chmod 0644 "$BLUESTREAM_WEB_UNIT"
+    systemctl daemon-reload 2>/dev/null || true
+    bs_ok "Web console unit installed (Gunicorn binds 127.0.0.1:$BLUESTREAM_WEB_PORT)"
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Web packages (Ubuntu) - verified after installation.
@@ -190,10 +244,16 @@ web_install_files() {
     fi
     unset _owner _mode
 
-    # sudoers source (installed/validated separately) and systemd unit.
+    # sudoers source (installed/validated separately). The web console unit is
+    # a TEMPLATE (Step 8: port is auto-selected, never hard-coded) - copy it
+    # into the installed tree here, but DO NOT render/install it to
+    # /etc/systemd/system yet: BLUESTREAM_WEB_PORT is not finalized until
+    # configure_server_conf has run. web_install_unit (called later, from
+    # configure_web_console) does the actual render+install.
     mkdir -p "$_libdir/config/sudoers"
     cp -f "$BS_ROOT"/config/sudoers/* "$_libdir/config/sudoers/"
-    install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-web.service" "$BLUESTREAM_WEB_UNIT"
+    mkdir -p "$_libdir/config/systemd"
+    cp -f "$BS_ROOT/config/systemd/bluestream-web.service.template" "$_libdir/config/systemd/bluestream-web.service.template"
     return 0
 }
 

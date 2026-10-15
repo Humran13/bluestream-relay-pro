@@ -175,6 +175,10 @@ bs_load_server_conf() {
     BLUESTREAM_FIREWALL="none"
     BLUESTREAM_NGINX_USER="www-data"
     BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$DEFAULT_MAX_MEDIA_UPLOAD_MB"
+    # Step 8: the web console's internal loopback port. Left EMPTY by default
+    # (not hard-coded to 8080) so web_select_port's first-run logic can tell a
+    # fresh install (no prior selection) from a reinstall (reuse as-is).
+    BLUESTREAM_WEB_PORT=""
 
     [ -r "$BLUESTREAM_SERVER_CONF" ] || return 0
     local key val
@@ -194,6 +198,8 @@ bs_load_server_conf() {
             NGINX_USER)    case "$val" in [a-z][a-z0-9_.-]*) BLUESTREAM_NGINX_USER="$val" ;; esac ;;
             MAX_MEDIA_UPLOAD_MB)
                 if bs_valid_upload_mb "$val"; then BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$val"; fi ;;
+            WEB_PORT)
+                if bs_valid_port "$val"; then BLUESTREAM_WEB_PORT="$val"; fi ;;
         esac
     done < "$BLUESTREAM_SERVER_CONF"
     return 0
@@ -206,12 +212,16 @@ bs_save_server_conf() {
         printf '# BlueStream Relay Pro server configuration (root-only)\n'
         printf '# MAX_MEDIA_UPLOAD_MB = max size (MiB) of one uploaded media\n'
         printf '# file; drives both the web console and nginx (default 10240 = 10 GiB).\n'
+        printf '# WEB_PORT = the internal loopback port Gunicorn binds (127.0.0.1\n'
+        printf '# only) and nginx proxies to; auto-selected once, then reused on every\n'
+        printf '# reinstall/update (see web_select_port in lib/webconsole.sh).\n'
         printf 'DOMAIN=%s\n' "$BLUESTREAM_DOMAIN"
         printf 'ADMIN_EMAIL=%s\n' "$BLUESTREAM_ADMIN_EMAIL"
         printf 'SSL_ENABLED=%s\n' "$BLUESTREAM_SSL_ENABLED"
         printf 'FIREWALL=%s\n' "$BLUESTREAM_FIREWALL"
         printf 'NGINX_USER=%s\n' "$BLUESTREAM_NGINX_USER"
         printf 'MAX_MEDIA_UPLOAD_MB=%s\n' "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
+        printf 'WEB_PORT=%s\n' "$BLUESTREAM_WEB_PORT"
     } > "$tmp"
     chmod 0600 "$tmp"
     chown root:root "$tmp" 2>/dev/null || true
@@ -377,6 +387,54 @@ bs_valid_domain() {
     esac
     [ "${#d}" -le 253 ] || return 1
     return 0
+}
+
+# Step 9: accept a domain the operator typed with a scheme, trailing slash,
+# or mixed case (e.g. "https://Stream.Example.com/") and normalize it to the
+# bare lowercase hostname bs_valid_domain expects. Rejects (returns 1, no
+# output) anything carrying a path/query beyond a single trailing slash,
+# embedded credentials, a port, or any other malformed/unsafe input - it never
+# silently accepts a value it cannot cleanly normalize.
+bs_normalize_domain() {
+    local d="$1"
+    case "$d" in
+        http://*)  d="${d#http://}" ;;
+        https://*) d="${d#https://}" ;;
+    esac
+    # Reject embedded userinfo (user:pass@host) outright rather than silently
+    # discarding credentials.
+    case "$d" in *@*) return 1 ;; esac
+    # A single optional trailing slash is tolerated; anything else after the
+    # host (a path, query string, fragment, or a port) is rejected rather than
+    # silently truncated.
+    case "$d" in
+        */) d="${d%/}" ;;
+    esac
+    case "$d" in
+        */*|*\?*|*\#*|*:*) return 1 ;;
+    esac
+    d="$(bs_to_lower "$d")"
+    bs_valid_domain "$d" || return 1
+    printf '%s' "$d"
+    return 0
+}
+
+# Step 8: digits-only TCP port in the valid range.
+bs_valid_port() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# True (0) when something is already listening on 127.0.0.1:<port>. Uses a
+# plain bash TCP connect attempt (no extra dependency): a refused/failed
+# connect means the port is free, a successful connect means it is occupied.
+# Never binds, never touches any other address, never used to decide whether
+# to "take over" a port - only to pick a free one.
+bs_port_in_use() {
+    local port="$1"
+    ( exec 3<>"/dev/tcp/127.0.0.1/$port" ) 2>/dev/null
 }
 
 bs_valid_email() {
@@ -668,16 +726,23 @@ bs_select() {
     return 1
 }
 
-# Safe option-value helper for CLI parsers.
+# Safe option-value helper for CLI parsers. Called from inside a `case "$1"
+# in --opt)` branch as:
 #   bs_val2 <varname> <optname> "$@"
+# "$@" at that call site is the CALLER's own remaining argv, which still
+# starts with the option itself (the caller has not shifted yet) - so bs_val2
+# receives (varname, optname, THE-OPTION-AGAIN, value, rest...). The actual
+# value is therefore the FOURTH argument here, not the third (a third
+# argument always exists and always equals <optname> by construction, so it
+# can never be used to detect a missing value).
 # Dies if the option has no following value. The caller then does `shift 2`,
 # which is guaranteed safe because the value was verified to exist.
 bs_val2() {
     local var="$1" opt="$2"
-    if [ "$#" -lt 3 ]; then
+    if [ "$#" -lt 4 ]; then
         bs_die "Missing value for option '$opt'"
     fi
-    printf -v "$var" '%s' "$3"
+    printf -v "$var" '%s' "$4"
 }
 
 # ---------------------------------------------------------------------------

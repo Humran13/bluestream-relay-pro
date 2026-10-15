@@ -226,19 +226,20 @@ run_diagnostics() {
     else
         diag_check "bluestream-web.service active" WARN "${wact:-inactive}"
     fi
-    if command -v ss >/dev/null 2>&1; then
-        if ss -ltn "sport = :8080" 2>/dev/null | grep -q "127.0.0.1:8080"; then
-            diag_check "Gunicorn listener (127.0.0.1:8080)" PASS
+    local wport="${BLUESTREAM_WEB_PORT:-8080}"
+    if command -v ss >/dev/null 2>&1 && bs_valid_port "$wport"; then
+        if ss -ltn "sport = :${wport}" 2>/dev/null | grep -q "127.0.0.1:${wport}"; then
+            diag_check "Gunicorn listener (127.0.0.1:${wport})" PASS
         else
-            diag_check "Gunicorn listener (127.0.0.1:8080)" FAIL "nothing listening on loopback 8080"
+            diag_check "Gunicorn listener (127.0.0.1:${wport})" FAIL "nothing listening on loopback ${wport}"
         fi
-        if ! ss -ltn "sport = :8080" 2>/dev/null | grep -qE '0\.0\.0\.0:8080|\[::\]:8080'; then
+        if ! ss -ltn "sport = :${wport}" 2>/dev/null | grep -qE "0\.0\.0\.0:${wport}|\[::\]:${wport}"; then
             diag_check "Gunicorn listener loopback only" PASS
         else
-            diag_check "Gunicorn listener loopback only" FAIL "port 8080 must not be public"
+            diag_check "Gunicorn listener loopback only" FAIL "port ${wport} must not be public"
         fi
     else
-        diag_check "Gunicorn listener check" WARN "ss not available"
+        diag_check "Gunicorn listener check" WARN "ss not available (or no valid web port configured)"
     fi
     if [ -f /usr/local/lib/bluestream/web-ctl ]; then
         wco="$(stat -c '%U:%G' /usr/local/lib/bluestream/web-ctl 2>/dev/null)"
@@ -312,10 +313,10 @@ run_diagnostics() {
         fi
     fi
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-        if ufw status 2>/dev/null | grep -Eq '^8080|8080/tcp|8080 '; then
-            diag_check "UFW does not expose 8080" FAIL "port 8080 must stay loopback-only"
+        if ufw status 2>/dev/null | grep -Eq "^${wport}|${wport}/tcp|${wport} "; then
+            diag_check "UFW does not expose the web console port (${wport})" FAIL "port ${wport} must stay loopback-only"
         else
-            diag_check "UFW does not expose 8080" PASS
+            diag_check "UFW does not expose the web console port (${wport})" PASS
         fi
     fi
 

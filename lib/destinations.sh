@@ -194,6 +194,21 @@ dest_set_enabled() {
     dest_load_config "$name" || return 3
     DEST_ENABLED="$enabled"
     dest_save_config "$name" || return 4
+    # Phase 1C: reconcile every relay/playlist this destination is attached to
+    # (enabling starts its publisher on each active target; disabling stops
+    # it everywhere). A no-op when lib/publisher.sh is not loaded.
+    if command -v publisher_sync_target >/dev/null 2>&1; then
+        local _t _kind _tname
+        while IFS= read -r _t; do
+            [ -n "$_t" ] || continue
+            case "$_t" in
+                *.conf)     _kind="relay";    _tname="${_t%.conf}" ;;
+                *.playlist) _kind="playlist"; _tname="${_t%.playlist}" ;;
+                *) continue ;;
+            esac
+            publisher_sync_target "$_kind" "$_tname" 2>/dev/null || true
+        done < <(dest_attached_targets "$name")
+    fi
     return 0
 }
 

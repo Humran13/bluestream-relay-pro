@@ -83,7 +83,16 @@ class InstallerStaticTests(unittest.TestCase):
     def test_10_systemd_unit_install_path(self):
         wc = repo_text("lib/webconsole.sh")
         self.assertIn('BLUESTREAM_WEB_UNIT="/etc/systemd/system/bluestream-web.service"', wc)
-        self.assertIn('"$BS_ROOT/config/systemd/bluestream-web.service" "$BLUESTREAM_WEB_UNIT"', wc)
+        # Step 8: the unit is rendered from a TEMPLATE (port is auto-selected,
+        # never hard-coded) by web_install_unit, not installed statically.
+        self.assertIn(
+            'BLUESTREAM_WEB_UNIT_TEMPLATE="${BLUESTREAM_WEB_INSTALL_ROOT}/config/systemd/bluestream-web.service.template"',
+            wc,
+        )
+        self.assertIn("web_install_unit()", wc)
+        self.assertIn('sed -e "s|__WEB_PORT__|$BLUESTREAM_WEB_PORT|g"', wc)
+        inst = repo_text("install.sh")
+        self.assertIn("web_install_unit", inst)
 
     def test_11_installed_libraries_root_owned_and_not_writable(self):
         # Root web-ctl sources lib/*.sh, so the deployed copies must be pinned
@@ -129,15 +138,22 @@ class NginxTemplateTests(unittest.TestCase):
         self.console = repo_text("config/nginx/console-location.conf")
 
     def test_11_binds_only_loopback_8080(self):
-        self.assertIn("proxy_pass http://127.0.0.1:8080;", self.console)
+        # Step 8: the port is a rendered placeholder (auto-selected, 8080
+        # preferred, never hard-coded) - both the proxy target and the
+        # Gunicorn bind always share the SAME value, rendered from the SAME
+        # BLUESTREAM_WEB_PORT by lib/nginx.sh / lib/webconsole.sh.
+        self.assertIn("proxy_pass http://127.0.0.1:__WEB_PORT__;", self.console)
         self.assertNotIn("0.0.0.0", self.console)
-        unit = repo_text("config/systemd/bluestream-web.service")
-        self.assertIn("--bind 127.0.0.1:8080", unit)
+        unit = repo_text("config/systemd/bluestream-web.service.template")
+        self.assertIn("--bind 127.0.0.1:__WEB_PORT__", unit)
         self.assertNotIn("0.0.0.0", unit)
+        nginx = repo_text("lib/nginx.sh")
+        self.assertIn('-e "s|__WEB_PORT__|${BLUESTREAM_WEB_PORT}|g"', nginx)
+        self.assertIn("bs_valid_port", nginx)
 
     def test_12_proxy_points_only_to_loopback(self):
-        self.assertIn("proxy_pass http://127.0.0.1:8080;", self.console)
-        rest = self.console.replace("proxy_pass http://127.0.0.1:8080;", "")
+        self.assertIn("proxy_pass http://127.0.0.1:__WEB_PORT__;", self.console)
+        rest = self.console.replace("proxy_pass http://127.0.0.1:__WEB_PORT__;", "")
         self.assertNotIn("proxy_pass http://", rest)
 
     def test_13_exact_forwarding_headers_present(self):
@@ -537,6 +553,10 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 "relay_destinations_get",
                 "playlist_destinations_get",
                 "playlist_schedule_get",
+                # Phase 1C: outbound publisher status (never a stream key or
+                # destination server URL).
+                "relay_publisher_status",
+                "playlist_publisher_status",
             }),
         )
         client = EngineClient(production=True)
@@ -662,7 +682,7 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
     normalization, and installer service restart on upgrade."""
 
     def test_01_service_keeps_strict_systemd_hardening(self):
-        s = repo_text("config/systemd/bluestream-web.service")
+        s = repo_text("config/systemd/bluestream-web.service.template")
         self.assertIn("ProtectSystem=strict", s)
         self.assertNotIn("ProtectSystem=off", s)
         for directive in (
@@ -678,7 +698,7 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
             self.assertIn(directive, s)
 
     def test_02_service_readwrite_paths_are_narrow_and_complete(self):
-        s = repo_text("config/systemd/bluestream-web.service")
+        s = repo_text("config/systemd/bluestream-web.service.template")
         rw_lines = [
             ln.strip() for ln in s.splitlines() if ln.strip().startswith("ReadWritePaths=")
         ]
@@ -708,7 +728,7 @@ class LifecycleDeploymentFixesTests(unittest.TestCase):
         # (comments legitimately mention it); it stays read-only for the
         # unprivileged bluestream-web user. Only the narrow upload staging
         # subdir may be writable by the web process.
-        s = repo_text("config/systemd/bluestream-web.service")
+        s = repo_text("config/systemd/bluestream-web.service.template")
         rw = set()
         for ln in s.splitlines():
             ln = ln.strip()
@@ -2056,7 +2076,7 @@ class DestinationFoundationTests(unittest.TestCase):
         self.assertNotIn("printf 'stream_key\\0", d)
 
     def test_04_service_readwrite_includes_destinations(self):
-        s = repo_text("config/systemd/bluestream-web.service")
+        s = repo_text("config/systemd/bluestream-web.service.template")
         self.assertIn("/etc/bluestream/destinations", s)
 
     def test_05_no_destination_systemd_unit_was_added(self):
@@ -2070,7 +2090,7 @@ class DestinationFoundationTests(unittest.TestCase):
 
     def test_06_web_ctl_sources_destinations_library(self):
         w = repo_text("web-ctl")
-        self.assertIn("media destinations schedule;", w)
+        self.assertIn("media destinations schedule publisher;", w)
         # the read-only list only reports a has_stream_key flag; it never emits
         # a record for the stored key itself
         self.assertIn("has_stream_key", w)
