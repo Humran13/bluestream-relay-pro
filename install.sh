@@ -68,7 +68,7 @@ if [ ! -f "$BS_ROOT/lib/common.sh" ]; then
     printf 'install.sh must run from the BlueStream Relay Pro project directory.\n' >&2
     exit 1
 fi
-for _bs_lib in common osdetect envdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest webconsole; do
+for _bs_lib in common osdetect envdetect probe health relay playlist media nginx migrate ssl firewall backup diagnostics selftest webconsole admin info; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done
@@ -123,6 +123,30 @@ detect_environment() {
     bs_env_detect
     bs_env_report
     BLUESTREAM_NGINX_STRATEGY="$BS_NGINX_STRATEGY"
+
+    # Safe Owned -> Isolated migration (requirement 6): if a prior "owned"
+    # install already wrote its config directly into the SYSTEM nginx (not
+    # merely recorded "owned" in server.conf, but actual files verified by
+    # content marker - see lib/migrate.sh) and the environment just forced
+    # isolated mode for THIS run, switching live in the same install.sh pass
+    # would try to bind the shared RTMP/HTTP ports the legacy files are still
+    # using. That cannot be proven safe without an explicit, validated
+    # migration step (backup + disable-legacy + reload + verify + rollback),
+    # so install.sh stops here and tells the operator exactly how to do it,
+    # rather than guessing further.
+    if [ "$BS_ENV_STALE_OWNED_OVERRIDDEN" = "yes" ] && migrate_owned_present; then
+        bs_error "This host has a previous BlueStream OWNED install whose nginx configuration is still live on the"
+        bs_error "system nginx, but the environment detected just now requires ISOLATED mode (see the warning above)."
+        bs_error "Automatically moving it over cannot be proven safe inside a plain install.sh run (it would touch"
+        bs_error "the shared RTMP/HTTP ports while the legacy config is still active), so installation has stopped"
+        bs_error "WITHOUT changing anything further. The installed /usr/local/sbin/bluestream-manager may still be"
+        bs_error "the PRE-FIX version (install_files has not run yet this time), so run the guided migration from"
+        bs_error "THIS checkout directory instead ($BS_ROOT):"
+        bs_error "  sudo bash $BS_ROOT/bluestream-manager migrate status   # review what will change"
+        bs_error "  sudo bash $BS_ROOT/bluestream-manager migrate run       # backs up, migrates, validates; rollback-capable"
+        bs_error "('migrate status' also prints the full manual procedure if you prefer to do it by hand.)"
+        exit 1
+    fi
     return 0
 }
 
@@ -587,20 +611,10 @@ configure_web_console() {
 # ---------------------------------------------------------------------------
 post_install_info() {
     banner
-    printf '%s\n' \
-        "" \
-        "Installation complete." \
-        "" \
-        "  Manager : sudo bluestream-manager" \
-        "  Status  : sudo bluestream-status" \
-        "  Version : $(bs_version)" \
-        "" \
-        "Public URLs (once a relay or playlist is running):"
-    printf '  M3U8   : %s\n' "$(bs_public_base)/hls/relay/<name>/index.m3u8"
-    printf '          %s\n' "$(bs_public_base)/hls/playlist/<name>/index.m3u8"
-    printf '  Player : %s\n' "$(bs_public_base)/player/?relay=<name>"
-    printf '          %s\n' "$(bs_public_base)/player/?playlist=<name>"
-    printf '  Console: %s\n' "$(bs_public_base)/console/"
+    printf '\nInstallation complete.\n\n'
+    bs_print_install_summary
+    printf '\n'
+    bs_print_panel_instructions
     printf '%s\n' \
         "" \
         "Next steps:" \

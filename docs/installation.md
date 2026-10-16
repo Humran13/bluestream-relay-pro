@@ -116,9 +116,25 @@ prints what it found:
 ```
 
 Two strategies exist, and the installer always announces which one it is
-using. **This decision is made once and persisted** (`server.conf`
-`NGINX_STRATEGY=`); re-running `install.sh` later never silently switches
-strategies even if the live environment looks different that day.
+using. The decision is **re-evaluated fresh every run** (including
+reinstalls/repairs/upgrades) and persisted (`server.conf`
+`NGINX_STRATEGY=`) — but a previously recorded strategy is never trusted
+blindly:
+
+- If the environment detected **right now** positively requires isolated
+  mode (a control panel, another site, an inactive/ambiguous nginx, etc.),
+  BlueStream uses isolated **even if a prior install was recorded as
+  "owned"**. This is a deliberate safety fix: a stale "owned" record can
+  never bypass today's check. `install.sh` prints a loud warning
+  (`SAFETY OVERRIDE`) when this happens and, if BlueStream's owned-mode
+  config is still live on the system nginx, stops before touching anything
+  further and points you at the guided migration (see below) instead of
+  guessing.
+- The opposite direction never happens silently: once an install has
+  legitimately switched to isolated, it **stays isolated** on every later
+  run even if the environment looks clear again that day (e.g. a panel was
+  briefly misdetected, or later removed). Moving back to owned mode is a
+  deliberate, reviewed action, not an automatic reclassification.
 
 **Critical safety rule:** an existing nginx is **never** assumed to be safe
 to manage just because no *recognized* control panel was matched. Ownership
@@ -211,6 +227,65 @@ overwriting those files. Resolve it manually (remove/relocate the
 conflicting binary, or accept that this host can't run BlueStream's nginx-
 based streaming engine) and re-run.
 
+### Safe Owned -> Isolated migration
+
+If a host was installed in **owned** mode (BlueStream's config lives in
+`/etc/nginx`) and later has a control panel installed on it (e.g.
+CloudPanel), re-running `install.sh` will detect the override above and
+**stop before changing anything** rather than attempt an in-place switch —
+doing so inside a plain install run cannot be proven safe, because the
+legacy owned config is still bound to the same ports (80 and the private
+RTMP bus on 1935) the new isolated instance also needs.
+
+Instead, run the guided migration explicitly:
+
+```bash
+sudo bluestream-manager migrate status   # shows exactly what would change, and the manual procedure
+sudo bluestream-manager migrate run      # performs it: backup -> generate+validate -> cutover -> verify
+```
+
+What `migrate run` does, in order, stopping and rolling back automatically
+if any step fails:
+
+1. **Verifies by content**, not filename, that `/etc/nginx/sites-available/
+   bluestream` and/or the RTMP main-context include are genuinely
+   BlueStream's own generated files (every one carries a
+   `# BlueStream Relay Pro` header comment) — never assumes ownership from
+   a path alone.
+2. **Backs up** those files to `/var/lib/bluestream/backups/nginx-migration-
+   <timestamp>/` before touching anything.
+3. **Generates and validates** (`nginx -t`) BlueStream's own isolated
+   instance, without starting it yet.
+4. **Disables** (never deletes) BlueStream's own two files on the system
+   nginx, validates the system config with `nginx -t`, and only then
+   reloads it — this is the only part of the process that touches the
+   panel-managed nginx, and it only ever removes files BlueStream itself
+   created and verified in step 1. No other site, panel config, or firewall
+   rule is ever touched.
+5. **Starts and verifies** BlueStream's isolated instance.
+6. Records `NGINX_STRATEGY=isolated` in `server.conf` only after every
+   prior step succeeded.
+
+Any failure at any step rolls the system nginx back to the pre-migration
+state automatically (`nginx -t` + reload) and prints the backup location
+and the full **manual procedure** instead of retrying blindly. You can also
+roll back a completed migration by hand:
+
+```bash
+sudo bluestream-manager migrate rollback /var/lib/bluestream/backups/nginx-migration-<timestamp>
+```
+
+If you prefer to do it by hand instead of running `migrate run`, `migrate
+status` always prints the exact manual steps (back up, generate the
+isolated config with `migrate gen-isolated`, remove BlueStream's two files
+from the system nginx, validate + reload, start `bluestream-nginx.service`,
+then update your panel's reverse proxy).
+
+Your data — relays, playlists, destinations, schedules, secrets, and the
+web admin account — is never touched by this migration; it lives entirely
+under `/etc/bluestream` and `/var/lib/bluestream`, independent of which
+nginx strategy is active.
+
 ## 3. First steps
 
 ```bash
@@ -220,6 +295,39 @@ sudo bluestream-manager
 - Relay Management > **Add Relay** — add your first source.
 - Media Management > **Import Media** — for playlist channels.
 - Server Management > **Diagnostics** and **Self-Test** — verify everything.
+
+### Administrator account
+
+`install.sh` never finishes without being clear about whether the web
+console dashboard is actually usable yet:
+
+- If a real terminal is reachable (a normal interactive run, **or** a piped
+  `curl ... | sudo bash` install where your terminal's `/dev/tty` is still
+  reachable even though stdin is the pipe), you are prompted for a username
+  (default `admin`) and a password + confirmation, both hidden/no-echo.
+- If no terminal is reachable at all (pure non-interactive: CI, cron, a
+  fully detached pipe), every other install stage still completes, but the
+  output clearly states that **admin onboarding is pending** and the
+  dashboard cannot be logged into yet — along with the exact command to
+  finish it:
+  ```bash
+  sudo bluestream-manager admin init
+  ```
+  (or, before `bluestream-manager` itself is installed, the equivalent
+  direct `python3 -m webapp.security init-admin` command via stdin, also
+  printed in the warning.)
+- A reinstall/upgrade **never** resets, overwrites, or duplicates an
+  existing admin account — `bluestream-manager admin init` itself refuses
+  outright if one already exists. To deliberately reset it, remove
+  `/var/lib/bluestream/web/admin.json` yourself first.
+- The password is never accepted as a command-line argument, never logged,
+  and never left in shell history — it is read via a hidden prompt (or
+  piped over stdin for the non-interactive command) and hashed with the
+  existing `scrypt`-based implementation already in `webapp/security.py`
+  (no new authentication system or dependency was introduced).
+
+Check status at any time: `sudo bluestream-manager admin status` or
+`sudo bluestream-manager installinfo`.
 
 ## 4. DNS and firewall
 
@@ -347,3 +455,6 @@ Common issues:
 | A destination never reaches "Live" | Check `journalctl` for that publisher's unit (above) — the detail field gives a bounded, specific reason (e.g. "destination refused the connection"), never the stream key. |
 | Isolated instance: public URL unreachable | Confirm your panel's reverse-proxy rule points at the correct `127.0.0.1:<isolated-http-port>` (see Server Status / the install output) and that the panel itself is reachable. |
 | `nginx RTMP module loaded: FAIL` | `libnginx-mod-rtmp` failed to install, or (isolated mode) the module `.so` wasn't found at the expected path — check `apt list --installed libnginx-mod-rtmp` and re-run `install.sh`. |
+| **502 Bad Gateway** from your control panel/reverse proxy | The reverse proxy is almost always pointed at the wrong port. Run `sudo bluestream-manager installinfo` and confirm your panel's vhost targets the exact "Reverse-proxy destination" value shown (the internal Gunicorn port, e.g. `127.0.0.1:8180` — never 80/443/8081/a guessed port). The install output's `PORT CONFIGURATION` section states this explicitly for the same reason. |
+| "No web admin account exists" / cannot log in after install | Admin onboarding was pending (no terminal was reachable during a non-interactive install). Run `sudo bluestream-manager admin init`, or check status with `sudo bluestream-manager admin status`. |
+| Installed as "owned" but a panel (e.g. CloudPanel) now exists | `install.sh` now stops and prints a migration procedure instead of silently reusing the old strategy — see "Safe Owned -> Isolated migration" above. Run `sudo bluestream-manager migrate status`. |

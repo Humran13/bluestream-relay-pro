@@ -68,6 +68,23 @@ nginx_assert_no_placeholders() {
 nginx_ensure_single_worker() {
     local conf="/etc/nginx/nginx.conf"
     [ -f "$conf" ] || return 0
+    # Defense-in-depth (see lib/envdetect.sh / the legacy-ownership fix): this
+    # function edits the SYSTEM /etc/nginx/nginx.conf, which is only ever
+    # correct when BlueStream genuinely owns nginx on this host. It must
+    # never run against a panel-managed or otherwise non-owned nginx, even if
+    # some future bug calls it directly - re-verify right here, independent
+    # of whatever the caller already decided, rather than trusting it blindly.
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-owned}" != "owned" ]; then
+        bs_die "Refusing to edit $conf: current nginx strategy is '${BLUESTREAM_NGINX_STRATEGY:-unknown}', not 'owned'. This is a safety guard against ever editing a panel-managed/non-owned system nginx.conf - see lib/envdetect.sh."
+    fi
+    if type bs_env_check_panel >/dev/null 2>&1; then
+        local _recheck_panel="$BS_ENV_PANEL"
+        bs_env_check_panel
+        if [ -n "$BS_ENV_PANEL" ]; then
+            bs_die "Refusing to edit $conf: a control panel ('$BS_ENV_PANEL') is present on this host right now. BlueStream must never edit a panel-managed nginx.conf, even in a strategy that was previously recorded as 'owned'. Run 'sudo bluestream-manager migrate status' / see docs/installation.md 'Safe Owned -> Isolated migration'."
+        fi
+        BS_ENV_PANEL="$_recheck_panel"
+    fi
     if grep -qE '^[[:space:]]*worker_processes[[:space:]]' "$conf"; then
         if grep -qE '^[[:space:]]*worker_processes[[:space:]]+1;[[:space:]]*$' "$conf"; then
             return 0

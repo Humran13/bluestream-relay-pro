@@ -760,6 +760,28 @@ bs_prompt() {
     return 0
 }
 
+# Hidden (no-echo) read for secrets (passwords), using the same /dev/stdin ->
+# /dev/tty fallback as bs_prompt (see bs_input_source) so password prompts
+# keep working under `curl ... | sudo bash` piped installs, where stdin is
+# the install script itself but a real controlling terminal still exists.
+# Never has a default (a password must never silently fall back to a fixed
+# value); returns 1 when no terminal is reachable at all, or on a read
+# failure, and the caller decides what to do (fail closed, never block).
+bs_prompt_hidden() {
+    local var="$1" prompt="$2" src val
+    if ! src="$(bs_input_source)"; then
+        return 1
+    fi
+    printf '%s: ' "$prompt" >&2
+    if ! read -rs val < "$src"; then
+        printf '\n' >&2
+        return 1
+    fi
+    printf '\n' >&2
+    printf -v "$var" '%s' "$val"
+    return 0
+}
+
 bs_select() {
     # Internal locals use a clearly private _bs_select_* prefix so that no
     # realistic caller output-variable name (e.g. `choice`) can shadow the

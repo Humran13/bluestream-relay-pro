@@ -53,10 +53,14 @@ class InstallerStaticTests(unittest.TestCase):
         self.assertIn("from webapp.app import PRODUCTION_STATE_DIR, create_app", wsgi)
 
     def test_05_admin_credentials_preserved_on_reinstall(self):
-        wc = repo_text("lib/webconsole.sh")
-        self.assertIn('if [ -f "$BLUESTREAM_WEB_STATE_DIR/admin.json" ]', wc)
-        self.assertIn("preserved", wc)
-        self.assertNotIn("--web-admin-password", wc)  # never an argv flag
+        # Admin account management (web_init_admin etc.) lives in
+        # lib/admin.sh, deliberately separate from lib/webconsole.sh - see
+        # HttpsFollowupTests.test_16_no_webconsole_dependency_in_manager.
+        ad = repo_text("lib/admin.sh")
+        self.assertIn('if [ -f "$BLUESTREAM_WEB_STATE_DIR/admin.json" ]', ad)
+        self.assertIn("preserved", ad)
+        self.assertNotIn("--web-admin-password", ad)  # never an argv flag
+        self.assertNotIn("--web-admin-password", repo_text("lib/webconsole.sh"))
 
     def test_06_secret_key_preserved_on_reinstall(self):
         wc = repo_text("lib/webconsole.sh")
@@ -70,7 +74,10 @@ class InstallerStaticTests(unittest.TestCase):
 
     def test_08_sudoers_install_mode_0440(self):
         wc = repo_text("lib/webconsole.sh")
-        self.assertIn('install -o root -g root -m 0440', wc)
+        # Staged via `tr -d '\r'` (CRLF-defensive, see web_install_sudoers)
+        # rather than a straight `install` copy, but still ends up root:root
+        # 0440 before AND after visudo validation.
+        self.assertIn('chmod 0440 "$_staged"', wc)
         self.assertIn("root:root 0440", wc)
 
     def test_09_sudoers_validated_with_visudo(self):
@@ -2377,6 +2384,7 @@ scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
 bs_env_classify
 echo "MODE=$BS_ENV_MODE"
 echo "STRATEGY=$BS_NGINX_STRATEGY"
+echo "OVERRIDDEN=$BS_ENV_STALE_OWNED_OVERRIDDEN"
 """
 
     def _run(self, scenario_text):
@@ -2540,6 +2548,79 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         )
         self.assertEqual(out["STRATEGY"], "owned")
         self.assertEqual(out["MODE"], "reinstall_owned")
+        self.assertEqual(out["OVERRIDDEN"], "no")
+
+    def test_11_legacy_owned_overridden_by_cloudpanel_THE_BUG_FIX(self):
+        # This is the exact real-world bug: a prior install recorded "owned"
+        # (a partially-completed earlier install, or one that predates
+        # CloudPanel being installed on this host), and CloudPanel is now
+        # present with other sites. A stale "owned" record must NEVER bypass
+        # today's safety check - isolated must be forced, and the override
+        # must be visible (BS_ENV_STALE_OWNED_OVERRIDDEN=yes) so install.sh
+        # and bluestream-manager can warn loudly and point at the migration
+        # tooling instead of silently reclassifying.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                panel="cloudpanel",
+                bluestream_existing="yes",
+                prior_strategy="owned",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_forced_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "yes")
+
+    def test_12_legacy_owned_overridden_by_other_sites_no_panel(self):
+        # Same safety override, triggered by positive evidence of another
+        # site rather than a recognized panel marker.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                bluestream_existing="yes",
+                prior_strategy="owned",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_forced_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "yes")
+
+    def test_13_isolated_strategy_is_sticky_even_when_env_looks_clear(self):
+        # The converse direction never happens automatically: once isolated,
+        # stay isolated even if the environment looks clear again today -
+        # downgrading to owned is a deliberate, reviewed action only.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                bluestream_existing="yes",
+                prior_strategy="isolated",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "no")
+
+    def test_14_fresh_reinstall_with_no_prior_strategy_defaults_owned_path(self):
+        # bluestream_existing=yes but BLUESTREAM_NGINX_STRATEGY empty (e.g. a
+        # server.conf written by a version before NGINX_STRATEGY existed):
+        # must not crash, and must still apply today's safety check rather
+        # than silently defaulting to owned when the environment disagrees.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                panel="cloudpanel",
+                bluestream_existing="yes",
+                prior_strategy="",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
 
 
 if __name__ == "__main__":

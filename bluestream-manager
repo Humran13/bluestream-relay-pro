@@ -22,7 +22,7 @@ else
     exit 1
 fi
 
-for _bs_lib in common osdetect probe health relay playlist media destinations publisher nginx ssl firewall backup diagnostics selftest; do
+for _bs_lib in common osdetect envdetect probe health relay playlist media destinations publisher nginx migrate admin ssl firewall backup diagnostics selftest info; do
     # shellcheck source=lib/common.sh
     # shellcheck source=lib/relay.sh
     # shellcheck source=lib/playlist.sh
@@ -31,6 +31,7 @@ done
 unset _bs_lib
 
 bs_setup
+os_detect
 
 banner() {
     printf '%s==============================================%s\n' "$C_BOLD" "$C_RESET"
@@ -60,6 +61,9 @@ Non-interactive commands:
   nginx test | reload | restart
   ssl issue | status | renew
   firewall status | configure
+  admin status | init
+  migrate status | run | rollback <dir> | gen-isolated
+  installinfo
   info
   version
   help
@@ -90,6 +94,13 @@ cmd_server_status() {
     printf '  Managed media    : %s files\n' "$(media_list_names | grep -c . || true)"
     printf '  Disk /var/lib    : %s\n' "$(bs_disk_free /var/lib 2>/dev/null)"
     printf '  Disk /var/www    : %s\n' "$(bs_disk_free /var/www 2>/dev/null)"
+}
+
+cmd_install_info() {
+    banner
+    bs_print_install_summary
+    printf '\n'
+    bs_print_panel_instructions
 }
 
 cmd_info() {
@@ -345,10 +356,13 @@ menu_server() {
         printf '  6) Configure Firewall (UFW)\n'
         printf '  7) Diagnostics\n'
         printf '  8) Self-Test\n'
-        printf '  9) Project Information\n'
-        printf '  10) Uninstall\n'
+        printf '  9) Admin Account\n'
+        printf '  10) Owned -> Isolated Migration\n'
+        printf '  11) Installation Information\n'
+        printf '  12) Project Information\n'
+        printf '  13) Uninstall\n'
         printf '  0)  Back\n'
-        printf '\nSelection [0-10]: '
+        printf '\nSelection [0-13]: '
         read -r choice || return 0
         case "$choice" in
             1) nginx_test ;;
@@ -359,8 +373,11 @@ menu_server() {
             6) firewall_configure ;;
             7) run_diagnostics ;;
             8) run_selftest ;;
-            9) cmd_info ;;
-            10) uninstall_entry ;;
+            9) menu_admin ;;
+            10) menu_migrate ;;
+            11) cmd_install_info ;;
+            12) cmd_info ;;
+            13) uninstall_entry ;;
             0) return 0 ;;
             *) bs_warn "Invalid choice." ;;
         esac
@@ -372,6 +389,33 @@ menu_server() {
 # ---------------------------------------------------------------------------
 # Backup menu
 # ---------------------------------------------------------------------------
+menu_admin() {
+    bs_step "Admin Account"
+    printf 'Status: %s\n' "$(web_admin_status)"
+    if web_admin_exists; then
+        bs_info "An admin account already exists and is preserved (no reset option here by design, to avoid"
+        bs_info "accidentally locking out or changing an in-use account). To deliberately reset it, remove"
+        bs_info "$BLUESTREAM_WEB_STATE_DIR/admin.json yourself first, then re-run this."
+        return 0
+    fi
+    if bs_confirm "No admin account exists yet. Create one now?"; then
+        web_admin_init_cli
+    fi
+    return 0
+}
+
+menu_migrate() {
+    bs_step "Owned -> Isolated Migration"
+    migrate_status
+    if migrate_owned_present; then
+        printf '\n'
+        if bs_confirm "Run the guided migration now (backs up first, validates, supports rollback)?"; then
+            migrate_run
+        fi
+    fi
+    return 0
+}
+
 menu_backup() {
     local choice
     bs_select "Backup / Restore" choice \
@@ -712,6 +756,24 @@ cli_firewall() {
     esac
 }
 
+cli_admin() {
+    case "${1:-}" in
+        status) printf 'Admin account: %s\n' "$(web_admin_status)" ;;
+        init)   web_admin_init_cli ;;
+        *) bs_die "Usage: admin status|init" ;;
+    esac
+}
+
+cli_migrate() {
+    case "${1:-}" in
+        status)       migrate_status ;;
+        run)          migrate_run ;;
+        rollback)     migrate_rollback "${2:-}" ;;
+        gen-isolated) migrate_gen_isolated ;;
+        *) bs_die "Usage: migrate status|run|rollback <dir>|gen-isolated" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Top-level dispatch
 # ---------------------------------------------------------------------------
@@ -734,6 +796,9 @@ cli_main() {
         nginx)       cli_server "${2:-}" ;;
         ssl)         cli_ssl "${2:-}" ;;
         firewall)    cli_firewall "${2:-}" ;;
+        admin)       cli_admin "${@:2}" ;;
+        migrate)     cli_migrate "${@:2}" ;;
+        installinfo) cmd_install_info ;;
         info)        cmd_info ;;
         version)     printf '%s\n' "$(bs_version)" ;;
         help|--help|-h) usage ;;

@@ -11,6 +11,7 @@
 *.js text eol=lf
 bluestream-manager text eol=lf
 web-ctl text eol=lf
+config/sudoers/* text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
 VERSION text eol=lf

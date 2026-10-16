@@ -323,6 +323,38 @@ class LoginRateLimiter:
 # ---------------------------------------------------------------------------
 # CLI: local admin initialization (password from stdin only)
 # ---------------------------------------------------------------------------
+def _fix_production_group(state_dir) -> None:
+    """Best-effort: when running as root with the production 'bluestream-web'
+    group present, make admin.json/secret_key group-readable (root:
+    bluestream-web, 0640) so the unprivileged web service can read them.
+
+    This is the one permission step this CLI can safely take on its own:
+    this command is also the documented fallback a non-interactive install
+    tells the operator to run directly (see lib/admin.sh web_init_admin),
+    bypassing the installer's own chown/chmod step entirely - without this,
+    a file created by running this command as root ends up root:root 0600
+    (Python's default via os.chmod(0o600) with no group change), which the
+    bluestream-web service cannot read, breaking login even though "admin
+    setup" reported success. Silently skipped (never fatal) wherever the
+    group does not exist - e.g. local development, tests, or any non-
+    production state directory.
+    """
+    try:
+        import grp
+
+        gid = grp.getgrnam("bluestream-web").gr_gid
+    except (ImportError, KeyError, OSError):
+        return
+    state_dir = Path(state_dir)
+    for name in ("admin.json", "secret_key"):
+        f = state_dir / name
+        try:
+            os.chown(f, -1, gid)
+            os.chmod(f, 0o640)
+        except OSError:
+            pass
+
+
 def _cli_main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m webapp.security")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -337,6 +369,7 @@ def _cli_main(argv=None) -> int:
             sys.stderr.write("error: no password provided on stdin\n")
             return 2
         record = init_admin(args.state_dir, password, username=args.username)
+        _fix_production_group(args.state_dir)
         sys.stdout.write(
             "admin account '%s' initialized in %s\n" % (record["username"], args.state_dir)
         )
