@@ -38,17 +38,41 @@ run_diagnostics() {
     local names name dir pid user code owner mode
 
     # --- base tools ---
-    if bs_have_cmd nginx; then diag_check "Nginx installed" PASS; else diag_check "Nginx installed" FAIL; fi
-    if nginx_running; then diag_check "Nginx running" PASS; else diag_check "Nginx running" FAIL; fi
-    if nginx -t >/dev/null 2>&1; then diag_check "Nginx config valid" PASS; else diag_check "Nginx config valid" FAIL; fi
+    # Strategy-aware: in isolated mode "the nginx BlueStream cares about" is
+    # its own independent instance, never the system one (which this install
+    # never touches and has no opinion on).
+    local bs_nginx_label="Nginx"
+    [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ] && bs_nginx_label="BlueStream's isolated nginx instance"
+    if bs_have_cmd nginx; then diag_check "$bs_nginx_label installed" PASS; else diag_check "$bs_nginx_label installed" FAIL; fi
+    if nginx_running; then diag_check "$bs_nginx_label running" PASS; else diag_check "$bs_nginx_label running" FAIL; fi
+    if nginx_test >/dev/null 2>&1; then diag_check "$bs_nginx_label config valid" PASS; else diag_check "$bs_nginx_label config valid" FAIL; fi
 
     # --- nginx RTMP module (private local ingest -> HLS) ---
-    if [ -f /etc/nginx/modules-enabled/50-mod-rtmp.conf ] && [ -f /usr/lib/nginx/modules/ngx_rtmp_module.so ]; then
-        diag_check "nginx RTMP module loaded" PASS
+    if [ -f /usr/lib/nginx/modules/ngx_rtmp_module.so ]; then
+        if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+            # Isolated mode loads the module directly in BlueStream's own
+            # nginx.conf (load_module ...;) rather than via the system
+            # package's modules-enabled convention.
+            if grep -q '^load_module ' "$BLUESTREAM_ISOLATED_CONF_FILE" 2>/dev/null; then
+                diag_check "nginx RTMP module loaded" PASS
+            else
+                diag_check "nginx RTMP module loaded" FAIL "load_module directive missing from $BLUESTREAM_ISOLATED_CONF_FILE"
+            fi
+        elif [ -f /etc/nginx/modules-enabled/50-mod-rtmp.conf ]; then
+            diag_check "nginx RTMP module loaded" PASS
+        else
+            diag_check "nginx RTMP module loaded" FAIL "libnginx-mod-rtmp not enabled"
+        fi
     else
-        diag_check "nginx RTMP module loaded" FAIL "libnginx-mod-rtmp not enabled"
+        diag_check "nginx RTMP module loaded" FAIL "libnginx-mod-rtmp not installed"
     fi
-    if [ -f "$NGINX_SNIPPET_DIR/rtmp.conf" ] && [ -f "$NGINX_RTMP_INCLUDE" ]; then
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        if [ -f "$BLUESTREAM_ISOLATED_ROOT/rtmp.conf" ]; then
+            diag_check "BlueStream RTMP configuration present" PASS
+        else
+            diag_check "BlueStream RTMP configuration present" FAIL
+        fi
+    elif [ -f "$NGINX_SNIPPET_DIR/rtmp.conf" ] && [ -f "$NGINX_RTMP_INCLUDE" ]; then
         diag_check "BlueStream RTMP configuration present" PASS
     else
         diag_check "BlueStream RTMP configuration present" FAIL
@@ -277,7 +301,13 @@ run_diagnostics() {
     else
         diag_check "web state dir exists" FAIL
     fi
-    if [ -f /etc/nginx/bluestream/console-location.conf ]; then
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        if [ -f /etc/bluestream/nginx/snippets/console-location.conf ]; then
+            diag_check "nginx console snippet present (isolated instance)" PASS
+        else
+            diag_check "nginx console snippet present (isolated instance)" FAIL
+        fi
+    elif [ -f /etc/nginx/bluestream/console-location.conf ]; then
         diag_check "nginx console snippet present" PASS
     else
         diag_check "nginx console snippet present" FAIL
@@ -289,9 +319,13 @@ run_diagnostics() {
         # comes from the validated server.conf value; nothing is interpolated
         # unvalidated. No public DNS is used.
         if [ -n "${BLUESTREAM_DOMAIN:-}" ] && bs_valid_domain "$BLUESTREAM_DOMAIN"; then
+            local console_port=""
+            if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+                console_port=":${BLUESTREAM_ISOLATED_HTTP_PORT:-80}"
+            fi
             wout="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 \
                 -H "Host: $BLUESTREAM_DOMAIN" \
-                "http://127.0.0.1/console/login" 2>/dev/null)"
+                "http://127.0.0.1${console_port}/console/login" 2>/dev/null)"
             wcode="${wout%% *}"
             wloc="${wout#* }"
             if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then

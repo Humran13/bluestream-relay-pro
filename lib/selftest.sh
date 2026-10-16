@@ -198,7 +198,11 @@ run_selftest() {
     #    served directly regardless of SSL state (only /console/ redirects to
     #    HTTPS when SSL is enabled - see bluestream-site.conf.template), so a
     #    plain http://127.0.0.1 request is correct in both cases.
-    m3u8_url="http://127.0.0.1/hls/relay/$name/index.m3u8"
+    local isolated_port=""
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        isolated_port=":${BLUESTREAM_ISOLATED_HTTP_PORT:-80}"
+    fi
+    m3u8_url="http://127.0.0.1${isolated_port}/hls/relay/$name/index.m3u8"
     host_header=()
     ffprobe_headers=()
     if [ -n "$BLUESTREAM_DOMAIN" ]; then
@@ -320,9 +324,13 @@ run_selftest() {
             # When HTTPS is enabled, nginx intentionally redirects HTTP
             # /console/ to HTTPS (301); otherwise it serves directly (200).
             if [ -n "${BLUESTREAM_DOMAIN:-}" ] && bs_valid_domain "$BLUESTREAM_DOMAIN"; then
+                local console_port=""
+                if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+                    console_port=":${BLUESTREAM_ISOLATED_HTTP_PORT:-80}"
+                fi
                 wout="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 \
                     -H "Host: $BLUESTREAM_DOMAIN" \
-                    "http://127.0.0.1/console/login" 2>/dev/null)"
+                    "http://127.0.0.1${console_port}/console/login" 2>/dev/null)"
                 wcode="${wout%% *}"
                 wloc="${wout#* }"
                 if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then

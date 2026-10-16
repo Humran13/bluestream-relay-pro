@@ -179,6 +179,14 @@ bs_load_server_conf() {
     # (not hard-coded to 8080) so web_select_port's first-run logic can tell a
     # fresh install (no prior selection) from a reinstall (reuse as-is).
     BLUESTREAM_WEB_PORT=""
+    # Universal install compat: which nginx strategy this install used
+    # ("owned" = BlueStream manages the system nginx directly; "isolated" =
+    # an existing web server/control panel was detected and BlueStream runs
+    # its own separate nginx instance instead - see lib/envdetect.sh /
+    # lib/nginx.sh). Empty on a fresh install (not yet decided).
+    BLUESTREAM_NGINX_STRATEGY=""
+    BLUESTREAM_ISOLATED_HTTP_PORT=""
+    BLUESTREAM_ISOLATED_HTTPS_PORT=""
 
     [ -r "$BLUESTREAM_SERVER_CONF" ] || return 0
     local key val
@@ -200,6 +208,12 @@ bs_load_server_conf() {
                 if bs_valid_upload_mb "$val"; then BLUESTREAM_MAX_MEDIA_UPLOAD_MB="$val"; fi ;;
             WEB_PORT)
                 if bs_valid_port "$val"; then BLUESTREAM_WEB_PORT="$val"; fi ;;
+            NGINX_STRATEGY)
+                case "$val" in owned|isolated) BLUESTREAM_NGINX_STRATEGY="$val" ;; esac ;;
+            ISOLATED_HTTP_PORT)
+                if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTP_PORT="$val"; fi ;;
+            ISOLATED_HTTPS_PORT)
+                if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTPS_PORT="$val"; fi ;;
         esac
     done < "$BLUESTREAM_SERVER_CONF"
     return 0
@@ -215,6 +229,9 @@ bs_save_server_conf() {
         printf '# WEB_PORT = the internal loopback port Gunicorn binds (127.0.0.1\n'
         printf '# only) and nginx proxies to; auto-selected once, then reused on every\n'
         printf '# reinstall/update (see web_select_port in lib/webconsole.sh).\n'
+        printf '# NGINX_STRATEGY = owned|isolated, decided once at first install by\n'
+        printf '# environment detection (lib/envdetect.sh) and reused on every\n'
+        printf '# reinstall/update regardless of what install.sh detects later.\n'
         printf 'DOMAIN=%s\n' "$BLUESTREAM_DOMAIN"
         printf 'ADMIN_EMAIL=%s\n' "$BLUESTREAM_ADMIN_EMAIL"
         printf 'SSL_ENABLED=%s\n' "$BLUESTREAM_SSL_ENABLED"
@@ -222,6 +239,9 @@ bs_save_server_conf() {
         printf 'NGINX_USER=%s\n' "$BLUESTREAM_NGINX_USER"
         printf 'MAX_MEDIA_UPLOAD_MB=%s\n' "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
         printf 'WEB_PORT=%s\n' "$BLUESTREAM_WEB_PORT"
+        printf 'NGINX_STRATEGY=%s\n' "$BLUESTREAM_NGINX_STRATEGY"
+        printf 'ISOLATED_HTTP_PORT=%s\n' "$BLUESTREAM_ISOLATED_HTTP_PORT"
+        printf 'ISOLATED_HTTPS_PORT=%s\n' "$BLUESTREAM_ISOLATED_HTTPS_PORT"
     } > "$tmp"
     chmod 0600 "$tmp"
     chown root:root "$tmp" 2>/dev/null || true
@@ -665,7 +685,43 @@ bs_playlist_player_url() { printf '%s/player/?playlist=%s'        "$(bs_public_b
 # Set BS_ASSUME_YES=1 to auto-answer confirmations (used by install.sh).
 BS_ASSUME_YES="${BS_ASSUME_YES:-0}"
 
+# True only when a real controlling terminal can actually be opened at
+# /dev/tty. This is the standard fallback for "curl ... | sudo bash"-style
+# piped installers: stdin (fd 0) is the pipe carrying the script itself, not
+# a terminal, but the user running it interactively still HAS a controlling
+# terminal, and /dev/tty reaches it directly regardless of what stdin is
+# redirected to. A bare file-permission test (`-r /dev/tty`) is not enough -
+# the device node can exist and be readable while there is still no
+# controlling terminal at all (e.g. a daemon, a cron job, some CI runners),
+# which fails with ENXIO only on an actual open attempt.
+bs_have_tty() {
+    { : < /dev/tty; } 2>/dev/null
+}
+
+# Picks the best available source for an interactive read and prints it:
+#   /dev/stdin - stdin is itself a terminal (the ordinary interactive case)
+#   /dev/tty   - stdin is not a terminal but a controlling terminal exists
+#   (nothing)  - no usable terminal anywhere; caller must fail closed or use
+#                a default, never block forever on a read that cannot return
+bs_input_source() {
+    if [ -t 0 ]; then
+        printf '/dev/stdin'
+        return 0
+    fi
+    if bs_have_tty; then
+        printf '/dev/tty'
+        return 0
+    fi
+    return 1
+}
+
 bs_confirm() {
+    # Deliberately always reads plain stdin (unlike bs_prompt below): this is
+    # the interactive-admin-tool helper (bluestream-manager, uninstall.sh),
+    # where piping an answer directly ("echo y | bluestream-manager ...") is
+    # a long-standing, legitimate scripting/automation pattern that must keep
+    # working. The /dev/tty fallback exists specifically for bs_prompt's
+    # piped-curl-installer case, not for this one.
     local prompt="$1" ans
     if [ "$BS_ASSUME_YES" = "1" ]; then
         return 0
@@ -679,10 +735,12 @@ bs_confirm() {
 }
 
 bs_prompt() {
-    local var="$1" prompt="$2" def="${3:-}" val
-    # Non-interactive safety: if stdin is not a TTY, use the default when one
-    # is available, otherwise fail rather than hang on read.
-    if [ ! -t 0 ]; then
+    local var="$1" prompt="$2" def="${3:-}" val src
+    # Non-interactive safety: prefer a real terminal (stdin, then /dev/tty -
+    # see bs_input_source) for an actual answer; when neither is available,
+    # use the default when one is given, otherwise fail rather than block
+    # forever on a read that can never return.
+    if ! src="$(bs_input_source)"; then
         if [ -n "$def" ]; then
             printf -v "$var" '%s' "$def"
             return 0
@@ -694,7 +752,7 @@ bs_prompt() {
     else
         printf '%s: ' "$prompt"
     fi
-    read -r val || return 1
+    read -r val < "$src" || return 1
     if [ -z "$val" ] && [ -n "$def" ]; then
         val="$def"
     fi

@@ -68,7 +68,7 @@ if [ ! -f "$BS_ROOT/lib/common.sh" ]; then
     printf 'install.sh must run from the BlueStream Relay Pro project directory.\n' >&2
     exit 1
 fi
-for _bs_lib in common osdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest webconsole; do
+for _bs_lib in common osdetect envdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest webconsole; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done
@@ -108,6 +108,21 @@ preflight() {
     os_have_systemd || { printf 'systemd not detected. This installer requires systemd.\n' >&2; exit 1; }
 
     bs_info "Detected: $OS_NAME $OS_VERSION"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Universal install compat: classify the environment BEFORE anything is
+# installed or modified, and decide whether BlueStream manages the system
+# nginx directly ("owned") or installs its own independent instance instead
+# ("isolated" - see lib/envdetect.sh / lib/nginx.sh nginx_isolated_*). The
+# detected environment is always displayed so the operator can see exactly
+# what was found and why a given strategy was chosen.
+# ---------------------------------------------------------------------------
+detect_environment() {
+    bs_env_detect
+    bs_env_report
+    BLUESTREAM_NGINX_STRATEGY="$BS_NGINX_STRATEGY"
     return 0
 }
 
@@ -191,11 +206,38 @@ install_packages() {
         bs_info "Updating package metadata..."
         os_apt_update
     fi
+
+    # Universal install compat: an nginx binary that exists but is NOT
+    # tracked by dpkg (e.g. a control panel's own build, often at the same
+    # /usr/sbin/nginx path the Ubuntu package also installs to) must never
+    # be touched by `apt-get install nginx` - dpkg has no record of those
+    # files and can silently overwrite them, which would corrupt or replace
+    # a running control panel's web server. This is checked REGARDLESS of
+    # the detected strategy (owned or isolated): the file-collision risk is
+    # about the apt/dpkg layer, not about which nginx BlueStream ends up
+    # managing.
+    if command -v nginx >/dev/null 2>&1 && ! os_pkg_installed nginx; then
+        bs_die "An existing nginx binary was found at $(command -v nginx) that is NOT managed by apt/dpkg (likely installed by a control panel or built from source). Installing the Ubuntu 'nginx' package here risks overwriting those files. Aborting without changing anything. To proceed: either remove/relocate the non-package nginx first, or install BlueStream on a host where nginx is either absent or already apt-managed."
+    fi
+
     # shellcheck disable=SC2046
     os_pkg_install nginx ffmpeg curl ca-certificates coreutils util-linux libnginx-mod-rtmp \
         $(web_packages) \
         || bs_die "Failed to install base packages."
     web_verify_packages
+
+    # Isolated mode: BlueStream never starts/stops/enables/disables the
+    # SYSTEM nginx.service when it was already active before this install
+    # touched anything (another web server/panel may be relying on the same
+    # unit name). It only cleans up the service that THIS package install
+    # may have just freshly started/enabled as a side effect, and only when
+    # nginx was not already running (so there's nothing for anything else to
+    # depend on). The isolated instance always uses its OWN separate unit
+    # (bluestream-nginx.service) and is never affected by this either way.
+    if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ] && [ "$BS_ENV_NGINX_ACTIVE" = "no" ]; then
+        systemctl stop nginx 2>/dev/null || true
+        systemctl disable nginx 2>/dev/null || true
+    fi
 
     install_resolver
 
@@ -424,7 +466,16 @@ configure_server_conf() {
     if [ -n "$DOMAIN" ]; then
         new_domain="$DOMAIN"
     elif [ "$NON_INTERACTIVE" = "0" ]; then
-        bs_prompt new_domain "Public domain for HLS URLs (e.g. video.example.com)" "$new_domain" || return 1
+        # The domain is OPTIONAL (BlueStream fully supports running before a
+        # domain is configured - see bs_public_base). A failed prompt here
+        # (no terminal reachable at all, not even /dev/tty - e.g. piped
+        # through a non-interactive CI runner without --non-interactive)
+        # must NOT abort the rest of server configuration; it just means
+        # new_domain stays whatever it already was (empty on a fresh
+        # install). Aborting here previously skipped WEB_PORT selection
+        # entirely further down, leaving server.conf without a port and
+        # every later step failing closed on "WEB_PORT unset".
+        bs_prompt new_domain "Public domain for HLS URLs (e.g. video.example.com, leave blank to configure later)" "$new_domain" || true
     fi
     if [ -n "$new_domain" ]; then
         # Step 9: accept "video.example.com", "http(s)://video.example.com" and
@@ -445,10 +496,30 @@ configure_server_conf() {
         bs_info "Selected internal web console port: $BLUESTREAM_WEB_PORT"
     fi
 
+    # Universal install compat: when an existing web server/control panel
+    # already owns 80/443, BlueStream's own independent nginx instance needs
+    # its own ports too. Same reuse-on-reinstall pattern as WEB_PORT above.
+    if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then
+        if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT" \
+            && [ -n "${BLUESTREAM_ISOLATED_HTTPS_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTPS_PORT"; then
+            bs_ok "Reusing existing isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+        else
+            nginx_isolated_select_ports || bs_die "Could not find free ports for BlueStream's independent nginx instance (tried HTTP: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES / HTTPS: $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES)."
+            bs_info "Selected isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+        fi
+    fi
+
     if [ -n "$EMAIL" ]; then
         new_email="$EMAIL"
     elif [ "$SSL_REQUESTED" = "1" ] && [ "$NON_INTERACTIVE" = "0" ]; then
-        bs_prompt new_email "Administrator email (for Let's Encrypt)" "$new_email" || return 1
+        # Unlike the domain, an email IS required here (--with-ssl was
+        # explicitly requested and Let's Encrypt needs one) - fail loudly and
+        # specifically rather than a bare `return 1` that would otherwise
+        # silently skip the rest of server configuration (including
+        # persisting the just-selected WEB_PORT) and surface as a confusing,
+        # unrelated failure several steps later.
+        bs_prompt new_email "Administrator email (for Let's Encrypt)" "$new_email" || \
+            bs_die "--with-ssl requires an administrator email and none could be read (no terminal available). Re-run with --email <address> or --non-interactive --email <address>."
     fi
     if [ -n "$new_email" ]; then
         bs_valid_email "$new_email" || bs_die "Invalid email address."
@@ -470,13 +541,24 @@ configure_server_conf() {
 # ---------------------------------------------------------------------------
 configure_nginx() {
     bs_step "Configuring nginx"
-    nginx_gen_config
-    nginx_site_enable
-    nginx_test || bs_die "Nginx configuration failed validation"
-    systemctl enable nginx 2>/dev/null || true
-    systemctl start nginx 2>/dev/null || true
-    systemctl reload nginx 2>/dev/null || true
-    bs_ok "Nginx configured and running"
+    if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then
+        # Never touches /etc/nginx, the system nginx.service, or any other
+        # web server/panel - see lib/nginx.sh nginx_isolated_* and the
+        # Existing Nginx / control panel compatibility section of
+        # docs/installation.md.
+        nginx_isolated_gen_config || bs_die "Isolated nginx configuration failed."
+        nginx_isolated_install_unit
+        nginx_isolated_enable
+        bs_ok "BlueStream's independent nginx instance is configured and running (the existing web server/panel was not modified)."
+    else
+        nginx_gen_config
+        nginx_site_enable
+        nginx_test || bs_die "Nginx configuration failed validation"
+        systemctl enable nginx 2>/dev/null || true
+        systemctl start nginx 2>/dev/null || true
+        systemctl reload nginx 2>/dev/null || true
+        bs_ok "Nginx configured and running"
+    fi
     return 0
 }
 
@@ -540,25 +622,38 @@ main() {
         export BS_ASSUME_YES=1
     fi
     preflight
+    detect_environment
     install_packages
     if ! command -v setpriv >/dev/null 2>&1; then
         bs_die "setpriv (provided by util-linux) is required but was not found after package installation. Fix package installation and re-run. FFmpeg will never run as root."
     fi
     bs_ok "setpriv available (privilege-drop prerequisite satisfied)"
-    create_user_and_dirs
-    install_files
-    configure_server_conf
-    configure_nginx
+    # Every stage below is load-bearing for the ones after it (server.conf's
+    # WEB_PORT/DOMAIN feed nginx_gen_config and web_install_unit; nginx must
+    # be live before SSL/web-console integration). A silent partial failure
+    # here previously surfaced many steps later as a confusing, unrelated
+    # "WEB_PORT unset" error - explicit checks make any future regression
+    # fail immediately at its real source instead.
+    create_user_and_dirs || bs_die "User/directory setup failed."
+    install_files || bs_die "File installation failed."
+    configure_server_conf || bs_die "Server configuration failed."
+    configure_nginx || bs_die "Nginx configuration failed."
 
     if [ "$SSL_REQUESTED" = "1" ]; then
-        ssl_issue
+        if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then
+            # A documented, expected limitation (see ssl_issue), not an
+            # installation failure - the rest of the install still completes.
+            ssl_issue || bs_warn "Continuing without automatic SSL (see the message above)."
+        else
+            ssl_issue || bs_die "SSL issuance failed (requested with --with-ssl)."
+        fi
     fi
 
     # Web console deployment integration (after final SSL state is known).
-    configure_web_console
+    configure_web_console || bs_die "Web console configuration failed."
 
     if [ "$UFW_REQUESTED" = "1" ]; then
-        firewall_configure
+        firewall_configure || bs_die "Firewall configuration failed (requested with --with-ufw)."
     fi
 
     post_install_info

@@ -1,0 +1,36 @@
+# BlueStream Relay Pro - ISOLATED nginx instance unit.
+#
+# Installed ONLY when lib/envdetect.sh classified this host as already
+# running a control panel, Apache, or Caddy (BLUESTREAM_NGINX_STRATEGY=
+# isolated in server.conf). Entirely independent of the system nginx.service
+# and nginx package configuration: its own config root
+# (/etc/bluestream/nginx), its own pidfile, its own log directory. Starting,
+# stopping, or restarting this unit never affects the system nginx or any
+# other web server/panel on this host, and vice versa.
+#
+# Mirrors the standard Debian/Ubuntu nginx.service Type=forking pattern.
+
+[Unit]
+Description=BlueStream Relay Pro - isolated nginx instance (streaming engine + web console, independent of the system nginx/web server/control panel)
+Documentation=file:/usr/local/lib/bluestream/docs/installation.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=forking
+PIDFile=/run/bluestream-nginx.pid
+ExecStartPre=/usr/sbin/nginx -t -c /etc/bluestream/nginx/nginx.conf
+ExecStart=/usr/sbin/nginx -c /etc/bluestream/nginx/nginx.conf
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -QUIT $MAINPID
+Restart=on-failure
+RestartSec=5
+
+SyslogIdentifier=bluestream-nginx
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

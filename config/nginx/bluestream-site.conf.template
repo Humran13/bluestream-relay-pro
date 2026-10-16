@@ -2,8 +2,8 @@
 # Managed by install.sh / bluestream-manager. Do not edit manually.
 
 server {
-    listen 80;
-    listen [::]:80;
+    listen __HTTP_PORT__;
+    listen [::]:__HTTP_PORT__;
     server_name __DOMAIN__;
 
     # Landing redirect to the bundled player.

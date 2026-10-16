@@ -96,7 +96,9 @@ nginx_gen_config() {
         local htpl
         htpl="$(nginx_https_template)"
         if [ -f "$htpl" ]; then
-            https_block="$(sed -e "s|__DOMAIN__|$domain|g" "$htpl")"
+            https_block="$(sed -e "s|__DOMAIN__|$domain|g" \
+                -e "s|__HTTPS_PORT__|443|g" \
+                -e "s|__NGINX_SNIPPET_DIR__|$NGINX_SNIPPET_DIR|g" "$htpl")"
         fi
     fi
 
@@ -104,6 +106,7 @@ nginx_gen_config() {
         -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
         -e "s|__WEB_ROOT__|$BLUESTREAM_WEB_DIR|g" \
         -e "s|__NGINX_SNIPPET_DIR__|$NGINX_SNIPPET_DIR|g" \
+        -e "s|__HTTP_PORT__|80|g" \
         "$template" | grep -v '^__HTTPS_BLOCK__$' > "$dest.tmp"
     if [ -n "$https_block" ]; then
         printf '\n%s\n' "$https_block" >> "$dest.tmp"
@@ -145,7 +148,8 @@ nginx_gen_config() {
     # HTTP-block console snippet: proxy when HTTP-only, HTTPS redirect when SSL
     # is enabled (Secure cookies must never be issued over plain HTTP).
     if [ "$BLUESTREAM_SSL_ENABLED" = "yes" ]; then
-        cp -f "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-redirect-http.conf" "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
+        sed -e "s|__HTTPS_PORT__|443|g" \
+            "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-redirect-http.conf" > "$NGINX_SNIPPET_DIR/console-http.conf.tmp"
     else
         sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
             -e "s|__WEB_PORT__|${BLUESTREAM_WEB_PORT}|g" \
@@ -228,29 +232,262 @@ nginx_site_enable() {
     fi
 }
 
+# Strategy-aware from here down: every caller (bluestream-manager, lib/
+# diagnostics.sh, lib/selftest.sh) goes through these instead of hard-coding
+# "nginx.service", so isolated-mode installs are checked/managed correctly
+# everywhere without needing to touch each call site individually.
 nginx_test() {
     bs_require_cmd nginx
-    nginx -t
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        nginx_isolated_test
+    else
+        nginx -t
+    fi
 }
 
 nginx_reload() {
     bs_require_root
     nginx_test || bs_die "Nginx configuration is invalid; not reloading"
-    systemctl reload nginx
-    bs_ok "Nginx reloaded"
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        systemctl reload "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null || systemctl restart "$BLUESTREAM_ISOLATED_UNIT"
+        bs_ok "Isolated nginx reloaded"
+    else
+        systemctl reload nginx
+        bs_ok "Nginx reloaded"
+    fi
 }
 
 nginx_restart() {
     bs_require_root
     nginx_test || bs_die "Nginx configuration is invalid; not restarting"
-    systemctl restart nginx
-    bs_ok "Nginx restarted"
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        systemctl restart "$BLUESTREAM_ISOLATED_UNIT"
+        bs_ok "Isolated nginx restarted"
+    else
+        systemctl restart nginx
+        bs_ok "Nginx restarted"
+    fi
 }
 
 nginx_status() {
-    systemctl is-active nginx 2>/dev/null
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        systemctl is-active "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null
+    else
+        systemctl is-active nginx 2>/dev/null
+    fi
 }
 
 nginx_running() {
-    [ "$(systemctl is-active nginx 2>/dev/null)" = "active" ]
+    [ "$(nginx_status)" = "active" ]
+}
+
+# ---------------------------------------------------------------------------
+# ISOLATED nginx instance (universal install compat).
+#
+# Used instead of everything above when lib/envdetect.sh classified this
+# host as already running a control panel, Apache, or Caddy (BS_NGINX_
+# STRATEGY=isolated). BlueStream never writes to /etc/nginx, never touches
+# the system nginx.service/package/sites, and never changes a global nginx
+# setting shared with anything else - it installs and runs its OWN separate
+# nginx process tree instead, entirely self-contained under
+# /etc/bluestream/nginx, with its own systemd unit, pidfile and ports.
+#
+# The RTMP bus content and the HLS/player/console site content are IDENTICAL
+# to the owned-mode ones (same templates, same location snippets); only the
+# destination paths and the HTTP(S) ports differ, since 80/443 are assumed
+# to already belong to the existing web server/panel. Deliberately
+# duplicates a modest amount of rendering logic from nginx_gen_config rather
+# than sharing it, so the thoroughly-tested owned-mode path is never put at
+# risk by a refactor made for this one.
+# ---------------------------------------------------------------------------
+BLUESTREAM_ISOLATED_ROOT="/etc/bluestream/nginx"
+BLUESTREAM_ISOLATED_SNIPPET_DIR="$BLUESTREAM_ISOLATED_ROOT/snippets"
+BLUESTREAM_ISOLATED_CONF_FILE="$BLUESTREAM_ISOLATED_ROOT/nginx.conf"
+BLUESTREAM_ISOLATED_SITE_FILE="$BLUESTREAM_ISOLATED_ROOT/site.conf"
+BLUESTREAM_ISOLATED_PIDFILE="/run/bluestream-nginx.pid"
+BLUESTREAM_ISOLATED_LOG_DIR="/var/log/bluestream-nginx"
+BLUESTREAM_ISOLATED_UNIT="bluestream-nginx.service"
+# 80/443 are tried first (an "unknown/ambiguous" classification may still
+# have them free); the rest are quiet, uncommonly-used alternates.
+BLUESTREAM_ISOLATED_HTTP_CANDIDATES="80 8088 8188 8288 8388 18080"
+BLUESTREAM_ISOLATED_HTTPS_CANDIDATES="443 8443 8543 8643 18443"
+
+nginx_isolated_select_ports() {
+    local p
+    if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
+        :
+    else
+        BLUESTREAM_ISOLATED_HTTP_PORT=""
+        for p in $BLUESTREAM_ISOLATED_HTTP_CANDIDATES; do
+            if ! bs_port_in_use "$p"; then BLUESTREAM_ISOLATED_HTTP_PORT="$p"; break; fi
+        done
+        [ -n "$BLUESTREAM_ISOLATED_HTTP_PORT" ] || return 1
+    fi
+    if [ -n "${BLUESTREAM_ISOLATED_HTTPS_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTPS_PORT"; then
+        :
+    else
+        BLUESTREAM_ISOLATED_HTTPS_PORT=""
+        for p in $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES; do
+            if ! bs_port_in_use "$p"; then BLUESTREAM_ISOLATED_HTTPS_PORT="$p"; break; fi
+        done
+        [ -n "$BLUESTREAM_ISOLATED_HTTPS_PORT" ] || return 1
+    fi
+    return 0
+}
+
+# Locate the RTMP module .so shipped by the Ubuntu/Debian libnginx-mod-rtmp
+# package. Tries the standard install path first, then falls back to
+# whatever the package's own "modules-available" snippet actually points at
+# (defensive against a future package layout change).
+nginx_isolated_rtmp_module_path() {
+    local f rel
+    for f in /usr/lib/nginx/modules/ngx_rtmp_module.so \
+             /usr/lib64/nginx/modules/ngx_rtmp_module.so; do
+        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    if [ -f /usr/share/nginx/modules-available/mod-rtmp.conf ]; then
+        rel="$(grep -oE 'modules/[^ ;]+\.so' /usr/share/nginx/modules-available/mod-rtmp.conf 2>/dev/null | head -n1)"
+        if [ -n "$rel" ] && [ -f "/usr/lib/nginx/$rel" ]; then
+            printf '/usr/lib/nginx/%s' "$rel"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+nginx_isolated_gen_config() {
+    bs_require_root
+    bs_require_cmd nginx
+    nginx_isolated_select_ports || bs_die "Could not find free ports for BlueStream's isolated nginx instance (tried HTTP: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES / HTTPS: $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES)."
+
+    local modpath domain
+    modpath="$(nginx_isolated_rtmp_module_path)" || bs_die "nginx RTMP module (libnginx-mod-rtmp) not found; cannot configure the isolated streaming engine."
+    domain="${BLUESTREAM_DOMAIN:-_}"
+
+    if ! bs_valid_upload_mb "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"; then
+        bs_error "Invalid MAX_MEDIA_UPLOAD_MB in server.conf: $BLUESTREAM_MAX_MEDIA_UPLOAD_MB"
+        return 1
+    fi
+    if ! bs_valid_port "${BLUESTREAM_WEB_PORT:-}"; then
+        bs_error "Invalid or unset WEB_PORT in server.conf: ${BLUESTREAM_WEB_PORT:-<empty>}"
+        return 1
+    fi
+
+    mkdir -p "$BLUESTREAM_ISOLATED_ROOT" "$BLUESTREAM_ISOLATED_SNIPPET_DIR" "$BLUESTREAM_ISOLATED_LOG_DIR" 2>/dev/null
+    chmod 0755 "$BLUESTREAM_ISOLATED_ROOT" "$BLUESTREAM_ISOLATED_SNIPPET_DIR" "$BLUESTREAM_ISOLATED_LOG_DIR"
+    chown "$BLUESTREAM_NGINX_USER:$BLUESTREAM_NGINX_USER" "$BLUESTREAM_ISOLATED_LOG_DIR" 2>/dev/null || true
+
+    # Location snippets - identical content to the owned-mode ones.
+    sed -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
+        "$BLUESTREAM_INSTALL_ROOT/config/nginx/hls-location.conf" > "$BLUESTREAM_ISOLATED_SNIPPET_DIR/hls-location.conf.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_SNIPPET_DIR/hls-location.conf.tmp" "$BLUESTREAM_ISOLATED_SNIPPET_DIR/hls-location.conf"
+    sed -e "s|__WEB_ROOT__|$BLUESTREAM_WEB_DIR|g" \
+        "$BLUESTREAM_INSTALL_ROOT/config/nginx/player-location.conf" > "$BLUESTREAM_ISOLATED_SNIPPET_DIR/player-location.conf.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_SNIPPET_DIR/player-location.conf.tmp" "$BLUESTREAM_ISOLATED_SNIPPET_DIR/player-location.conf"
+    sed -e "s|__CLIENT_MAX_BODY_SIZE__|client_max_body_size ${BLUESTREAM_MAX_MEDIA_UPLOAD_MB}m;|g" \
+        -e "s|__WEB_PORT__|${BLUESTREAM_WEB_PORT}|g" \
+        "$BLUESTREAM_INSTALL_ROOT/config/nginx/console-location.conf" > "$BLUESTREAM_ISOLATED_SNIPPET_DIR/console-location.conf.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_SNIPPET_DIR/console-location.conf.tmp" "$BLUESTREAM_ISOLATED_SNIPPET_DIR/console-location.conf"
+    # The isolated instance never auto-issues its own SSL (see ssl_issue /
+    # docs/installation.md); console-http.conf is always the plain proxy.
+    cp -f "$BLUESTREAM_ISOLATED_SNIPPET_DIR/console-location.conf" "$BLUESTREAM_ISOLATED_SNIPPET_DIR/console-http.conf"
+    chmod 0644 "$BLUESTREAM_ISOLATED_SNIPPET_DIR"/*.conf
+
+    # Site file (same template as owned mode, isolated ports/paths).
+    sed -e "s|__DOMAIN__|$domain|g" \
+        -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
+        -e "s|__WEB_ROOT__|$BLUESTREAM_WEB_DIR|g" \
+        -e "s|__NGINX_SNIPPET_DIR__|$BLUESTREAM_ISOLATED_SNIPPET_DIR|g" \
+        -e "s|__HTTP_PORT__|$BLUESTREAM_ISOLATED_HTTP_PORT|g" \
+        "$(nginx_site_template)" | grep -v '^__HTTPS_BLOCK__$' > "$BLUESTREAM_ISOLATED_SITE_FILE.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_SITE_FILE.tmp" "$BLUESTREAM_ISOLATED_SITE_FILE"
+    chmod 0644 "$BLUESTREAM_ISOLATED_SITE_FILE"
+
+    # RTMP bus: identical content/ports to owned mode - always loopback-only
+    # and never conflicts with anything, regardless of strategy.
+    sed -e "s|__HLS_ROOT__|$BLUESTREAM_HLS_ROOT|g" \
+        -e "s|__RTMP_BIND__|$BLUESTREAM_RTMP_BIND|g" \
+        -e "s|__RTMP_PORT__|$BLUESTREAM_RTMP_PORT|g" \
+        "$(nginx_rtmp_template)" > "$BLUESTREAM_ISOLATED_ROOT/rtmp.conf.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_ROOT/rtmp.conf.tmp" "$BLUESTREAM_ISOLATED_ROOT/rtmp.conf"
+    chmod 0644 "$BLUESTREAM_ISOLATED_ROOT/rtmp.conf"
+
+    # Self-contained main nginx.conf - fully independent of the system
+    # nginx.conf / Debian modules-enabled convention (we own ordering
+    # directly), never installed under /etc/nginx.
+    {
+        printf '# BlueStream Relay Pro - ISOLATED nginx instance (generated).\n'
+        printf '# Independent of the system nginx; never installed to /etc/nginx and\n'
+        printf '# never read by it. Safe to run alongside any other web server/panel.\n'
+        printf 'user %s;\n' "$BLUESTREAM_NGINX_USER"
+        printf 'pid %s;\n' "$BLUESTREAM_ISOLATED_PIDFILE"
+        printf 'error_log %s/error.log warn;\n' "$BLUESTREAM_ISOLATED_LOG_DIR"
+        printf 'worker_processes 1;\n'
+        printf 'load_module %s;\n' "$modpath"
+        printf '\n'
+        printf 'events {\n    worker_connections 1024;\n}\n'
+        printf '\n'
+        printf 'include %s/rtmp.conf;\n' "$BLUESTREAM_ISOLATED_ROOT"
+        printf '\n'
+        printf 'http {\n'
+        printf '    include /etc/nginx/mime.types;\n'
+        printf '    default_type application/octet-stream;\n'
+        printf '    access_log %s/access.log;\n' "$BLUESTREAM_ISOLATED_LOG_DIR"
+        printf '    sendfile on;\n'
+        printf '    add_header X-Content-Type-Options nosniff always;\n'
+        printf '    include %s;\n' "$BLUESTREAM_ISOLATED_SITE_FILE"
+        printf '}\n'
+    } > "$BLUESTREAM_ISOLATED_CONF_FILE.tmp"
+    mv -f "$BLUESTREAM_ISOLATED_CONF_FILE.tmp" "$BLUESTREAM_ISOLATED_CONF_FILE"
+    chmod 0644 "$BLUESTREAM_ISOLATED_CONF_FILE"
+
+    # Fail closed: no unresolved placeholders anywhere in the isolated tree.
+    local bad
+    bad="$(grep -orE '__[A-Z_][A-Z0-9_]*__' "$BLUESTREAM_ISOLATED_ROOT" 2>/dev/null | cut -d: -f2- | sort -u | tr '\n' ' ')"
+    if [ -n "$bad" ]; then
+        bs_error "Unresolved placeholder(s) in the isolated nginx config: $bad"
+        return 1
+    fi
+
+    nginx_sync_web_conf
+    bs_ok "Isolated nginx configuration written: $BLUESTREAM_ISOLATED_CONF_FILE (HTTP :$BLUESTREAM_ISOLATED_HTTP_PORT, HTTPS :$BLUESTREAM_ISOLATED_HTTPS_PORT reserved)"
+    return 0
+}
+
+nginx_isolated_test() {
+    bs_require_cmd nginx
+    nginx -t -c "$BLUESTREAM_ISOLATED_CONF_FILE"
+}
+
+nginx_isolated_install_unit() {
+    bs_require_root
+    [ -f "$BLUESTREAM_INSTALL_ROOT/config/systemd/bluestream-nginx.service" ] \
+        || bs_die "Isolated nginx unit template missing."
+    install -o root -g root -m 0644 \
+        "$BLUESTREAM_INSTALL_ROOT/config/systemd/bluestream-nginx.service" \
+        "/etc/systemd/system/$BLUESTREAM_ISOLATED_UNIT"
+    systemctl daemon-reload 2>/dev/null || true
+}
+
+nginx_isolated_enable() {
+    bs_require_root
+    nginx_isolated_test || bs_die "Isolated nginx configuration failed validation"
+    systemctl enable "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null || true
+    if systemctl is-active "$BLUESTREAM_ISOLATED_UNIT" >/dev/null 2>&1; then
+        systemctl restart "$BLUESTREAM_ISOLATED_UNIT" || bs_die "Failed to restart $BLUESTREAM_ISOLATED_UNIT"
+    else
+        systemctl start "$BLUESTREAM_ISOLATED_UNIT" || bs_die "Failed to start $BLUESTREAM_ISOLATED_UNIT"
+    fi
+    bs_ok "$BLUESTREAM_ISOLATED_UNIT started (BlueStream's own independent nginx instance)"
+}
+
+nginx_isolated_reload() {
+    bs_require_root
+    nginx_isolated_test || bs_die "Isolated nginx configuration is invalid; not reloading"
+    systemctl reload "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null || systemctl restart "$BLUESTREAM_ISOLATED_UNIT"
+    bs_ok "Isolated nginx reloaded"
+}
+
+nginx_isolated_running() {
+    [ "$(systemctl is-active "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null)" = "active" ]
 }

@@ -90,6 +90,15 @@ rm -f /etc/systemd/system/bluestream-schedule-*.timer
 rm -rf /etc/systemd/system/bluestream-relay@*.service.d
 rm -rf /etc/systemd/system/bluestream-playlist@*.service.d
 rm -rf /etc/systemd/system/bluestream-publisher@*.service.d
+# Universal install compat: the isolated nginx instance (only present when
+# this install used BLUESTREAM_NGINX_STRATEGY=isolated) is entirely separate
+# from the system nginx and is removed here; the system nginx package,
+# service and configuration are never touched by this uninstaller either way.
+systemctl stop bluestream-nginx.service 2>/dev/null || true
+systemctl disable bluestream-nginx.service 2>/dev/null || true
+rm -f /etc/systemd/system/bluestream-nginx.service
+rm -rf /etc/bluestream/nginx
+rm -rf /var/log/bluestream-nginx
 systemctl daemon-reload 2>/dev/null || true
 
 # --- remove the web console service, sudoers policy and nginx snippet ---

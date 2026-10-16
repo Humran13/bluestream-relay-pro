@@ -201,8 +201,12 @@ class NginxTemplateTests(unittest.TestCase):
 
     def test_https_console_redirect_snippet(self):
         redir = repo_text("config/nginx/console-redirect-http.conf")
-        self.assertIn("return 301 https://$host$request_uri;", redir)
-        self.assertIn("return 301 https://$host/console/;", redir)
+        # __HTTPS_PORT__ is rendered to 443 for the owned/system-nginx path
+        # and to the isolated instance's own HTTPS port otherwise - both
+        # cases need the port explicit in the Location header since an
+        # isolated instance's HTTPS port is never guaranteed to be 443.
+        self.assertIn("return 301 https://$host:__HTTPS_PORT__$request_uri;", redir)
+        self.assertIn("return 301 https://$host:__HTTPS_PORT__/console/;", redir)
         self.assertNotIn("proxy_pass", redir)
 
     def test_nginx_gen_selects_redirect_when_ssl(self):
@@ -296,14 +300,14 @@ class VpsFixTests(unittest.TestCase):
         d = repo_text("lib/diagnostics.sh")
         self.assertIn('-H "Host: $BLUESTREAM_DOMAIN"', d)
         self.assertIn('bs_valid_domain "$BLUESTREAM_DOMAIN"', d)
-        self.assertIn("http://127.0.0.1/console/login", d)
+        self.assertIn('http://127.0.0.1${console_port}/console/login', d)
         self.assertIn('= "200"', d)
 
     def test_07_selftest_sends_domain_host_header(self):
         s = repo_text("lib/selftest.sh")
         self.assertIn('-H "Host: $BLUESTREAM_DOMAIN"', s)
         self.assertIn('bs_valid_domain "$BLUESTREAM_DOMAIN"', s)
-        self.assertIn("http://127.0.0.1/console/login", s)
+        self.assertIn('http://127.0.0.1${console_port}/console/login', s)
         self.assertIn('= "200"', s)
 
     def test_08_no_hardcoded_customer_domain(self):
@@ -313,8 +317,10 @@ class VpsFixTests(unittest.TestCase):
     def test_09_both_continue_using_loopback(self):
         d = repo_text("lib/diagnostics.sh")
         s = repo_text("lib/selftest.sh")
-        self.assertIn("http://127.0.0.1/console/login", d)
-        self.assertIn("http://127.0.0.1/console/login", s)
+        # ${console_port} is empty for the owned/system-nginx path (port 80)
+        # and ":<isolated-http-port>" for an isolated install.
+        self.assertIn('http://127.0.0.1${console_port}/console/login', d)
+        self.assertIn('http://127.0.0.1${console_port}/console/login', s)
         self.assertNotIn("https://", d.split("console/login")[0][-80:])
         self.assertNotIn("https://", s.split("console/login")[0][-80:])
 
@@ -353,7 +359,7 @@ class HttpsFollowupTests(unittest.TestCase):
 
     def test_07_local_loopback_retained(self):
         for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
-            self.assertIn("http://127.0.0.1/console/login", repo_text(rel))
+            self.assertIn('http://127.0.0.1${console_port}/console/login', repo_text(rel))
 
     def test_08_host_header_validated_domain(self):
         for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
@@ -421,8 +427,8 @@ class HttpsFollowupTests(unittest.TestCase):
 
     def test_17_nginx_redirect_template_unchanged(self):
         redir = repo_text("config/nginx/console-redirect-http.conf")
-        self.assertIn("return 301 https://$host$request_uri;", redir)
-        self.assertIn("return 301 https://$host/console/;", redir)
+        self.assertIn("return 301 https://$host:__HTTPS_PORT__$request_uri;", redir)
+        self.assertIn("return 301 https://$host:__HTTPS_PORT__/console/;", redir)
 
     def test_18_no_curl_follow_or_tls_disable_in_console_check(self):
         for rel in ("lib/diagnostics.sh", "lib/selftest.sh"):
@@ -2202,6 +2208,304 @@ chown() { return 0; }
         self.assertEqual(out, ["DEL_RC=0", "ONE=gone", "TWO=present"])
 
 
+
+
+class UniversalInstallCompatStaticTests(unittest.TestCase):
+    """Universal install compat: the CLI arg-parsing bug fix, the domain-
+    prompt-must-not-abort-WEB_PORT-selection fix, and the owned/isolated
+    nginx strategy wiring."""
+
+    def test_01_bs_val2_reads_the_fourth_argument(self):
+        # bs_val2 is called everywhere as `bs_val2 VAR --opt "$@"`, where
+        # "$@" at that call site still starts with the option itself (the
+        # caller has not shifted yet) - so the real value is argv[4], not
+        # argv[3] (which always equals the option name by construction and
+        # can therefore never detect a missing value either).
+        common = repo_text("lib/common.sh")
+        self.assertIn('if [ "$#" -lt 4 ]; then', common)
+        self.assertIn("printf -v \"$var\" '%s' \"$4\"", common)
+
+    def test_02_domain_prompt_failure_does_not_abort_server_conf(self):
+        inst = repo_text("install.sh")
+        # The exact historical bug: a failed (non-fatal, optional) domain
+        # prompt must never `return 1` before WEB_PORT selection runs -
+        # that previously left server.conf without a port and every later
+        # step failing closed on "WEB_PORT unset".
+        self.assertIn(
+            'bs_prompt new_domain "Public domain for HLS URLs', inst
+        )
+        self.assertNotIn(
+            'bs_prompt new_domain "Public domain for HLS URLs (e.g. video.example.com, leave blank to configure later)" "$new_domain" || return 1',
+            inst,
+        )
+
+    def test_03_main_checks_every_critical_stage(self):
+        inst = repo_text("install.sh")
+        for stage in (
+            "create_user_and_dirs || bs_die",
+            "install_files || bs_die",
+            "configure_server_conf || bs_die",
+            "configure_nginx || bs_die",
+            "configure_web_console || bs_die",
+        ):
+            self.assertIn(stage, inst)
+
+    def test_04_bs_prompt_falls_back_to_dev_tty(self):
+        common = repo_text("lib/common.sh")
+        self.assertIn("bs_have_tty", common)
+        self.assertIn("bs_input_source", common)
+        self.assertIn('{ : < /dev/tty; } 2>/dev/null', common)
+
+    def test_05_bs_confirm_unchanged_plain_stdin_read(self):
+        # bs_confirm (the interactive-admin-tool helper used by
+        # bluestream-manager/uninstall.sh) must keep its original plain
+        # stdin read - "echo y | tool" is a long-standing, legitimate
+        # scripting pattern and must not start requiring a real tty.
+        common = repo_text("lib/common.sh")
+        confirm_body = common.split("bs_confirm() {")[1].split("\n}\n")[0]
+        self.assertIn("read -r ans || return 1", confirm_body)
+        self.assertNotIn("bs_input_source", confirm_body)
+
+    def test_06_webctl_sources_envdetect_not_required(self):
+        # envdetect.sh is an install.sh-time concern only; web-ctl (the
+        # runtime bridge) has no reason to load it.
+        self.assertNotIn("envdetect", repo_text("web-ctl"))
+
+    def test_07_install_sources_envdetect(self):
+        self.assertIn(
+            "common osdetect envdetect probe health relay playlist media nginx",
+            repo_text("install.sh"),
+        )
+
+    def test_08_detect_environment_runs_before_packages(self):
+        inst = repo_text("install.sh")
+        main_body = inst.split("main() {")[1]
+        self.assertLess(main_body.index("preflight"), main_body.index("detect_environment"))
+        self.assertLess(main_body.index("detect_environment"), main_body.index("install_packages"))
+
+    def test_09_nginx_strategy_branches_in_configure_nginx(self):
+        inst = repo_text("install.sh")
+        self.assertIn('if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then', inst)
+        self.assertIn("nginx_isolated_gen_config", inst)
+        self.assertIn("nginx_isolated_install_unit", inst)
+        self.assertIn("nginx_isolated_enable", inst)
+
+    def test_10_apt_nginx_collision_guard(self):
+        inst = repo_text("install.sh")
+        self.assertIn(
+            "command -v nginx >/dev/null 2>&1 && ! os_pkg_installed nginx", inst
+        )
+        self.assertIn("NOT managed by apt/dpkg", inst)
+
+    def test_11_isolated_never_touches_system_nginx_when_already_active(self):
+        inst = repo_text("install.sh")
+        self.assertIn(
+            '[ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ] && [ "$BS_ENV_NGINX_ACTIVE" = "no" ]',
+            inst,
+        )
+
+    def test_12_ssl_issue_refuses_in_isolated_mode(self):
+        ssl = repo_text("lib/ssl.sh")
+        self.assertIn('BLUESTREAM_NGINX_STRATEGY:-}" = "isolated"', ssl)
+        self.assertIn("certbot's --nginx plugin edits the SYSTEM nginx", ssl)
+
+    def test_13_isolated_nginx_functions_exist(self):
+        nginx = repo_text("lib/nginx.sh")
+        for fn in (
+            "nginx_isolated_select_ports",
+            "nginx_isolated_rtmp_module_path",
+            "nginx_isolated_gen_config",
+            "nginx_isolated_test",
+            "nginx_isolated_install_unit",
+            "nginx_isolated_enable",
+            "nginx_isolated_reload",
+            "nginx_isolated_running",
+        ):
+            self.assertIn("%s()" % fn, nginx)
+
+    def test_14_nginx_helpers_are_strategy_aware(self):
+        nginx = repo_text("lib/nginx.sh")
+        for fn_body_start in (
+            "nginx_test() {",
+            "nginx_reload() {",
+            "nginx_restart() {",
+            "nginx_status() {",
+        ):
+            self.assertIn(fn_body_start, nginx)
+        self.assertIn('BLUESTREAM_NGINX_STRATEGY:-}" = "isolated"', nginx)
+
+    def test_15_uninstall_removes_isolated_instance_never_system_nginx(self):
+        u = repo_text("uninstall.sh")
+        self.assertIn("bluestream-nginx.service", u)
+        self.assertIn("rm -rf /etc/bluestream/nginx", u)
+        # The system nginx package/service/config is never stopped, disabled
+        # or removed anywhere in the uninstaller.
+        self.assertNotIn("systemctl stop nginx", u)
+        self.assertNotIn("systemctl disable nginx", u)
+        self.assertNotIn("purge nginx", u.split("System packages")[0])
+
+    def test_16_isolated_unit_never_enabled_blindly(self):
+        # The isolated nginx unit template exists and is never installed to
+        # /etc/systemd/system unconditionally by install_files (only via the
+        # strategy-gated nginx_isolated_install_unit call).
+        self.assertTrue((REPO_ROOT / "config" / "systemd" / "bluestream-nginx.service").is_file())
+        inst = repo_text("install.sh")
+        self.assertNotIn(
+            '/etc/systemd/system/bluestream-nginx.service"', inst
+        )
+
+    def test_17_bootstrap_and_docs_mention_compat(self):
+        readme = repo_text("README.md")
+        self.assertIn("control panel", readme.lower())
+        docs = repo_text("docs/installation.md")
+        self.assertIn("CloudPanel", docs)
+
+
+class EnvDetectClassificationTests(unittest.TestCase):
+    """Real-bash-execution tests for bs_env_classify's decision table (the
+    actual check functions are stubbed to fixed flag combinations; only the
+    classification LOGIC itself is under test here - the individual checks
+    are exercised for real in the Docker-based acceptance tests, not here)."""
+
+    _HARNESS = """#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+. "$repo/lib/common.sh"
+. "$repo/lib/envdetect.sh"
+. "$scenario"
+bs_env_classify
+echo "MODE=$BS_ENV_MODE"
+echo "STRATEGY=$BS_NGINX_STRATEGY"
+"""
+
+    def _run(self, scenario_text):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            scenario = tmpdir / "scenario.sh"
+            scenario.write_text(scenario_text, encoding="utf-8")
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.run(
+                [bash, str(harness), str(REPO_ROOT), str(scenario)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            lines = proc.stdout.decode("utf-8").strip().splitlines()
+            return dict(line.split("=", 1) for line in lines)
+
+    def _scenario(
+        self,
+        nginx_present="no",
+        nginx_active="no",
+        apache="no",
+        caddy="no",
+        panel="",
+        bluestream_existing="no",
+        prior_strategy="",
+    ):
+        return (
+            'BS_ENV_NGINX_PRESENT="%s"\n'
+            'BS_ENV_NGINX_ACTIVE="%s"\n'
+            'BS_ENV_APACHE_PRESENT="%s"\n'
+            'BS_ENV_CADDY_PRESENT="%s"\n'
+            'BS_ENV_PANEL="%s"\n'
+            'BS_ENV_BLUESTREAM_EXISTING="%s"\n'
+            'BLUESTREAM_NGINX_STRATEGY="%s"\n'
+        ) % (
+            nginx_present,
+            nginx_active,
+            apache,
+            caddy,
+            panel,
+            bluestream_existing,
+            prior_strategy,
+        )
+
+    def test_01_fresh_vps_is_owned(self):
+        out = self._run(self._scenario())
+        self.assertEqual(out["MODE"], "fresh")
+        self.assertEqual(out["STRATEGY"], "owned")
+
+    def test_02_active_plain_nginx_is_owned(self):
+        out = self._run(self._scenario(nginx_present="yes", nginx_active="yes"))
+        self.assertEqual(out["MODE"], "plain_nginx")
+        self.assertEqual(out["STRATEGY"], "owned")
+
+    def test_03_inactive_nginx_no_panel_is_unknown_isolated(self):
+        # nginx present but NOT active and no panel marker: ambiguous:
+        # treated as isolated out of caution, never guessed as fresh.
+        out = self._run(self._scenario(nginx_present="yes", nginx_active="no"))
+        self.assertEqual(out["MODE"], "unknown")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_04_cloudpanel_marker_is_managed_isolated(self):
+        out = self._run(
+            self._scenario(nginx_present="yes", nginx_active="yes", panel="cloudpanel")
+        )
+        self.assertEqual(out["MODE"], "managed")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_05_each_known_panel_is_managed_isolated(self):
+        for panel in (
+            "cloudpanel",
+            "aapanel",
+            "hestiacp",
+            "plesk",
+            "ispconfig",
+            "virtualmin",
+            "nginxproxymanager",
+        ):
+            out = self._run(self._scenario(panel=panel))
+            self.assertEqual(out["MODE"], "managed", panel)
+            self.assertEqual(out["STRATEGY"], "isolated", panel)
+
+    def test_06_apache_only_is_alt_webserver_isolated(self):
+        out = self._run(self._scenario(apache="yes"))
+        self.assertEqual(out["MODE"], "alt_webserver")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_07_caddy_only_is_alt_webserver_isolated(self):
+        out = self._run(self._scenario(caddy="yes"))
+        self.assertEqual(out["MODE"], "alt_webserver")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_08_panel_takes_priority_over_apache(self):
+        # A panel marker combined with an Apache backend (e.g. Plesk) must
+        # still classify as "managed", not "alt_webserver" - the message
+        # should name the actual panel, not a generic alternative-webserver
+        # warning.
+        out = self._run(self._scenario(apache="yes", panel="plesk"))
+        self.assertEqual(out["MODE"], "managed")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_09_existing_bluestream_reuses_recorded_strategy_isolated(self):
+        # A reinstall/update must reuse whatever strategy the FIRST install
+        # recorded, even if the live environment now looks different (e.g.
+        # the panel was temporarily stopped during a reinstall window).
+        out = self._run(
+            self._scenario(bluestream_existing="yes", prior_strategy="isolated")
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_10_existing_bluestream_reuses_recorded_strategy_owned(self):
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                bluestream_existing="yes",
+                prior_strategy="owned",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "owned")
 
 
 if __name__ == "__main__":

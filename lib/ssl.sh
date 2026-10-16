@@ -10,6 +10,20 @@ BLUESTREAM_SSL_LOADED=1
 
 ssl_issue() {
     bs_require_root
+    # Universal install compat: `certbot --nginx` edits the SYSTEM nginx
+    # config directly (it adds/manages its own server blocks in whatever
+    # nginx.conf/sites-* it finds). That is exactly the kind of modification
+    # this install must never make to an existing web server/control panel's
+    # configuration. BlueStream's own isolated instance is a separate,
+    # unmanaged-by-certbot nginx.conf, so automatic issuance is not supported
+    # there - report the limitation clearly instead of silently attempting
+    # something unsafe (or silently doing nothing).
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
+        bs_error "Automatic SSL (--with-ssl) is not supported when BlueStream is running its own independent nginx instance (an existing web server/control panel was detected)."
+        bs_error "certbot's --nginx plugin edits the SYSTEM nginx configuration directly, which this installer will never do to a panel-managed or third-party config."
+        bs_error "To use HTTPS: point a subdomain at this server through your existing panel/reverse proxy to http://127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<isolated-http-port>}/ and let the panel terminate TLS, or request a certificate yourself with certbot's --webroot or --standalone plugin against BlueStream's own instance. See docs/installation.md 'Existing Nginx / control panel compatibility'."
+        return 1
+    fi
     [ -n "$BLUESTREAM_DOMAIN" ] || bs_die "No domain configured (see Project Information / server.conf)."
     [ -n "$BLUESTREAM_ADMIN_EMAIL" ] || bs_die "No administrator email configured."
     bs_require_cmd certbot || bs_die "certbot is not installed"

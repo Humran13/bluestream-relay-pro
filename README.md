@@ -47,6 +47,7 @@ temporarily reconnects.
 - [Stream-copy philosophy](#stream-copy-philosophy)
 - [Codec recommendations](#codec-recommendations)
 - [Installation](#installation)
+  - [Existing web server / control panel compatibility](#existing-web-server--control-panel-compatibility)
 - [Manager usage](#manager-usage)
 - [Web console](#web-console)
 - [Destinations & outbound publishing](#destinations--outbound-publishing)
@@ -195,6 +196,37 @@ selection is persisted in `/etc/bluestream/server.conf` (`WEB_PORT=`) and
 something else now happens to be using 8080. nginx's `/console/` reverse
 proxy and the Gunicorn unit are always rendered from this one value, so they
 can never drift apart.
+
+### Existing web server / control panel compatibility
+
+`install.sh` detects the host **before** installing or changing anything,
+and never requires CloudPanel or any other panel:
+
+| Detected environment | Strategy | What happens |
+| --- | --- | --- |
+| Fresh VPS (no web server) | **Owned** | BlueStream installs and manages nginx directly (today's default). |
+| Plain Nginx, active, no panel | **Owned** | Same as above — your existing nginx is reused, not replaced. |
+| CloudPanel / aaPanel / HestiaCP / Plesk / ISPConfig / Virtualmin/Webmin / Nginx Proxy Manager | **Isolated** | BlueStream never touches the panel's nginx/Apache config, service, or certificates. It installs and runs its **own** independent nginx instance (own config root, own systemd unit, own ports) purely for its RTMP bus, HLS output and web console. |
+| Apache and/or Caddy present, no nginx | **Isolated** | Same independent-instance behavior; your existing web server is never modified. |
+| Nginx present but inactive, or anything ambiguous | **Isolated** | Treated cautiously rather than guessed as a fresh install. |
+
+The chosen strategy is detected once, displayed before anything is touched,
+recorded in `server.conf`, and **reused on every reinstall/update** — it
+never flips later just because the live environment looks different that
+day. An existing nginx binary that is **not** managed by apt/dpkg (common for
+some panels' own builds) is never touched either way — the installer aborts
+before installing the `nginx` package rather than risk overwriting it.
+
+In isolated mode: your panel/Apache/Caddy keeps its ports, config, and
+certificates exactly as they were. BlueStream's independent instance picks
+its own loopback-adjacent ports (shown during install and in
+`bluestream-manager`'s Server Status) for its RTMP bus, HLS output and web
+console. To reach it from your real domain, add one reverse-proxy rule in
+your panel pointing a (sub)domain at `http://127.0.0.1:<isolated-http-port>/`
+and let the panel terminate HTTPS — `--with-ssl` is not supported for the
+isolated instance itself (it would require editing the panel's nginx
+config, which this installer will never do); see
+`docs/installation.md` for the exact steps and a fully worked example.
 
 ## Manager usage
 
