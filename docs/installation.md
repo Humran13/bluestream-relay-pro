@@ -102,7 +102,7 @@ prints what it found:
 ```text
 ==> Detected environment
   Classification  : Managed environment (cloudpanel detected)
-  Nginx present   : yes (active: yes)
+  Nginx present   : yes (active: yes, other sites: yes)
   Apache present  : no
   Caddy present   : no
   Control panel   : cloudpanel
@@ -120,11 +120,21 @@ using. **This decision is made once and persisted** (`server.conf`
 `NGINX_STRATEGY=`); re-running `install.sh` later never silently switches
 strategies even if the live environment looks different that day.
 
-**Owned** (fresh VPS, or a plain/unmanaged nginx already installed and
-active): BlueStream manages `/etc/nginx` directly — same as previous
-versions. Your existing site files, SSL certificates and global settings are
-left alone except for two narrow, reversible changes needed specifically for
-the RTMP engine to work correctly:
+**Critical safety rule:** an existing nginx is **never** assumed to be safe
+to manage just because no *recognized* control panel was matched. Ownership
+must be positively confirmed — nginx present, active, **and** no site or
+`conf.d` entry already configured on it that BlueStream didn't create
+itself. The absence of a known panel marker is not evidence that nothing
+else is managing it; an unrecognized/unsupported panel, or a hand-configured
+site, is still detected via this positive check and still gets the isolated
+strategy. Only a genuinely empty, freshly-installed nginx (or one BlueStream
+already owns from a previous install) is ever managed directly.
+
+**Owned** (fresh VPS, or an existing nginx confirmed to be active with
+nothing else configured on it): BlueStream manages `/etc/nginx` directly —
+same as previous versions. Your existing site files, SSL certificates and
+global settings are left alone except for two narrow, reversible changes
+needed specifically for the RTMP engine to work correctly:
   - `worker_processes` is pinned to `1` (nginx-rtmp-module keeps live
     publish/play state **per worker process**; with more than one worker, a
     publisher's connection and the source's connection can land on different
@@ -140,10 +150,11 @@ the RTMP engine to work correctly:
     /etc/nginx/sites-available/default /etc/nginx/sites-enabled/`.
 
 **Isolated** (CloudPanel, aaPanel, HestiaCP, Plesk, ISPConfig,
-Virtualmin/Webmin, Nginx Proxy Manager, Apache, Caddy, or anything ambiguous
-— nginx present but not running, for example): BlueStream **never writes to
-`/etc/nginx`**, never changes `worker_processes` or any other global
-setting, never touches `sites-enabled/default`, and never runs
+Virtualmin/Webmin, Nginx Proxy Manager, Apache, Caddy, an nginx that already
+has another site configured on it — recognized panel or not, an nginx that
+exists but isn't running, or anything else ambiguous): BlueStream **never
+writes to `/etc/nginx`**, never changes `worker_processes` or any other
+global setting, never touches `sites-enabled/default`, and never runs
 `certbot --nginx` against the system config. Instead it installs and runs
 its **own** independent nginx instance:
 

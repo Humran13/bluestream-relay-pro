@@ -28,6 +28,25 @@ ExecStop=/bin/kill -QUIT $MAINPID
 Restart=on-failure
 RestartSec=5
 
+# --- Hardening -----------------------------------------------------------
+# A conservative subset only: the master process runs as root (same as the
+# stock system nginx.service - needed to bind ports and manage the worker
+# processes it forks and drops to the configured `user` directive), and it
+# legitimately needs broad read access (its own config, mime.types, the
+# bundled web player, HLS output it writes as www-data, future SSL certs).
+# ProtectSystem=strict + an exhaustive ReadWritePaths list was deliberately
+# NOT attempted here - getting that wrong would silently break the
+# streaming engine, which is worse than the modest gap below. These
+# directives are all safe regardless (nginx needs none of what they
+# restrict) and are verified not to interfere with startup.
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
 SyslogIdentifier=bluestream-nginx
 StandardOutput=journal
 StandardError=journal

@@ -205,9 +205,10 @@ and never requires CloudPanel or any other panel:
 | Detected environment | Strategy | What happens |
 | --- | --- | --- |
 | Fresh VPS (no web server) | **Owned** | BlueStream installs and manages nginx directly (today's default). |
-| Plain Nginx, active, no panel | **Owned** | Same as above — your existing nginx is reused, not replaced. |
+| Nginx active, confirmed empty (no panel, no existing sites) | **Owned** | Same as above — your existing nginx is reused, not replaced. |
 | CloudPanel / aaPanel / HestiaCP / Plesk / ISPConfig / Virtualmin/Webmin / Nginx Proxy Manager | **Isolated** | BlueStream never touches the panel's nginx/Apache config, service, or certificates. It installs and runs its **own** independent nginx instance (own config root, own systemd unit, own ports) purely for its RTMP bus, HLS output and web console. |
 | Apache and/or Caddy present, no nginx | **Isolated** | Same independent-instance behavior; your existing web server is never modified. |
+| Nginx already serving another site — **even with no recognized panel** | **Isolated** | Ownership is never assumed just because no *known* panel matched; a positive check for existing sites/conf.d entries forces isolated regardless. |
 | Nginx present but inactive, or anything ambiguous | **Isolated** | Treated cautiously rather than guessed as a fresh install. |
 
 The chosen strategy is detected once, displayed before anything is touched,

@@ -34,8 +34,16 @@ BS_ENV_DOCKER_PRESENT="no"
 BS_ENV_PORT80_FREE="no"
 BS_ENV_PORT443_FREE="no"
 BS_ENV_BLUESTREAM_EXISTING="no"
+# "yes" only when nginx is present AND already has at least one enabled site
+# other than the stock Debian/Ubuntu "default" stub - i.e. POSITIVE evidence
+# that something else already uses it for real. This is the deciding signal
+# for owned vs. isolated when no known panel/Apache/Caddy marker fired: the
+# mere ABSENCE of a recognized panel is never treated as evidence of
+# ownership (see bs_env_classify).
+BS_ENV_NGINX_HAS_OTHER_SITES="no"
 # Final classification. One of: fresh | plain_nginx | managed | alt_webserver
-# | unknown. See bs_env_classify for exactly what drives each outcome.
+# | nginx_other_sites | nginx_inactive | unknown. See bs_env_classify for
+# exactly what drives each outcome.
 BS_ENV_MODE="unknown"
 # Derived from BS_ENV_MODE: "owned" (BlueStream installs/manages the system
 # nginx directly, today's existing behavior) or "isolated" (BlueStream never
@@ -81,6 +89,40 @@ bs_env_check_caddy() {
 bs_env_check_docker() {
     BS_ENV_DOCKER_PRESENT="no"
     command -v docker >/dev/null 2>&1 && BS_ENV_DOCKER_PRESENT="yes"
+}
+
+# Positive-ownership check: does nginx already serve something real? Looks
+# at sites-enabled (Debian/Ubuntu convention) for anything besides the stock
+# "default" symlink, and at conf.d for anything besides BlueStream's own
+# generated main-context RTMP include (60-bluestream-rtmp.conf) and the
+# package's own default.conf, if present. ANY match means nginx is already
+# in real use by something BlueStream did not create, so ownership can never
+# be assumed from "no recognized panel" alone - see bs_env_classify.
+bs_env_check_nginx_vhosts() {
+    BS_ENV_NGINX_HAS_OTHER_SITES="no"
+    local f base
+    if [ -d /etc/nginx/sites-enabled ]; then
+        shopt -s nullglob
+        for f in /etc/nginx/sites-enabled/*; do
+            base="$(basename "$f")"
+            case "$base" in
+                default|bluestream) continue ;;
+            esac
+            BS_ENV_NGINX_HAS_OTHER_SITES="yes"
+        done
+        shopt -u nullglob
+    fi
+    if [ -d /etc/nginx/conf.d ]; then
+        shopt -s nullglob
+        for f in /etc/nginx/conf.d/*.conf; do
+            base="$(basename "$f")"
+            case "$base" in
+                default.conf|bluestream.conf) continue ;;
+            esac
+            BS_ENV_NGINX_HAS_OTHER_SITES="yes"
+        done
+        shopt -u nullglob
+    fi
 }
 
 # A panel-specific CLI tool, if present, is the strongest and most stable
@@ -138,6 +180,7 @@ bs_env_check_bluestream_existing() {
 # ---------------------------------------------------------------------------
 bs_env_detect() {
     bs_env_check_nginx
+    bs_env_check_nginx_vhosts
     bs_env_check_apache
     bs_env_check_caddy
     bs_env_check_docker
@@ -149,31 +192,51 @@ bs_env_detect() {
 
 # Decide MODE and the nginx strategy that follows from it.
 #
-#   fresh         - no nginx, no Apache/Caddy, no panel: install/manage nginx
-#                   directly (today's behavior). strategy=owned
-#   plain_nginx   - nginx present, ACTIVE, but no panel/Apache/Caddy
-#                   detected: still safe to manage directly (the existing
-#                   idempotent, backup-and-render approach already preserves
-#                   unrelated sites). strategy=owned
-#   managed       - a known control panel was detected: NEVER touch its
-#                   nginx/Apache config. strategy=isolated
-#   alt_webserver - Apache and/or Caddy present as the primary web server
-#                   (no panel marker, but a non-nginx server is doing the
-#                   real work): NEVER touch it. strategy=isolated
-#   unknown       - nginx present but inactive, or any other ambiguous
-#                   combination that doesn't cleanly match the above: treated
-#                   as isolated out of caution rather than guessed as fresh.
+# CRITICAL SAFETY RULE: an existing nginx is never assumed to be
+# BlueStream-owned just because no *known* panel marker fired. Ownership
+# must be POSITIVELY established - here, that means nginx is present,
+# active, AND has no enabled site/conf.d entry BlueStream didn't create
+# (bs_env_check_nginx_vhosts). The absence of evidence (no recognized
+# panel) is NOT evidence of absence (of something else managing it); when
+# ownership can't be positively confirmed, isolated is always the fallback.
+#
+#   fresh             - no nginx, no Apache/Caddy, no panel: install/manage
+#                       nginx directly (today's behavior). strategy=owned
+#   plain_nginx       - nginx present, ACTIVE, no panel/Apache/Caddy, AND
+#                       positively confirmed to have no other site already
+#                       configured on it: safe to manage directly.
+#                       strategy=owned
+#   nginx_other_sites - nginx present and active, but something BlueStream
+#                       did not create is already configured on it (a real,
+#                       positive signal of existing use) - ownership cannot
+#                       be safely assumed even with no recognized panel
+#                       marker. strategy=isolated
+#   nginx_inactive    - nginx present but not running: too ambiguous to
+#                       assume ownership (could be mid-configuration by
+#                       something else, or disabled on purpose).
+#                       strategy=isolated
+#   managed           - a known control panel was detected: NEVER touch its
+#                       nginx/Apache config. strategy=isolated
+#   alt_webserver     - Apache and/or Caddy present as the primary web
+#                       server (no panel marker, but a non-nginx server is
+#                       doing the real work): NEVER touch it.
+#                       strategy=isolated
+#   unknown           - any other ambiguous combination: isolated, never
+#                       guessed as fresh.
 bs_env_classify() {
     if [ "$BS_ENV_BLUESTREAM_EXISTING" = "yes" ]; then
         # A prior BlueStream install already recorded (and the operator is
         # re-running install.sh to repair/update/upgrade it) is authoritative
         # over any fresh classification: reuse whatever strategy it already
-        # used, recorded alongside the rest of server.conf.
+        # used, recorded alongside the rest of server.conf. Distinct MODE
+        # values from a first-time "managed"/"plain_nginx" classification -
+        # this is a REUSE decision, not a fresh re-detection, and the label
+        # must say so plainly rather than implying a panel was just found.
         if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
-            BS_ENV_MODE="managed"
+            BS_ENV_MODE="reinstall_isolated"
             BS_NGINX_STRATEGY="isolated"
         else
-            BS_ENV_MODE="plain_nginx"
+            BS_ENV_MODE="reinstall_owned"
             BS_NGINX_STRATEGY="owned"
         fi
         return 0
@@ -193,23 +256,34 @@ bs_env_classify() {
         BS_NGINX_STRATEGY="owned"
         return 0
     fi
-    if [ "$BS_ENV_NGINX_ACTIVE" = "yes" ]; then
-        BS_ENV_MODE="plain_nginx"
-        BS_NGINX_STRATEGY="owned"
+    if [ "$BS_ENV_NGINX_ACTIVE" != "yes" ]; then
+        BS_ENV_MODE="nginx_inactive"
+        BS_NGINX_STRATEGY="isolated"
         return 0
     fi
-    BS_ENV_MODE="unknown"
-    BS_NGINX_STRATEGY="isolated"
+    if [ "$BS_ENV_NGINX_HAS_OTHER_SITES" = "yes" ]; then
+        BS_ENV_MODE="nginx_other_sites"
+        BS_NGINX_STRATEGY="isolated"
+        return 0
+    fi
+    # Positively confirmed: nginx is present, active, and nothing else is
+    # configured on it yet. Safe to take ownership.
+    BS_ENV_MODE="plain_nginx"
+    BS_NGINX_STRATEGY="owned"
     return 0
 }
 
 bs_env_mode_label() {
     case "$BS_ENV_MODE" in
-        fresh)         printf 'Fresh VPS (no existing web server)' ;;
-        plain_nginx)   printf 'Standard Nginx (no control panel detected)' ;;
-        managed)       printf 'Managed environment (%s detected)' "${BS_ENV_PANEL:-unknown panel}" ;;
-        alt_webserver) printf 'Alternative web server (Apache/Caddy, no Nginx)' ;;
-        *)             printf 'Unknown/custom environment' ;;
+        fresh)              printf 'Fresh VPS (no existing web server)' ;;
+        plain_nginx)        printf 'Standard Nginx, confirmed empty (no control panel, no existing sites)' ;;
+        nginx_other_sites)  printf 'Existing Nginx already serving other site(s) - ownership not assumed' ;;
+        nginx_inactive)     printf 'Nginx present but not running - too ambiguous to assume ownership' ;;
+        managed)            printf 'Managed environment (%s detected)' "${BS_ENV_PANEL:-unknown panel}" ;;
+        alt_webserver)      printf 'Alternative web server (Apache/Caddy, no Nginx)' ;;
+        reinstall_isolated) printf 'Existing BlueStream install - reusing its isolated nginx strategy' ;;
+        reinstall_owned)    printf 'Existing BlueStream install - reusing its owned nginx strategy' ;;
+        *)                  printf 'Unknown/custom environment' ;;
     esac
 }
 
@@ -217,7 +291,7 @@ bs_env_mode_label() {
 bs_env_report() {
     bs_step "Detected environment"
     printf '  Classification  : %s\n' "$(bs_env_mode_label)"
-    printf '  Nginx present   : %s (active: %s)\n' "$BS_ENV_NGINX_PRESENT" "$BS_ENV_NGINX_ACTIVE"
+    printf '  Nginx present   : %s (active: %s, other sites: %s)\n' "$BS_ENV_NGINX_PRESENT" "$BS_ENV_NGINX_ACTIVE" "$BS_ENV_NGINX_HAS_OTHER_SITES"
     printf '  Apache present  : %s\n' "$BS_ENV_APACHE_PRESENT"
     printf '  Caddy present   : %s\n' "$BS_ENV_CADDY_PRESENT"
     printf '  Control panel   : %s\n' "${BS_ENV_PANEL:-none detected}"

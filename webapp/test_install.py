@@ -2406,6 +2406,7 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         self,
         nginx_present="no",
         nginx_active="no",
+        nginx_other_sites="no",
         apache="no",
         caddy="no",
         panel="",
@@ -2415,6 +2416,7 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         return (
             'BS_ENV_NGINX_PRESENT="%s"\n'
             'BS_ENV_NGINX_ACTIVE="%s"\n'
+            'BS_ENV_NGINX_HAS_OTHER_SITES="%s"\n'
             'BS_ENV_APACHE_PRESENT="%s"\n'
             'BS_ENV_CADDY_PRESENT="%s"\n'
             'BS_ENV_PANEL="%s"\n'
@@ -2423,6 +2425,7 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         ) % (
             nginx_present,
             nginx_active,
+            nginx_other_sites,
             apache,
             caddy,
             panel,
@@ -2440,11 +2443,40 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         self.assertEqual(out["MODE"], "plain_nginx")
         self.assertEqual(out["STRATEGY"], "owned")
 
-    def test_03_inactive_nginx_no_panel_is_unknown_isolated(self):
+    def test_03_inactive_nginx_no_panel_is_isolated(self):
         # nginx present but NOT active and no panel marker: ambiguous:
         # treated as isolated out of caution, never guessed as fresh.
         out = self._run(self._scenario(nginx_present="yes", nginx_active="no"))
-        self.assertEqual(out["MODE"], "unknown")
+        self.assertEqual(out["MODE"], "nginx_inactive")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_03b_active_nginx_with_other_sites_is_isolated(self):
+        # CRITICAL SAFETY REQUIREMENT: nginx present, active, and no
+        # *recognized* panel marker fired - but something BlueStream did not
+        # create is already configured on it. Ownership must NEVER be
+        # assumed just because no known panel was matched; positive evidence
+        # of existing use (another site) must force isolated regardless.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes", nginx_active="yes", nginx_other_sites="yes"
+            )
+        )
+        self.assertEqual(out["MODE"], "nginx_other_sites")
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_03c_unrecognized_panel_with_other_sites_never_owned(self):
+        # The adversarial case the safety requirement is really about: an
+        # UNKNOWN/unsupported panel (no marker we recognize) that has
+        # already configured real nginx sites. This must resolve to
+        # isolated, not owned, even though BS_ENV_PANEL is empty.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                panel="",
+            )
+        )
         self.assertEqual(out["STRATEGY"], "isolated")
 
     def test_04_cloudpanel_marker_is_managed_isolated(self):
@@ -2495,6 +2527,7 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
             self._scenario(bluestream_existing="yes", prior_strategy="isolated")
         )
         self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_isolated")
 
     def test_10_existing_bluestream_reuses_recorded_strategy_owned(self):
         out = self._run(
@@ -2506,6 +2539,7 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
             )
         )
         self.assertEqual(out["STRATEGY"], "owned")
+        self.assertEqual(out["MODE"], "reinstall_owned")
 
 
 if __name__ == "__main__":
