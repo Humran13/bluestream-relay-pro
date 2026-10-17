@@ -186,6 +186,19 @@ Everything else is identical: the same RTMP bus, the same HLS/player/console
 location logic, the same web console. `bluestream-manager`'s Server Status
 and the installer's own output always show the ports actually in use.
 
+**The isolated instance is a full streaming GATEWAY, not just a console
+proxy.** It is the one process that fronts Gunicorn for `/console/` *and*
+serves `/player/` and `/hls/` itself directly (via nginx `alias`, exactly as
+the owned-mode nginx does on port 80/443) — Gunicorn/Flask has no routes for
+`/player/` or `/hls/` at all. **Always point your reverse proxy at the
+gateway's port, never at the bare Gunicorn port** — pointing a panel
+straight at Gunicorn is a real misconfiguration that was hit on a live VPS:
+`/console/` worked (a 302 redirect) while `/player/?relay=<name>` and
+`/hls/relay/<name>/index.m3u8` both 404'd, because Gunicorn simply has
+nothing to serve those paths with. `sudo bluestream-manager installinfo`
+always names the correct port as "Reverse-proxy destination" and separately
+labels the Gunicorn port as console-only.
+
 **Connecting your domain to an isolated install:** add one reverse-proxy
 rule in your panel pointing a (sub)domain at
 `http://127.0.0.1:<isolated-http-port>/` (the exact port is printed during
@@ -318,16 +331,62 @@ console dashboard is actually usable yet:
   printed in the warning.)
 - A reinstall/upgrade **never** resets, overwrites, or duplicates an
   existing admin account — `bluestream-manager admin init` itself refuses
-  outright if one already exists. To deliberately reset it, remove
-  `/var/lib/bluestream/web/admin.json` yourself first.
+  outright if one already exists.
 - The password is never accepted as a command-line argument, never logged,
   and never left in shell history — it is read via a hidden prompt (or
   piped over stdin for the non-interactive command) and hashed with the
   existing `scrypt`-based implementation already in `webapp/security.py`
   (no new authentication system or dependency was introduced).
 
+**Locked out?** Use the dedicated, root-gated password-reset workflow
+instead of deleting `admin.json` by hand:
+
+```bash
+sudo bluestream-manager admin reset-password
+```
+
+It does **not** require the old password (that is the point of a lockout
+recovery), but it does require local root/sudo access to invoke, and it
+asks for explicit confirmation before changing anything (the current
+password stops working immediately). It preserves the existing username.
+The piped/non-interactive equivalent (new password via stdin, never argv):
+
+```bash
+printf '%s\n' '<new-password>' | (cd /usr/local/lib/bluestream && \
+  python3 -m webapp.security reset-admin-password --state-dir /var/lib/bluestream/web)
+```
+
 Check status at any time: `sudo bluestream-manager admin status` or
 `sudo bluestream-manager installinfo`.
+
+### Relay reliability (reconnection behavior)
+
+Every relay's FFmpeg process is run inside a supervision loop
+(`lib/supervise.sh`), not as a single one-shot process, specifically
+because systemd's `Restart=on-failure` never restarts a unit whose main
+process exits with code `0` — and FFmpeg exits `0` both on a deliberate
+stop **and** on a plain live-source disconnect/EOF with no error. Without
+this, a live relay that hit a transient source hiccup could silently stop
+producing HLS and never come back, indistinguishable at the systemd level
+from "the operator stopped it on purpose" (this was observed on a real
+VPS: `Result=success`, `ExecMainStatus=0`, `NRestarts=0`, the relay simply
+went quiet about 15 seconds after starting).
+
+The supervisor now distinguishes, and reports, exactly why a relay most
+recently stopped:
+
+| Situation | Behavior |
+| --- | --- |
+| Deliberate stop (`relay stop` / `systemctl stop`) | Recognized via the stop **signal itself** (never inferred from FFmpeg's exit code) — exits cleanly, reported as `STOPPED`, never retried. |
+| Finite media, no loop configured | A clean end is the **expected** natural completion — reported as `STOPPED` ("finite media playback completed normally"), never retried. |
+| Finite media **with** looping configured | FFmpeg loops internally; if it ever exits anyway, that's unexpected and is retried like a live source. |
+| Any live/remote source (`remote-hls`, `rtmp(s)`, `rtsp`, `http-file`, `youtube`, `web-resolver`) ending unexpectedly — **including a clean exit 0** | Reconnected automatically with bounded exponential backoff (reported as `RECONNECTING`), using the relay's own configured restart-delay as the base. A sustained healthy run resets the backoff; after 8 unsuccessful attempts it gives up and reports `FAILED` with the reason, rather than retrying forever. |
+
+`sudo bluestream-manager relay show <name>` and the dashboard both surface
+the current supervisor state, the last FFmpeg exit code, the reconnect
+attempt count, and the actual FFmpeg PID (distinct from the systemd unit's
+own `MainPID`, which is the supervisor loop itself) — never just "the
+service is active".
 
 ## 4. DNS and firewall
 
@@ -453,8 +512,10 @@ Common issues:
 | `WEB_PORT unset` or similar during install | Should not happen as of this fix — if you see it, `sudo bluestream-manager diagnostics` and check `/etc/bluestream/server.conf` for a missing/invalid `WEB_PORT`; re-run `install.sh`. |
 | Install hangs or silently skips a prompt when piped via `curl \| sudo bash` | Fixed — `install.sh` now falls back to `/dev/tty` for interactive prompts and never blocks forever; a domain left blank is fine (see [Domain input](../README.md#domain-input)). |
 | A destination never reaches "Live" | Check `journalctl` for that publisher's unit (above) — the detail field gives a bounded, specific reason (e.g. "destination refused the connection"), never the stream key. |
+| A relay went quiet / stopped and you didn't stop it | Run `sudo bluestream-manager relay show <name>` — the "Supervisor state"/"Last reason" lines say exactly why (a deliberate stop, a normal finite-media completion, an active `RECONNECTING` backoff, or a `FAILED` after exhausting reconnection attempts). See "Relay reliability (reconnection behavior)" above. |
 | Isolated instance: public URL unreachable | Confirm your panel's reverse-proxy rule points at the correct `127.0.0.1:<isolated-http-port>` (see Server Status / the install output) and that the panel itself is reachable. |
 | `nginx RTMP module loaded: FAIL` | `libnginx-mod-rtmp` failed to install, or (isolated mode) the module `.so` wasn't found at the expected path — check `apt list --installed libnginx-mod-rtmp` and re-run `install.sh`. |
-| **502 Bad Gateway** from your control panel/reverse proxy | The reverse proxy is almost always pointed at the wrong port. Run `sudo bluestream-manager installinfo` and confirm your panel's vhost targets the exact "Reverse-proxy destination" value shown (the internal Gunicorn port, e.g. `127.0.0.1:8180` — never 80/443/8081/a guessed port). The install output's `PORT CONFIGURATION` section states this explicitly for the same reason. |
+| **502 Bad Gateway** from your control panel/reverse proxy | The reverse proxy is almost always pointed at the wrong port. Run `sudo bluestream-manager installinfo` and confirm your panel's vhost targets the exact "Reverse-proxy destination" value shown — in isolated mode this is the **gateway** port (BlueStream's own nginx, e.g. `127.0.0.1:8088`), **never** the raw Gunicorn port (e.g. `127.0.0.1:8180`) and never 80/443/a guessed port. The install output's `PORT CONFIGURATION` section states this explicitly for the same reason. |
+| `/console/` works (redirects fine) but `/player/?relay=<name>` and `/hls/relay/<name>/index.m3u8` both 404 through your panel's HTTPS domain | The reverse proxy is pointed at the **Gunicorn** port instead of the gateway port. Gunicorn/Flask only implements `/console/*` routes — it has no `/player/` or `/hls/` routes at all, so proxying straight to it makes `/console/` work while everything else 404s. Fix: point the panel's reverse proxy at the isolated gateway port shown by `sudo bluestream-manager installinfo` ("Isolated streaming gateway" / "Reverse-proxy destination"), not at "Internal Gunicorn port". |
 | "No web admin account exists" / cannot log in after install | Admin onboarding was pending (no terminal was reachable during a non-interactive install). Run `sudo bluestream-manager admin init`, or check status with `sudo bluestream-manager admin status`. |
 | Installed as "owned" but a panel (e.g. CloudPanel) now exists | `install.sh` now stops and prints a migration procedure instead of silently reusing the old strategy — see "Safe Owned -> Isolated migration" above. Run `sudo bluestream-manager migrate status`. |

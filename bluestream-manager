@@ -22,7 +22,7 @@ else
     exit 1
 fi
 
-for _bs_lib in common osdetect envdetect probe health relay playlist media destinations publisher nginx migrate admin ssl firewall backup diagnostics selftest info; do
+for _bs_lib in common osdetect envdetect probe health relay supervise playlist media destinations publisher nginx migrate admin ssl firewall backup diagnostics selftest info; do
     # shellcheck source=lib/common.sh
     # shellcheck source=lib/relay.sh
     # shellcheck source=lib/playlist.sh
@@ -61,7 +61,7 @@ Non-interactive commands:
   nginx test | reload | restart
   ssl issue | status | renew
   firewall status | configure
-  admin status | init
+  admin status | init | reset-password
   migrate status | run | rollback <dir> | gen-isolated
   installinfo
   info
@@ -393,9 +393,10 @@ menu_admin() {
     bs_step "Admin Account"
     printf 'Status: %s\n' "$(web_admin_status)"
     if web_admin_exists; then
-        bs_info "An admin account already exists and is preserved (no reset option here by design, to avoid"
-        bs_info "accidentally locking out or changing an in-use account). To deliberately reset it, remove"
-        bs_info "$BLUESTREAM_WEB_STATE_DIR/admin.json yourself first, then re-run this."
+        bs_info "An admin account already exists and is preserved by default (never auto-reset)."
+        if bs_confirm "Locked out? Reset this admin's password now? (requires local root; does not need the old password)"; then
+            web_admin_reset_password_cli
+        fi
         return 0
     fi
     if bs_confirm "No admin account exists yet. Create one now?"; then
@@ -758,9 +759,10 @@ cli_firewall() {
 
 cli_admin() {
     case "${1:-}" in
-        status) printf 'Admin account: %s\n' "$(web_admin_status)" ;;
-        init)   web_admin_init_cli ;;
-        *) bs_die "Usage: admin status|init" ;;
+        status)         printf 'Admin account: %s\n' "$(web_admin_status)" ;;
+        init)           web_admin_init_cli ;;
+        reset-password) web_admin_reset_password_cli ;;
+        *) bs_die "Usage: admin status|init|reset-password" ;;
     esac
 }
 

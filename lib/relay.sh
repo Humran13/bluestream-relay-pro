@@ -343,8 +343,16 @@ relay_start() {
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
     # A fresh start clears any stale start-failure diagnostic from an earlier
-    # attempt; run-relay.sh re-writes it only if resolution fails again.
+    # attempt; run-relay.sh re-writes it only if resolution fails again. Also
+    # clear the supervisor status file (see lib/supervise.sh) so the
+    # dashboard never shows a leftover COMPLETED/FAILED/STOPPED state from a
+    # previous run while this new attempt is only just starting - run-
+    # relay.sh's own root bootstrap clears it too, but doing it here as well
+    # avoids a race with the UI reading status in the instant before that.
     rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status relay "$name"
+    fi
     systemctl start "$(bs_unit relay "$name")" || bs_die "Failed to start relay '$name'"
     bs_ok "Relay '$name' started"
 }
@@ -355,10 +363,14 @@ relay_stop() {
     relay_load_config "$name" || bs_die "Relay '$name' not found"
     unit="$(bs_unit relay "$name")"
     systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop relay '$name'"
-    # An intentional stop of an FFmpeg relay leaves the unit in a 'failed'
-    # state (FFmpeg exits non-zero on termination). Normalize the explicit stop
-    # so the unit ends up 'inactive', not 'failed'. This touches ONLY this
-    # exact validated unit; genuine runtime failures outside an explicit
+    # The run-relay.sh supervision loop (lib/supervise.sh) traps SIGTERM -
+    # the signal `systemctl stop` sends - and exits 0 deliberately, writing
+    # a STOPPED status before it does. That is now the authoritative record
+    # of "this was a deliberate stop", not the unit's exit code (FFmpeg
+    # itself still exits non-zero on a raw kill; the exit code status this
+    # reset-failed call accounts for is a defensive compatibility fallback,
+    # not the primary mechanism it used to be). This touches ONLY this exact
+    # validated unit; genuine runtime failures outside an explicit
     # BlueStream Stop are untouched, and restart behavior is unchanged.
     systemctl reset-failed "$unit" 2>/dev/null || true
     # Clear the resolver start-failure diagnostic: the relay is now stopped.
@@ -374,6 +386,9 @@ relay_restart() {
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
     rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status relay "$name"
+    fi
     systemctl restart "$(bs_unit relay "$name")" || bs_die "Failed to restart relay '$name'"
     bs_ok "Relay '$name' restarted"
 }
@@ -409,6 +424,9 @@ relay_remove() {
     rm -rf "/etc/systemd/system/$(bs_unit relay "$name").d"
     rm -rf "$(bs_hls_dir_for relay "$name")"
     rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status relay "$name"
+    fi
     bs_ok "Relay '$name' removed"
 }
 
@@ -440,6 +458,9 @@ relay_delete() {
     rm -rf "/etc/systemd/system/$unit.d"
     rm -rf "$(bs_hls_dir_for relay "$name")"
     rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status relay "$name"
+    fi
     systemctl daemon-reload 2>/dev/null || true
     return 0
 }
@@ -475,7 +496,7 @@ relay_status_detail() {
     local name="$1"
     bs_require_root
     relay_load_config "$name" || bs_die "Relay '$name' not found"
-    local unit hlsdir pid user
+    local unit hlsdir mainpid ffpid user
     unit="$(bs_unit relay "$name")"
     hlsdir="$(bs_hls_dir_for relay "$name")"
     health_state relay "$name"
@@ -487,16 +508,41 @@ relay_status_detail() {
     printf '  Restart sec     : %s\n' "$RELAY_RESTART_SEC"
     printf '  Enabled at boot : %s\n' "$RELAY_ENABLED"
     printf '  Note            : %s\n' "${RELAY_NOTE:--}"
-    printf '  Systemd unit    : %s\n' "$unit"
+    printf '  Systemd unit    : %s (instance name: %s)\n' "$unit" "$name"
     printf '  Active state    : %s\n' "$(systemctl is-active "$unit" 2>/dev/null)"
     printf '  Boot enabled    : %s\n' "$(systemctl is-enabled "$unit" 2>/dev/null)"
     printf '  Health          : %s\n' "$(health_color)"
     printf '  Health detail   : %s\n' "$HEALTH_DETAILS"
-    pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
-    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
-        user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
-        printf '  FFmpeg PID      : %s\n' "$pid"
-        printf '  FFmpeg user     : %s\n' "${user:-unknown}"
+
+    # Reconnection/termination diagnostics from the supervisor's own status
+    # file (see lib/supervise.sh) - the authoritative record of WHY the
+    # relay's FFmpeg process most recently stopped, which systemd's
+    # ActiveState/Result alone cannot express (FFmpeg exits 0 on both a
+    # deliberate stop and a clean unexpected live-source EOF).
+    if command -v bs_supervise_read_status >/dev/null 2>&1 && bs_supervise_read_status relay "$name"; then
+        printf '  Supervisor state: %s\n' "$BS_SUPERVISE_STATE"
+        printf '  Last reason     : %s\n' "${BS_SUPERVISE_DETAIL:--}"
+        printf '  Last FFmpeg exit: %s\n' "${BS_SUPERVISE_EXIT_CODE:--}"
+        printf '  Reconnect count : %s\n' "${BS_SUPERVISE_ATTEMPT:-0}"
+        if [ -n "${BS_SUPERVISE_UPDATED:-}" ] && [ "${BS_SUPERVISE_UPDATED:-0}" != "0" ]; then
+            printf '  Status age (s)  : %s\n' "$(( $(date +%s) - BS_SUPERVISE_UPDATED ))"
+        fi
+    fi
+
+    # The supervisor's MainPID is the unprivileged supervision loop itself,
+    # not FFmpeg directly (FFmpeg runs as its direct child, retried across
+    # reconnects without the unit as a whole restarting) - look up the
+    # actual FFmpeg child PID for an accurate diagnostic.
+    mainpid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+    if [ -n "$mainpid" ] && [ "$mainpid" != "0" ]; then
+        ffpid="$(pgrep -P "$mainpid" -x ffmpeg 2>/dev/null | head -n1)"
+        if [ -n "$ffpid" ]; then
+            user="$(ps -o user= -p "$ffpid" 2>/dev/null | tr -d ' ')"
+            printf '  FFmpeg PID      : %s (supervisor PID: %s)\n' "$ffpid" "$mainpid"
+            printf '  FFmpeg user     : %s\n' "${user:-unknown}"
+        else
+            printf '  FFmpeg process  : not currently running (supervisor PID: %s - reconnecting or starting)\n' "$mainpid"
+        fi
     else
         printf '  FFmpeg process  : not running\n'
     fi

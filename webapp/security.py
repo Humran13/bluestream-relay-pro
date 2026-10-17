@@ -207,6 +207,43 @@ def init_admin(state_dir, password: str, username: str = ADMIN_USERNAME) -> dict
     return record
 
 
+def reset_admin_password(state_dir, password: str, username: str | None = None) -> dict:
+    """Reset the EXISTING admin's password in place (lockout recovery).
+
+    This is deliberately a RESET, not a way to create the first account:
+    it requires an existing admin record and raises ``FileNotFoundError``
+    if none exists (use :func:`init_admin` for that). The old password is
+    never required or verified - that is the entire point of a lockout-
+    recovery workflow - but invoking the CLI command that calls this still
+    requires local root (the state dir and admin.json are root-owned,
+    0750/0640) and explicit confirmation at the shell layer (see
+    lib/admin.sh web_admin_reset_password_cli). The existing username is
+    preserved unless a new one is explicitly given. ``password`` must
+    already be in memory (from stdin); it is never written to disk in
+    plaintext and never appears in argv.
+    """
+    state_dir = Path(state_dir)
+    record_file = state_dir / "admin.json"
+    existing = load_admin_record(state_dir)
+    if existing is None:
+        raise FileNotFoundError(
+            "no existing admin account to reset: %s (use init-admin to create one)" % record_file
+        )
+    if not password:
+        raise ValueError("password must not be empty")
+    new_username = username or existing.get("username") or ADMIN_USERNAME
+    if not new_username:
+        raise ValueError("username must not be empty")
+    record = {
+        "username": new_username,
+        **hash_password(password),
+        "created": existing.get("created") or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "password_reset_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    save_admin_record(state_dir, record)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # CSRF tokens (session-backed, constant-time verification)
 # ---------------------------------------------------------------------------
@@ -361,6 +398,12 @@ def _cli_main(argv=None) -> int:
     init = sub.add_parser("init-admin", help="Initialize the local admin account")
     init.add_argument("--state-dir", default=str(default_state_dir()))
     init.add_argument("--username", default=ADMIN_USERNAME)
+    reset = sub.add_parser(
+        "reset-admin-password",
+        help="Reset the EXISTING admin's password (lockout recovery; does not require the old password)",
+    )
+    reset.add_argument("--state-dir", default=str(default_state_dir()))
+    reset.add_argument("--username", default=None, help="Optionally also change the username")
     args = parser.parse_args(argv)
 
     if args.command == "init-admin":
@@ -374,6 +417,23 @@ def _cli_main(argv=None) -> int:
             "admin account '%s' initialized in %s\n" % (record["username"], args.state_dir)
         )
         return 0
+
+    if args.command == "reset-admin-password":
+        password = sys.stdin.readline().rstrip("\r\n")
+        if not password:
+            sys.stderr.write("error: no password provided on stdin\n")
+            return 2
+        try:
+            record = reset_admin_password(args.state_dir, password, username=args.username)
+        except FileNotFoundError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 3
+        _fix_production_group(args.state_dir)
+        sys.stdout.write(
+            "admin account '%s' password reset in %s\n" % (record["username"], args.state_dir)
+        )
+        return 0
+
     return 2
 
 

@@ -2,16 +2,25 @@
 # BlueStream Relay Pro - relay/playlist health state determination.
 #
 # A service being "active" is not sufficient: health also requires fresh
-# HLS segments. Possible states:
-#   HEALTHY  - service active and HLS fresh
-#   STARTING - service active but HLS not yet produced (recent start)
-#   STALE    - service active but HLS is not fresh
-#   STOPPED  - stopped (including a clean intentional stop of a still-enabled
-#              unit, detected via ActiveState=inactive + Result=success)
-#   DISABLED - alias of STOPPED used when config ENABLED=no
-#   FAILED   - enabled at boot but not running with a non-success Result, or
-#              the unit is in the failed state
-#   UNKNOWN  - not configured / cannot be determined
+# HLS segments - "LIVE"/HEALTHY is never reported on service-started alone.
+# Possible states:
+#   HEALTHY      - service active and HLS fresh (verified actual media flow)
+#   STARTING     - service active but HLS not yet produced (recent start)
+#   RECONNECTING - the relay supervisor (lib/supervise.sh) is between FFmpeg
+#                   attempts after an unexpected end, backing off before the
+#                   next reconnect - never confused with a deliberate stop
+#   STALE        - service active but HLS is not fresh (source may be down)
+#   STOPPED      - stopped (including a clean intentional stop, OR a finite
+#                   media relay that completed normally with no loop
+#                   configured - both are now confirmed by the supervisor's
+#                   own status file, see lib/supervise.sh, rather than
+#                   inferred from systemd Result alone)
+#   DISABLED     - alias of STOPPED used when config ENABLED=no
+#   FAILED       - enabled at boot but not running with a non-success
+#                   Result, the unit is in the failed state, or the
+#                   supervisor itself gave up after exhausting its bounded
+#                   reconnection attempts
+#   UNKNOWN      - not configured / cannot be determined
 #
 # BlueStream Relay Pro 0.1.0 (foundation). See LICENSE for terms.
 
@@ -52,6 +61,48 @@ health_state() {
         enabled|enabled-runtime|disabled|static|indirect|alias|masked|linked) ;;
         *) enable_state="unknown" ;;
     esac
+
+    # Primary signal, when present: the relay supervisor's own status file
+    # (lib/supervise.sh), which distinguishes a deliberate stop from an
+    # unexpected termination - something systemd's ActiveState/Result alone
+    # cannot do (FFmpeg exits with a plain success status on BOTH a clean
+    # stop and a clean unexpected live-source EOF; this is exactly the
+    # ambiguity that let a real relay go unnoticed-stopped about 15 seconds
+    # after it started, with no failure recorded anywhere). Only relays
+    # (run-relay.sh) write this file today; a playlist with no status file
+    # yet simply falls through to the existing logic below unchanged
+    # (additive, zero regression there).
+    if [ "$kind" = "relay" ] && command -v bs_supervise_read_status >/dev/null 2>&1 \
+        && bs_supervise_read_status "$kind" "$name"; then
+        case "$BS_SUPERVISE_STATE" in
+            RECONNECTING)
+                HEALTH_STATE="RECONNECTING"
+                HEALTH_DETAILS="$BS_SUPERVISE_DETAIL"
+                return 0
+                ;;
+            FAILED)
+                if [ "$active_state" != "active" ]; then
+                    HEALTH_STATE="FAILED"
+                    HEALTH_DETAILS="$BS_SUPERVISE_DETAIL"
+                    return 0
+                fi
+                ;;
+            STOPPED)
+                if [ "$active_state" != "active" ]; then
+                    HEALTH_STATE="STOPPED"
+                    HEALTH_DETAILS="stopped cleanly (deliberate stop, confirmed by the supervisor)"
+                    return 0
+                fi
+                ;;
+            COMPLETED)
+                if [ "$active_state" != "active" ]; then
+                    HEALTH_STATE="STOPPED"
+                    HEALTH_DETAILS="finite media playback completed normally (no loop configured)"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
 
     if [ "$active_state" = "active" ]; then
         if bs_hls_is_fresh "$hlsdir" 45; then
@@ -128,7 +179,7 @@ health_state() {
 health_color() {
     case "$HEALTH_STATE" in
         HEALTHY)  printf '%s%s%s'   "$C_GREEN"   "$HEALTH_STATE" "$C_RESET" ;;
-        STARTING) printf '%s%s%s'   "$C_CYAN"    "$HEALTH_STATE" "$C_RESET" ;;
+        STARTING|RECONNECTING) printf '%s%s%s' "$C_CYAN" "$HEALTH_STATE" "$C_RESET" ;;
         STALE|FAILED) printf '%s%s%s' "$C_RED"   "$HEALTH_STATE" "$C_RESET" ;;
         *)        printf '%s%s%s'   "$C_YELLOW"  "$HEALTH_STATE" "$C_RESET" ;;
     esac

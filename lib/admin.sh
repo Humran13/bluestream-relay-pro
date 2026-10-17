@@ -190,4 +190,58 @@ web_admin_init_cli() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# Lockout recovery: reset the EXISTING admin's password without needing the
+# old one. Gated on local root/sudo access (bs_require_root, same as every
+# other admin-management entry point here) plus an explicit confirmation -
+# this is a deliberately destructive action on an existing credential, not
+# a routine one, so it is never offered as a casual default and never runs
+# non-interactively without a terminal (no env-var/flag shortcut, by
+# design, to keep the new password off argv/history exactly like init).
+# ---------------------------------------------------------------------------
+web_admin_reset_password_cli() {
+    if ! web_admin_exists; then
+        bs_error "No admin account exists yet - there is nothing to reset."
+        bs_info "Use 'sudo bluestream-manager admin init' to create the first account instead."
+        return 1
+    fi
+    bs_require_root
+    bs_warn "This resets the password for the EXISTING admin account ($(web_admin_status))."
+    bs_warn "The current password will stop working immediately. You do NOT need to know it -"
+    bs_warn "this is for a locked-out admin - but you DO need local root/sudo access to run this."
+    bs_confirm "Continue and reset the admin password now?" || { bs_info "Cancelled; nothing was changed."; return 1; }
+
+    if ! bs_input_source >/dev/null 2>&1; then
+        bs_error "No interactive terminal (stdin or /dev/tty) is reachable."
+        bs_info "Pipe the new password via stdin instead (never argv, never shell history):"
+        bs_info "  printf '%s\\n' '<new-password>' | (cd $BLUESTREAM_WEB_INSTALL_ROOT && python3 -m webapp.security reset-admin-password --state-dir $BLUESTREAM_WEB_STATE_DIR)"
+        return 1
+    fi
+
+    local _pw1="" _pw2=""
+    bs_prompt_hidden _pw1 "Enter the NEW web admin password" || return 1
+    if [ -z "$_pw1" ]; then
+        unset _pw1
+        bs_error "Empty password; aborted. Nothing was changed."
+        return 1
+    fi
+    bs_prompt_hidden _pw2 "Confirm the NEW web admin password" || { unset _pw1; return 1; }
+    if [ "$_pw1" != "$_pw2" ]; then
+        unset _pw1 _pw2
+        bs_error "Passwords did not match; aborted. Nothing was changed."
+        return 1
+    fi
+
+    if printf '%s\n' "$_pw1" | (cd "$BLUESTREAM_WEB_INSTALL_ROOT" && python3 -m webapp.security reset-admin-password --state-dir "$BLUESTREAM_WEB_STATE_DIR") >/dev/null 2>&1; then
+        unset _pw1 _pw2
+        chown root:"$BLUESTREAM_WEB_GROUP" "$BLUESTREAM_WEB_STATE_DIR/admin.json" 2>/dev/null
+        chmod 0640 "$BLUESTREAM_WEB_STATE_DIR/admin.json" 2>/dev/null
+        bs_ok "Admin password reset. The username is unchanged ($(web_admin_status))."
+        return 0
+    fi
+    unset _pw1 _pw2
+    bs_error "Password reset failed. Nothing was changed."
+    return 1
+}
+
 # end of admin.sh

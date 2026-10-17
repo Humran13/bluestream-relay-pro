@@ -76,7 +76,7 @@
         <td>{{ relay.get('name') }}</td>
         <td>{{ relay.get('type') }}</td>
         <td>{{ relay.get('active') }}</td>
-        <td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span></td>
+        <td><span class="badge badge-{{ relay.get('health')|lower }}" title="{{ relay.get('health_detail', '') }}">{{ relay.get('health') }}</span></td>
       </tr>
     {% endfor %}
     </tbody>

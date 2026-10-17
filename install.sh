@@ -68,7 +68,7 @@ if [ ! -f "$BS_ROOT/lib/common.sh" ]; then
     printf 'install.sh must run from the BlueStream Relay Pro project directory.\n' >&2
     exit 1
 fi
-for _bs_lib in common osdetect envdetect probe health relay playlist media nginx migrate ssl firewall backup diagnostics selftest webconsole admin info; do
+for _bs_lib in common osdetect envdetect probe health relay playlist media nginx supervise migrate ssl firewall backup diagnostics selftest webconsole admin info; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done

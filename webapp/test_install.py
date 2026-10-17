@@ -7,6 +7,7 @@ Gunicorn/service start, nginx -t/reload) is recorded as VPS-pending.
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
@@ -2621,6 +2622,166 @@ echo "OVERRIDDEN=$BS_ENV_STALE_OWNED_OVERRIDDEN"
             )
         )
         self.assertEqual(out["STRATEGY"], "isolated")
+
+
+class SuperviseStateMachineTests(unittest.TestCase):
+    """Real-bash-execution tests for lib/supervise.sh's retry/backoff state
+    machine - the root-cause fix for a relay silently never restarting after
+    an unexpected live-source EOF (FFmpeg exits 0 on both a deliberate stop
+    and a clean unexpected EOF; systemd's Restart=on-failure never restarts
+    on a 0 exit either way - see lib/supervise.sh for the full writeup).
+
+    A fake `ffmpeg` placed first on PATH stands in for the real binary so
+    these run fast and deterministically everywhere (not just under Docker);
+    the full real-FFmpeg/HLS/systemd path (including an actual mid-stream
+    kill-and-reconnect and a real deliberate `systemctl stop`) is covered
+    separately by the Docker-based scenario tests, not here.
+    """
+
+    _HARNESS = r"""#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+rundir="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+bindir="$(cygpath -u "$3" 2>/dev/null || printf '%s' "$3")"
+mode="$4"
+base_delay="$5"
+exit_code="$6"
+sleep_s="${7:-0}"
+
+mkdir -p "$bindir"
+cat > "$bindir/ffmpeg" <<FAKE
+#!/usr/bin/env bash
+# Forward TERM to our own sleep child and wait for it, so a SIGTERM never
+# leaves an orphaned grandchild holding this process's stdout/stderr pipes
+# open (which would hang the test harness's communicate() even though the
+# supervisor itself handled the stop correctly - the real production
+# FFmpeg process has no such wrapper layer, so this is a FAKE-binary-only
+# concern, not a production one).
+trap 'kill -TERM "\$p" 2>/dev/null; wait "\$p" 2>/dev/null; exit 143' TERM
+sleep $sleep_s &
+p=\$!
+wait "\$p"
+exit $exit_code
+FAKE
+chmod +x "$bindir/ffmpeg"
+export PATH="$bindir:$PATH"
+
+. "$repo/lib/common.sh"
+. "$repo/lib/supervise.sh"
+
+BLUESTREAM_RUN_DIR="$rundir"
+BS_SUPERVISE_MAX_ATTEMPTS=2
+BS_SUPERVISE_WINDOW_RESET=9999
+BS_SUPERVISE_DELAY_CAP=1
+
+_fake_build() {
+    FFMPEG_ARGS=( -nostdin -y -loglevel warning -re -i /dev/null -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -f flv "rtmp://127.0.0.1:1935/bluestream-relay/testx" )
+    return 0
+}
+
+bs_supervise_run relay testx "$mode" "$base_delay" _fake_build
+"""
+
+    def _run(self, mode, base_delay, exit_code, sleep_s=0, kill_after=None, timeout=25):
+        import os
+        import signal
+        import subprocess
+        import tempfile
+        import time
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            rundir = tmpdir / "run"
+            bindir = tmpdir / "bin"
+            rundir.mkdir()
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            proc = subprocess.Popen(
+                [
+                    bash, str(harness), str(REPO_ROOT), str(rundir), str(bindir),
+                    str(mode), str(base_delay), str(exit_code), str(sleep_s),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if kill_after is not None:
+                time.sleep(kill_after)
+                try:
+                    os.kill(proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                self.fail(
+                    "supervise harness did not exit within %ss (stderr: %s)"
+                    % (timeout, err.decode("utf-8", "replace"))
+                )
+            status_file = rundir / "relay-testx.status"
+            status = {}
+            if status_file.exists():
+                for line in status_file.read_text(encoding="utf-8").splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        status[k] = v
+            return proc.returncode, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+    def test_01_finite_ok_clean_exit_completes_no_retry(self):
+        # finite_ok=1, ffmpeg exits 0 immediately: expected natural
+        # completion of finite media with no loop - never retried.
+        rc, status, _out, err = self._run(mode=1, base_delay=1, exit_code=0, sleep_s=0)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "COMPLETED")
+        self.assertEqual(status.get("ATTEMPT"), "0")
+
+    def test_02_unexpected_clean_exit_reconnects_then_gives_up(self):
+        # finite_ok=0 (a live/remote type, or looped media), ffmpeg exits 0
+        # every time with NO signal involved - this is EXACTLY the real
+        # VPS bug: a "successful" exit that was never a deliberate stop.
+        # Must be retried with backoff, and must eventually give up and
+        # report FAILED (bounded) rather than retry forever.
+        rc, status, _out, err = self._run(mode=0, base_delay=1, exit_code=0, sleep_s=0)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        # MAX_ATTEMPTS=2 in the test harness: gives up on the 3rd attempt.
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(status.get("EXIT_CODE"), "0")
+
+    def test_03_nonzero_exit_is_also_treated_as_unexpected(self):
+        # A real crash (nonzero exit) must also be retried, not just a
+        # clean exit - "unexpected" covers any exit code.
+        rc, status, _out, err = self._run(mode=0, base_delay=1, exit_code=1, sleep_s=0)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "1")
+
+    def test_04_sigterm_is_a_deliberate_stop_never_a_failure(self):
+        # A deliberate stop (systemd sends SIGTERM on `systemctl stop`) must
+        # be recognized via the trapped signal - NEVER inferred from
+        # FFmpeg's exit code - and must exit 0 as STOPPED, not retried, even
+        # though the fake ffmpeg here would otherwise still be "running".
+        #
+        # Skipped on native Windows: Python's os.kill() cannot deliver a
+        # true, trappable POSIX signal across the boundary into a nested
+        # Git-Bash/MSYS process tree (it calls TerminateProcess instead),
+        # so the bash trap this test exercises never runs there - a
+        # limitation of cross-boundary signal delivery on this platform,
+        # not of the code under test. Verified for real under Linux/Docker
+        # both here (bash delivers a real SIGTERM) and, more importantly,
+        # end-to-end against a genuine relay via `systemctl stop` in the
+        # Docker-based scenario tests.
+        if sys.platform.startswith("win"):
+            self.skipTest("POSIX signal delivery into nested Git-Bash/MSYS is not reliable from native Windows Python; verified under Docker/Linux instead.")
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30, kill_after=0.7, timeout=15
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
 
 
 if __name__ == "__main__":

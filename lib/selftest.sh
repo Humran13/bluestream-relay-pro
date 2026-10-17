@@ -22,8 +22,8 @@ run_selftest() {
     local ts="$$"
     local sample="$BLUESTREAM_MEDIA_DIR/.selftest-$ts.mp4"
     local name="selftest-$ts"
-    local m3u8dir pid user code base i passed=0 failed=0
-    local unit comm settled rtmp_ok rtmp_pidnote rtmp_lines
+    local m3u8dir pid mainpid user code base i passed=0 failed=0
+    local unit settled rtmp_ok rtmp_pidnote rtmp_lines
 
     check() {
         local label="$1" result="$2"
@@ -88,18 +88,22 @@ run_selftest() {
     check "start relay via systemd" "$?"
 
     # 4. Verify the stable production FFmpeg process runs as bluestream-relay.
-    #    Wait for the service to settle on an actual FFmpeg process (MainPID
-    #    comm == 'ffmpeg'). The temporary root bootstrap wrapper (bash/setpriv)
-    #    must never satisfy this check, and a crash/restart loop must be
-    #    reported explicitly rather than misread as "FFmpeg runs as root".
+    #    Wait for the service to settle on an actual running FFmpeg process.
+    #    The unit's MainPID is now the unprivileged SUPERVISION LOOP itself
+    #    (see lib/supervise.sh / run-relay.sh) - a bash process that runs
+    #    FFmpeg as its own child and retries it across reconnects without the
+    #    unit as a whole restarting - so FFmpeg is looked up as MainPID's
+    #    child, not as MainPID directly (MainPID's own comm is intentionally
+    #    never "ffmpeg" under this architecture). A crash/restart loop must
+    #    still be reported explicitly rather than misread as settled.
     unit="$(bs_unit relay "$name")"
     settled=""
     for i in $(seq 1 30); do
         case "$(systemctl is-active "$unit" 2>/dev/null)" in
             active)
-                pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
-                comm="$(ps -o comm= -p "${pid:-0}" 2>/dev/null | tr -d ' ')"
-                if [ "$comm" = "ffmpeg" ]; then
+                mainpid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+                pid="$(pgrep -P "${mainpid:-0}" -x ffmpeg 2>/dev/null | head -n1)"
+                if [ -n "$pid" ]; then
                     settled=1
                     break
                 fi

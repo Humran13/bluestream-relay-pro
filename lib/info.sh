@@ -23,31 +23,33 @@ bs_print_port_configuration() {
     bs_step "PORT CONFIGURATION"
 
     if [ "$strategy" = "isolated" ]; then
-        printf '  Installation mode        : ISOLATED (BlueStream runs its own independent nginx; the existing web server/panel is never modified)\n'
+        printf '  Installation mode         : ISOLATED (BlueStream runs its own independent nginx GATEWAY; the existing web server/panel is never modified)\n'
     else
-        printf '  Installation mode        : OWNED (BlueStream manages the system nginx directly)\n'
+        printf '  Installation mode         : OWNED (BlueStream manages the system nginx directly)\n'
     fi
 
-    printf '  Internal web console port: 127.0.0.1:%s (Gunicorn - never exposed directly; bind to localhost always)\n' "${BLUESTREAM_WEB_PORT:-<not yet selected>}"
-    printf '  Reverse-proxy destination : 127.0.0.1:%s  <- point your reverse proxy / control panel vhost at exactly this\n' "${BLUESTREAM_WEB_PORT:-<not yet selected>}"
+    printf '  Internal Gunicorn port   : 127.0.0.1:%s (Flask app only - serves /console/ ONLY. Never point a reverse proxy at this port directly: it has no /player/ or /hls/ routes at all, so /player/ and /hls/ would 404 through it even though /console/ works.)\n' "${BLUESTREAM_WEB_PORT:-<not yet selected>}"
 
     if [ "$strategy" = "isolated" ]; then
-        printf '  BlueStream nginx (HTTP)  : 0.0.0.0:%s (BlueStream'\''s own instance - HLS, player, console)\n' "${BLUESTREAM_ISOLATED_HTTP_PORT:-<not yet selected>}"
-        printf '  BlueStream nginx (HTTPS) : 0.0.0.0:%s (reserved only - no certificate is issued automatically in isolated mode)\n' "${BLUESTREAM_ISOLATED_HTTPS_PORT:-<not yet selected>}"
+        printf '  Isolated streaming gateway: 127.0.0.1:%s (BlueStream'\''s own nginx - fronts Gunicorn for /console/ AND serves /player/ and /hls/ itself)\n' "${BLUESTREAM_ISOLATED_HTTP_PORT:-<not yet selected>}"
+        printf '  Gateway HTTPS (reserved)  : 127.0.0.1:%s (no certificate is issued automatically in isolated mode)\n' "${BLUESTREAM_ISOLATED_HTTPS_PORT:-<not yet selected>}"
+        printf '  Reverse-proxy destination : 127.0.0.1:%s  <-- point your control panel / reverse proxy vhost at EXACTLY this (the gateway, NOT the Gunicorn port above)\n' "${BLUESTREAM_ISOLATED_HTTP_PORT:-<not yet selected>}"
     else
-        printf '  Nginx HTTP port          : 0.0.0.0:80\n'
+        printf '  Nginx HTTP port           : 0.0.0.0:80 (this IS the gateway in owned mode - serves /console/, /player/ and /hls/ together)\n'
         if [ "${BLUESTREAM_SSL_ENABLED:-no}" = "yes" ]; then
-            printf '  Nginx HTTPS port         : 0.0.0.0:443 (Lets Encrypt certificate verified present for %s)\n' "${BLUESTREAM_DOMAIN:-<domain>}"
+            printf '  Nginx HTTPS port          : 0.0.0.0:443 (Lets Encrypt certificate verified present for %s)\n' "${BLUESTREAM_DOMAIN:-<domain>}"
         else
-            printf '  Nginx HTTPS port         : not configured (no verified certificate)\n'
+            printf '  Nginx HTTPS port          : not configured (no verified certificate)\n'
         fi
+        printf '  Reverse-proxy destination : not applicable (owned mode - nginx above already serves the public domain directly; no separate proxy needed)\n'
     fi
 
     printf '  Public domain             : %s\n' "${BLUESTREAM_DOMAIN:-(not set - using the bare server IP; see docs/installation.md)}"
     printf '  Public dashboard URL      : %s/console/\n' "$(bs_public_base)"
-    printf '  RTMP ingest               : %s:%s (bind: %s - loopback-only, never internet-accessible; private FFmpeg -> nginx-rtmp bus)\n' \
-        "$BLUESTREAM_RTMP_BIND" "$BLUESTREAM_RTMP_PORT" "$BLUESTREAM_RTMP_BIND"
-    printf '  HLS endpoint              : %s/hls/relay/<name>/index.m3u8\n' "$(bs_public_base)"
+    printf '  Player URL format         : %s/player/?relay=<name>  (or ?playlist=<name>)\n' "$(bs_public_base)"
+    printf '  RTMP ingest               : %s:%s (bind: %s)\n' "$BLUESTREAM_RTMP_BIND" "$BLUESTREAM_RTMP_PORT" "$BLUESTREAM_RTMP_BIND"
+    printf '  RTMP external ingestion   : DISABLED - loopback-only (127.0.0.1), never internet-accessible. Only local FFmpeg processes (started by BlueStream itself) can publish to it. No firewall rule is needed or should be opened for this port; BlueStream never auto-exposes it or auto-modifies firewall rules.\n'
+    printf '  HLS endpoint format       : %s/hls/relay/<name>/index.m3u8\n' "$(bs_public_base)"
     printf '                              %s/hls/playlist/<name>/index.m3u8\n' "$(bs_public_base)"
 
     if [ -z "${BLUESTREAM_WEB_PORT:-}" ]; then
@@ -57,9 +59,10 @@ bs_print_port_configuration() {
         bs_warn "HTTPS is NOT verified/configured for this install. Do not treat the dashboard as publicly HTTPS-ready."
     fi
     if [ "$strategy" = "isolated" ]; then
-        bs_warn "ISOLATED MODE: the reverse-proxy destination above (127.0.0.1:${BLUESTREAM_WEB_PORT:-<unset>}) is what your"
-        bs_warn "control panel / reverse proxy vhost must target for the dashboard - this is exactly the step a missed"
-        bs_warn "502 Bad Gateway usually means was skipped or pointed at the wrong port."
+        bs_warn "ISOLATED MODE: point your control panel at the GATEWAY port (127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<unset>}), never"
+        bs_warn "at the bare Gunicorn port (127.0.0.1:${BLUESTREAM_WEB_PORT:-<unset>}). Pointing at Gunicorn directly is exactly the"
+        bs_warn "misconfiguration that makes /console/ work (a 302) while /player/ and /hls/ both 404 - Gunicorn has no routes"
+        bs_warn "for those paths at all; only the gateway serves them."
     fi
 }
 
@@ -70,10 +73,20 @@ bs_print_port_configuration() {
 # ---------------------------------------------------------------------------
 bs_print_panel_instructions() {
     [ "${BLUESTREAM_NGINX_STRATEGY:-owned}" = "isolated" ] || return 0
-    local port="${BLUESTREAM_WEB_PORT:-<web-port>}"
+    # The reverse-proxy target is ALWAYS the isolated streaming GATEWAY
+    # (BlueStream's own nginx), never the bare Gunicorn port: Gunicorn/Flask
+    # only implements /console/ routes - it has no /player/ or /hls/ routes
+    # at all, so pointing a reverse proxy straight at it makes /console/
+    # work while /player/ and /hls/ both 404. The gateway fronts Gunicorn
+    # for /console/ AND serves /player/ and /hls/ itself (see
+    # nginx_isolated_gen_config in lib/nginx.sh).
+    local port="${BLUESTREAM_ISOLATED_HTTP_PORT:-<gateway-port>}"
     local panel="${BS_ENV_PANEL:-}"
 
     bs_step "CONTROL PANEL / REVERSE PROXY SETUP"
+    bs_info "Target BlueStream's isolated streaming GATEWAY port (127.0.0.1:${port}) below - NOT the Gunicorn port"
+    bs_info "(127.0.0.1:${BLUESTREAM_WEB_PORT:-<web-port>}). The gateway serves /console/, /player/ and /hls/ together;"
+    bs_info "Gunicorn alone only serves /console/."
     case "$panel" in
         cloudpanel)
             cat <<EOF

@@ -35,7 +35,7 @@ diag_check() {
 run_diagnostics() {
     diag_reset
     bs_step "BlueStream Relay Pro diagnostics"
-    local names name dir pid user code owner mode
+    local names name dir pid ffpid user code owner mode
 
     # --- base tools ---
     # Strategy-aware: in isolated mode "the nginx BlueStream cares about" is
@@ -185,16 +185,23 @@ run_diagnostics() {
                 ;;
             *) diag_check "Relay '$name' source ($RELAY_TYPE)" WARN "not checked" ;;
         esac
-        # ffmpeg process user + HLS freshness
+        # ffmpeg process user + HLS freshness. MainPID is the unprivileged
+        # supervision loop (lib/supervise.sh), not FFmpeg directly - look up
+        # FFmpeg's actual PID as MainPID's child for an accurate check.
         dir="$(bs_hls_dir_for relay "$name")"
         if bs_hls_is_fresh "$dir" 60; then
             pid="$(systemctl show -p MainPID --value "$(bs_unit relay "$name")" 2>/dev/null)"
             if [ -n "$pid" ] && [ "$pid" != "0" ]; then
-                user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
-                if [ "$user" = "$BLUESTREAM_USER" ]; then
-                    diag_check "Relay '$name' ffmpeg user" PASS "$user"
+                ffpid="$(pgrep -P "$pid" -x ffmpeg 2>/dev/null | head -n1)"
+                if [ -n "$ffpid" ]; then
+                    user="$(ps -o user= -p "$ffpid" 2>/dev/null | tr -d ' ')"
+                    if [ "$user" = "$BLUESTREAM_USER" ]; then
+                        diag_check "Relay '$name' ffmpeg user" PASS "$user"
+                    else
+                        diag_check "Relay '$name' ffmpeg user" FAIL "$user (want $BLUESTREAM_USER)"
+                    fi
                 else
-                    diag_check "Relay '$name' ffmpeg user" FAIL "$user (want $BLUESTREAM_USER)"
+                    diag_check "Relay '$name' ffmpeg user" WARN "ffmpeg not currently running (supervisor may be reconnecting)"
                 fi
             fi
             diag_check "Relay '$name' HLS freshness" PASS

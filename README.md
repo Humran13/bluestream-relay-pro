@@ -283,6 +283,13 @@ stands:
   `webapp/security.py` (no new auth system or dependency); it is read only
   via a hidden prompt or stdin, never via a command-line flag, and never
   logged or written to shell history.
+- **Locked out?** `sudo bluestream-manager admin reset-password` resets the
+  existing admin's password without needing the old one — it only requires
+  local root/sudo access to run, asks for explicit confirmation first (it
+  invalidates the current password immediately), and preserves the
+  username. The piped/non-interactive equivalent is `python3 -m
+  webapp.security reset-admin-password --state-dir /var/lib/bluestream/web`
+  (new password via stdin, same as `init-admin`).
 
 Check status any time with `sudo bluestream-manager admin status` or
 `sudo bluestream-manager installinfo`.
@@ -316,6 +323,7 @@ sudo bluestream-manager diagnostics
 sudo bluestream-manager relay url news
 sudo bluestream-manager admin status
 sudo bluestream-manager admin init
+sudo bluestream-manager admin reset-password
 sudo bluestream-manager migrate status
 sudo bluestream-manager installinfo
 ```
