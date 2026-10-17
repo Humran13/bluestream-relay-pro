@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # BlueStream Relay Pro - generic FFmpeg process supervision for live-source
-# reliability (used by the relay runtime wrapper; see run-relay.sh).
+# reliability (shared by the relay and playlist runtime wrappers; see
+# run-relay.sh and run-playlist.sh).
 #
 # ROOT CAUSE this module exists to fix (confirmed on a real VPS): systemd's
 # `Restart=on-failure` NEVER restarts a unit whose main process exited with
@@ -38,11 +39,11 @@ BS_SUPERVISE_WINDOW_RESET=60    # ...unless the previous run lasted this long (a
 BS_SUPERVISE_DELAY_CAP=300      # backoff never waits longer than this (seconds)
 
 # ---------------------------------------------------------------------------
-# Status file: the authoritative, root-cause-fixing record of WHY a relay's
-# FFmpeg process most recently stopped - something systemd's ActiveState/
+# Status file: the authoritative, root-cause-fixing record of WHY a relay or
+# playlist FFmpeg process most recently stopped - something systemd's ActiveState/
 # Result alone cannot express (see header). Written by the UNPRIVILEGED
 # relay user into $BLUESTREAM_RUN_DIR, which it already owns; read by
-# lib/health.sh, relay_status_detail and diagnostics (root, or via web-ctl).
+# lib/health.sh, status/detail views and diagnostics (root, or via web-ctl).
 # ---------------------------------------------------------------------------
 bs_supervise_status_file() {
     # $1=kind (relay|playlist) $2=name
@@ -152,6 +153,10 @@ bs_supervise_run() {
         fi
 
         if ! "$build_fn"; then
+            if [ "$stop_requested" = "1" ]; then
+                bs_supervise_write_status "$kind" "$name" STOPPED "stopped by request" "" "$attempt"
+                exit 0
+            fi
             bs_supervise_write_status "$kind" "$name" FAILED "could not prepare the source (see journalctl for this unit)" "" "$attempt"
             exit 1
         fi
@@ -162,10 +167,24 @@ bs_supervise_run() {
             exit 1
         fi
 
+        # Close the stop-vs-launch race: a TERM/INT may arrive while the
+        # build function or argument verifier is running. Never start a new
+        # FFmpeg child after that deliberate stop has already been requested.
+        if [ "$stop_requested" = "1" ]; then
+            bs_supervise_write_status "$kind" "$name" STOPPED "stopped by request" "" "$attempt"
+            exit 0
+        fi
+
         bs_supervise_write_status "$kind" "$name" LIVE "ffmpeg running" "" "$attempt"
         start_ts="$(date +%s)"
         ffmpeg "${FFMPEG_ARGS[@]}" &
         current_child=$!
+        # TERM can also land in the tiny interval between the check above
+        # and assigning current_child. The trap cannot forward it until the
+        # PID is known, so re-check immediately and terminate that child.
+        if [ "$stop_requested" = "1" ]; then
+            kill -TERM "$current_child" 2>/dev/null || true
+        fi
         wait "$current_child"
         ec=$?
         current_child=""

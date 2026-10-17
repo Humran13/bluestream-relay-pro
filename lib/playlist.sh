@@ -654,6 +654,15 @@ playlist_start() {
     [ "${#PLAYLIST_FILES[@]}" -gt 0 ] || bs_die "Playlist '$name' has no entries"
     playlist_entries_valid || bs_die "One or more playlist entries are missing from managed media"
     bs_ensure_hls_dir playlist "$name" || bs_die "Could not prepare HLS output directory"
+    # A fresh start clears any stale supervisor status from an earlier run
+    # (see lib/supervise.sh) so the dashboard never shows a leftover
+    # FAILED/STOPPED state while this new attempt is only just starting -
+    # run-playlist.sh's own root bootstrap clears it too, but doing it here
+    # as well avoids a race with the UI reading status in the instant
+    # before that.
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status playlist "$name"
+    fi
     systemctl start "$(bs_unit playlist "$name")" || bs_die "Failed to start playlist '$name'"
     bs_ok "Playlist '$name' started"
 }
@@ -679,6 +688,9 @@ playlist_restart() {
     [ "${#PLAYLIST_FILES[@]}" -gt 0 ] || bs_die "Playlist '$name' has no entries"
     playlist_entries_valid || bs_die "One or more playlist entries are missing from managed media"
     bs_ensure_hls_dir playlist "$name" || bs_die "Could not prepare HLS output directory"
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status playlist "$name"
+    fi
     systemctl restart "$(bs_unit playlist "$name")" || bs_die "Failed to restart playlist '$name'"
     bs_ok "Playlist '$name' restarted"
 }
@@ -713,6 +725,9 @@ playlist_remove() {
     rm -f "$BLUESTREAM_PLAYLIST_CONF_DIR/$name.playlist"
     rm -f "$BLUESTREAM_RUN_DIR/$name.concat.txt"
     rm -rf "$(bs_hls_dir_for playlist "$name")"
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status playlist "$name"
+    fi
     bs_ok "Playlist '$name' removed"
 }
 
@@ -751,6 +766,9 @@ playlist_delete() {
     rm -f "$BLUESTREAM_RUN_DIR/$name.concat.txt"
     rm -f "$BLUESTREAM_RUN_DIR/$name.prepare"
     rm -rf "$(bs_hls_dir_for playlist "$name")"
+    if command -v bs_supervise_clear_status >/dev/null 2>&1; then
+        bs_supervise_clear_status playlist "$name"
+    fi
     systemctl daemon-reload 2>/dev/null || true
     return 0
 }
@@ -776,8 +794,9 @@ playlist_list() {
 }
 
 playlist_show() {
-    local name="$1"
+    local name="$1" unit mainpid ffpid user
     playlist_load_config "$name" || bs_die "Playlist '$name' not found"
+    unit="$(bs_unit playlist "$name")"
     bs_step "Playlist: $name"
     printf '  Enabled at boot : %s\n' "$PLAYLIST_ENABLED"
     printf '  Entries         : %d\n' "${#PLAYLIST_FILES[@]}"
@@ -786,6 +805,41 @@ playlist_show() {
         f="${PLAYLIST_FILES[$i]}"
         printf '  %3d) %s  (%s)\n' "$((i + 1))" "$f" "$(du -h "$BLUESTREAM_MEDIA_DIR/$f" 2>/dev/null | cut -f1)"
     done
+
+    if command -v health_state >/dev/null 2>&1; then
+        health_state playlist "$name"
+        printf '  Systemd unit    : %s (instance name: %s)\n' "$unit" "$name"
+        printf '  Active state    : %s\n' "$(systemctl is-active "$unit" 2>/dev/null)"
+        printf '  Health          : %s\n' "$(health_color)"
+        printf '  Health detail   : %s\n' "$HEALTH_DETAILS"
+    fi
+
+    # Reconnection/termination diagnostics from the supervisor's own status
+    # file (see lib/supervise.sh) - playlists are always the continuous/
+    # 24-7 case, so any unexpected FFmpeg end is reconnected with bounded
+    # backoff, exactly like a looped relay; this surfaces that the same way
+    # relay_status_detail does.
+    if command -v bs_supervise_read_status >/dev/null 2>&1 && bs_supervise_read_status playlist "$name"; then
+        printf '  Supervisor state: %s\n' "$BS_SUPERVISE_STATE"
+        printf '  Last reason     : %s\n' "${BS_SUPERVISE_DETAIL:--}"
+        printf '  Last FFmpeg exit: %s\n' "${BS_SUPERVISE_EXIT_CODE:--}"
+        printf '  Reconnect count : %s\n' "${BS_SUPERVISE_ATTEMPT:-0}"
+        if [ -n "${BS_SUPERVISE_UPDATED:-}" ] && [ "${BS_SUPERVISE_UPDATED:-0}" != "0" ]; then
+            printf '  Status age (s)  : %s\n' "$(( $(date +%s) - BS_SUPERVISE_UPDATED ))"
+        fi
+    fi
+
+    mainpid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+    if [ -n "$mainpid" ] && [ "$mainpid" != "0" ]; then
+        ffpid="$(pgrep -P "$mainpid" -x ffmpeg 2>/dev/null | head -n1)"
+        if [ -n "$ffpid" ]; then
+            user="$(ps -o user= -p "$ffpid" 2>/dev/null | tr -d ' ')"
+            printf '  FFmpeg PID      : %s (supervisor PID: %s)\n' "$ffpid" "$mainpid"
+            printf '  FFmpeg user     : %s\n' "${user:-unknown}"
+        else
+            printf '  FFmpeg process  : not currently running (supervisor PID: %s - reconnecting or starting)\n' "$mainpid"
+        fi
+    fi
 }
 
 playlist_show_urls() {

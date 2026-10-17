@@ -62,17 +62,18 @@ health_state() {
         *) enable_state="unknown" ;;
     esac
 
-    # Primary signal, when present: the relay supervisor's own status file
-    # (lib/supervise.sh), which distinguishes a deliberate stop from an
-    # unexpected termination - something systemd's ActiveState/Result alone
-    # cannot do (FFmpeg exits with a plain success status on BOTH a clean
-    # stop and a clean unexpected live-source EOF; this is exactly the
+    # Primary signal, when present: the relay/playlist supervisor's own
+    # status file (lib/supervise.sh), which distinguishes a deliberate stop
+    # from an unexpected termination - something systemd's ActiveState/
+    # Result alone cannot do (FFmpeg exits with a plain success status on
+    # BOTH a clean stop and a clean unexpected EOF; this is exactly the
     # ambiguity that let a real relay go unnoticed-stopped about 15 seconds
-    # after it started, with no failure recorded anywhere). Only relays
-    # (run-relay.sh) write this file today; a playlist with no status file
-    # yet simply falls through to the existing logic below unchanged
-    # (additive, zero regression there).
-    if [ "$kind" = "relay" ] && command -v bs_supervise_read_status >/dev/null 2>&1 \
+    # after it started, with no failure recorded anywhere). Both run-
+    # relay.sh and run-playlist.sh write this file; a unit that has not
+    # been (re)started since upgrading to this supervisor simply has no
+    # status file yet and falls through to the existing logic below
+    # unchanged (additive, zero regression).
+    if command -v bs_supervise_read_status >/dev/null 2>&1 \
         && bs_supervise_read_status "$kind" "$name"; then
         case "$BS_SUPERVISE_STATE" in
             RECONNECTING)

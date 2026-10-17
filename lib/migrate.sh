@@ -95,8 +95,11 @@ did not complete, or if you prefer to do it by hand):
        sudo nginx -t && sudo systemctl reload nginx
   5. Start BlueStream's isolated instance:
        sudo systemctl enable --now bluestream-nginx.service
-  6. Point your control panel's reverse proxy at 127.0.0.1:\$WEB_PORT for the
-     dashboard (see: sudo bluestream-manager installinfo).
+  6. Run 'sudo bluestream-manager installinfo' and identify its configured
+     "Reverse-proxy destination" (the isolated streaming GATEWAY port).
+     Point the control panel at that exact destination for /console/,
+     /player/ and /hls/. Never proxy directly to the internal Gunicorn port:
+     Gunicorn serves /console/ only, so /player/ and /hls/ would return 404.
   7. If anything goes wrong, restore step 1's backups and re-run step 4, then
      stop bluestream-nginx.service.
 EOF
@@ -219,8 +222,8 @@ migrate_run() {
     bs_save_server_conf
     bs_ok "Migration complete. server.conf now records NGINX_STRATEGY=isolated."
     bs_info "Backup of the disabled legacy files: $backup_dir"
-    bs_info "Next: point your control panel's reverse proxy at 127.0.0.1:${BLUESTREAM_WEB_PORT:-<web port>} (dashboard)"
-    bs_info "and, if you want this host's panel-managed domain to serve HLS/player, at 127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<isolated http port>}."
+    bs_info "Next: point your control panel's reverse proxy at 127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<isolated gateway port>} - the BlueStream gateway for /console/, /player/ and /hls/."
+    bs_info "Never proxy directly to Gunicorn at 127.0.0.1:${BLUESTREAM_WEB_PORT:-<internal web port>}; it serves /console/ only, so /player/ and /hls/ would return 404."
     bs_info "Rollback if something looks wrong: sudo bluestream-manager migrate rollback $backup_dir"
     return 0
 }

@@ -2623,6 +2623,22 @@ echo "OVERRIDDEN=$BS_ENV_STALE_OWNED_OVERRIDDEN"
         )
         self.assertEqual(out["STRATEGY"], "isolated")
 
+    def test_15_migration_instructions_use_gateway_not_gunicorn(self):
+        migrate = repo_text("lib/migrate.sh")
+        self.assertIn(
+            '127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<isolated gateway port>}',
+            migrate,
+        )
+        self.assertIn(
+            'the BlueStream gateway for /console/, /player/ and /hls/',
+            migrate,
+        )
+        self.assertIn("Never proxy directly to Gunicorn", migrate)
+        self.assertNotIn(
+            "reverse proxy at 127.0.0.1:${BLUESTREAM_WEB_PORT:-<web port>}",
+            migrate,
+        )
+
 
 class SuperviseStateMachineTests(unittest.TestCase):
     """Real-bash-execution tests for lib/supervise.sh's retry/backoff state
@@ -2647,6 +2663,8 @@ mode="$4"
 base_delay="$5"
 exit_code="$6"
 sleep_s="${7:-0}"
+kind="${8:-relay}"
+build_sleep="${9:-0}"
 
 mkdir -p "$bindir"
 cat > "$bindir/ffmpeg" <<FAKE
@@ -2658,7 +2676,9 @@ cat > "$bindir/ffmpeg" <<FAKE
 # FFmpeg process has no such wrapper layer, so this is a FAKE-binary-only
 # concern, not a production one).
 trap 'kill -TERM "\$p" 2>/dev/null; wait "\$p" 2>/dev/null; exit 143' TERM
-sleep $sleep_s &
+printf '%s\\n' "\$\$" >> "$rundir/ffmpeg.pids"
+printf '%s\\n' "\$*" >> "$rundir/ffmpeg.args"
+/usr/bin/sleep $sleep_s &
 p=\$!
 wait "\$p"
 exit $exit_code
@@ -2675,14 +2695,20 @@ BS_SUPERVISE_WINDOW_RESET=9999
 BS_SUPERVISE_DELAY_CAP=1
 
 _fake_build() {
-    FFMPEG_ARGS=( -nostdin -y -loglevel warning -re -i /dev/null -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -f flv "rtmp://127.0.0.1:1935/bluestream-relay/testx" )
+    local app="bluestream-relay"
+    /usr/bin/sleep "$build_sleep"
+    [ "$kind" = "playlist" ] && app="bluestream-playlist"
+    FFMPEG_ARGS=( -nostdin -y -loglevel warning -re -i /dev/null -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -f flv "rtmp://127.0.0.1:1935/$app/testx" )
     return 0
 }
 
-bs_supervise_run relay testx "$mode" "$base_delay" _fake_build
+bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
 """
 
-    def _run(self, mode, base_delay, exit_code, sleep_s=0, kill_after=None, timeout=25):
+    def _run(
+        self, mode, base_delay, exit_code, sleep_s=0, kill_after=None,
+        timeout=25, kind="relay", build_sleep=0,
+    ):
         import os
         import signal
         import subprocess
@@ -2699,10 +2725,12 @@ bs_supervise_run relay testx "$mode" "$base_delay" _fake_build
             harness = tmpdir / "harness.sh"
             harness.write_text(self._HARNESS, encoding="utf-8")
             bash = engine_module.default_bash_path()
+            started = time.monotonic()
             proc = subprocess.Popen(
                 [
                     bash, str(harness), str(REPO_ROOT), str(rundir), str(bindir),
                     str(mode), str(base_delay), str(exit_code), str(sleep_s),
+                    kind, str(build_sleep),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2723,12 +2751,35 @@ bs_supervise_run relay testx "$mode" "$base_delay" _fake_build
                     % (timeout, err.decode("utf-8", "replace"))
                 )
             status_file = rundir / "relay-testx.status"
+            if kind != "relay":
+                status_file = rundir / (kind + "-testx.status")
             status = {}
             if status_file.exists():
                 for line in status_file.read_text(encoding="utf-8").splitlines():
                     if "=" in line:
                         k, v = line.split("=", 1)
                         status[k] = v
+            args_file = rundir / "ffmpeg.args"
+            status["_FFMPEG_ARGS"] = (
+                args_file.read_text(encoding="utf-8").splitlines()
+                if args_file.exists() else []
+            )
+            pids_file = rundir / "ffmpeg.pids"
+            pids = (
+                [int(value) for value in pids_file.read_text(encoding="utf-8").splitlines()]
+                if pids_file.exists() else []
+            )
+            status["_FFMPEG_PIDS"] = pids
+            if not sys.platform.startswith("win"):
+                alive = []
+                for pid in pids:
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        continue
+                    alive.append(pid)
+                status["_LIVE_FFMPEG_PIDS"] = alive
+            status["_ELAPSED"] = time.monotonic() - started
             return proc.returncode, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
     def test_01_finite_ok_clean_exit_completes_no_retry(self):
@@ -2782,6 +2833,82 @@ bs_supervise_run relay testx "$mode" "$base_delay" _fake_build
         )
         self.assertEqual(rc, 0, err)
         self.assertEqual(status.get("STATE"), "STOPPED")
+
+    def test_05_continuous_playlist_reconnects_after_clean_exit(self):
+        # A playlist is an always-looping channel. Therefore even exit 0 is
+        # unexpected, and must reconnect until the bounded policy is reached.
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "0")
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        # Two one-second capped backoff sleeps separate the three launches.
+        self.assertGreaterEqual(status["_ELAPSED"], 1.8)
+
+    def test_06_continuous_playlist_reconnects_after_nonzero_exit(self):
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=17, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "17")
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+
+    def test_07_playlist_reconnect_uses_the_same_output(self):
+        _rc, status, _out, _err = self._run(
+            mode=0, base_delay=1, exit_code=0, kind="playlist"
+        )
+        attempts = status["_FFMPEG_ARGS"]
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(set(attempts)), 1)
+        self.assertIn(
+            "rtmp://127.0.0.1:1935/bluestream-playlist/testx", attempts[0]
+        )
+
+    def test_08_repeated_playlist_failures_are_bounded(self):
+        # MAX_ATTEMPTS=2 means exactly three FFmpeg processes total: the
+        # initial run plus two reconnects. No fourth process may escape the
+        # failure policy.
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=1, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        if not sys.platform.startswith("win"):
+            self.assertEqual(status["_LIVE_FFMPEG_PIDS"], [])
+
+    def test_09_playlist_sigterm_stops_without_reconnect_or_orphan(self):
+        if sys.platform.startswith("win"):
+            self.skipTest(
+                "POSIX signal delivery into nested Git-Bash/MSYS is not reliable; "
+                "this playlist case is run under Docker/Linux."
+            )
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30,
+            kill_after=0.7, timeout=15, kind="playlist",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 1)
+        self.assertEqual(status["_LIVE_FFMPEG_PIDS"], [])
+
+    def test_10_sigterm_during_playlist_build_never_launches_ffmpeg(self):
+        if sys.platform.startswith("win"):
+            self.skipTest(
+                "POSIX signal delivery into nested Git-Bash/MSYS is not reliable; "
+                "this playlist race case is run under Docker/Linux."
+            )
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30,
+            kill_after=0.1, timeout=10, kind="playlist", build_sleep=1,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
+        self.assertEqual(status["_FFMPEG_PIDS"], [])
 
 
 if __name__ == "__main__":

@@ -112,7 +112,11 @@ class PlaylistNormalizationStaticTests(unittest.TestCase):
         w = repo_text("config/systemd/run-playlist.sh")
         self.assertIn("playlist_prepare_all", w)
         self.assertIn("playlist_write_concat_file", w)
-        self.assertIn("bs_verify_ffmpeg_args", w)
+        # bs_verify_ffmpeg_args now lives in lib/supervise.sh's shared
+        # supervision loop (reused by both relays and playlists, not
+        # duplicated per runtime wrapper - see lib/supervise.sh).
+        self.assertIn("source=lib/supervise.sh", w)
+        self.assertIn("bs_verify_ffmpeg_args", repo_text("lib/supervise.sh"))
         self.assertLess(w.index("playlist_prepare_all"), w.index("exec setpriv"))
 
     def test_12_prepare_marker_written_and_cleared(self):
