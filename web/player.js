@@ -13,17 +13,59 @@
   var errorBox = document.getElementById("error");
   var label = document.getElementById("channel-label");
 
+  function validName(name) {
+    return /^[a-z0-9][a-z0-9_-]{0,47}$/.test(name || "");
+  }
+
+  // Some browsers' address bars can duplicate a pasted query string with no
+  // "&" separator, e.g. "?relay=foo" becomes "?relay=foo?relay=foo". Since
+  // only the first "?" in a URL starts its query string, URLSearchParams
+  // then parses this as a single malformed value "foo?relay=foo" for the
+  // "relay" key instead of two params.
+  //
+  // Recover ONLY the exact recognizable pattern "<value>?<key>=<value>"
+  // (the same key and same value repeated verbatim after an embedded "?").
+  // Anything else - a value that merely contains a "?", a different key, a
+  // different value - is left untouched and allowed to fail validName()
+  // honestly, rather than guessing at a truncation that could silently
+  // accept the wrong channel.
+  function recoverDuplicatedParam(key, raw) {
+    if (!raw) return { value: raw, recovered: false };
+    var idx = raw.indexOf("?");
+    if (idx === -1) return { value: raw, recovered: false };
+    var head = raw.slice(0, idx);
+    var tail = raw.slice(idx + 1);
+    if (head && tail === key + "=" + head) {
+      return { value: head, recovered: true };
+    }
+    return { value: raw, recovered: false };
+  }
+
   function params() {
     var q = new URLSearchParams(window.location.search);
+    var relay = recoverDuplicatedParam("relay", q.get("relay"));
+    var playlist = recoverDuplicatedParam("playlist", q.get("playlist"));
     return {
-      relay: q.get("relay"),
-      playlist: q.get("playlist"),
-      src: q.get("src")
+      relay: relay.value,
+      playlist: playlist.value,
+      src: q.get("src"), // src is itself a URL and may legitimately contain "?"
+      recovered: relay.recovered || playlist.recovered
     };
   }
 
-  function validName(name) {
-    return /^[a-z0-9][a-z0-9_-]{0,47}$/.test(name || "");
+  // If a duplicated param was actually recovered above, rewrite the address
+  // bar to the canonical single-parameter form so refresh, copy, and browser
+  // history all carry the corrected URL instead of the broken one. Every
+  // other valid query parameter present on the page is preserved verbatim.
+  function canonicalizeAddressBar(p) {
+    if (!p.recovered) return;
+    var q = new URLSearchParams(window.location.search);
+    if (p.relay && validName(p.relay)) q.set("relay", p.relay);
+    if (p.playlist && validName(p.playlist)) q.set("playlist", p.playlist);
+    var clean = window.location.pathname + "?" + q.toString() + window.location.hash;
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", clean);
+    }
   }
 
   function showError(msg) {
@@ -64,6 +106,7 @@
   }
 
   var p = params();
+  canonicalizeAddressBar(p);
   var url = null;
   if (p.relay && validName(p.relay)) {
     label.textContent = "Relay: " + p.relay;
