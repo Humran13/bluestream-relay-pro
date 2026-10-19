@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile check
+        run: python -m py_compile webapp/app.py webapp/test_console.py webapp/test_install.py webapp/test_playlist_normalize.py
+      - name: Run webapp test suite
+        working-directory: webapp
+        run: python -m pytest -q
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n syntax check
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "SYNTAX FAIL: $f"; fail=1; }
+          done < <(find . -name "*.sh" -not -path "./node_modules/*")
+          exit "$fail"
+      - name: ShellCheck (error level only)
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: error
+          ignore_paths: node_modules
+
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run player.js unit tests
+        run: node --test web/*.test.js
+
+  browser:
+    runs-on: ubuntu-latest
+    needs: node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright
+        run: |
+          npm install --no-save @playwright/test@1.49.1
+          npx playwright install --with-deps chromium firefox webkit
+      - name: Run cross-browser player URL tests (bundled engines only in CI)
+        run: npx playwright test -c tests/browser/playwright.config.js --project=chromium --project=firefox --project=webkit
