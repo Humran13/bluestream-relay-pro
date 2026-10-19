@@ -1,0 +1,13 @@
+{
+  "name": "bluestream-relay-pro",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-automation regression tests for the web player (web/player.js). No runtime server dependency - this is dev/test tooling only.",
+  "scripts": {
+    "test:js": "node --test web/*.test.js",
+    "test:browser": "playwright test -c tests/browser/playwright.config.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

@@ -102,3 +102,36 @@ test("src param may legitimately contain its own query string and is passed thro
   const { elements } = runPlayer("?src=" + encodeURIComponent("https://cdn.example.com/x.m3u8?token=abc"));
   assert.equal(elements["channel-label"].textContent, "Custom source");
 });
+
+test("a mismatched embedded '?' (different key) is NOT recovered - fails honestly instead of guessing", () => {
+  // relay="foo", but the embedded tail names a different key (playlist) than
+  // the one being parsed. This must never be silently truncated to "foo".
+  const { elements, replaceStateCalls } = runPlayer("?relay=foo?playlist=foo");
+  assert.equal(replaceStateCalls.length, 0, "must not rewrite an unrecognized pattern");
+  assert.equal(elements.error.hidden, false);
+  assert.match(elements.error.textContent, /No channel specified/);
+});
+
+test("a mismatched embedded '?' (different value) is NOT recovered", () => {
+  const { elements, replaceStateCalls } = runPlayer("?relay=foo?relay=bar");
+  assert.equal(replaceStateCalls.length, 0);
+  assert.equal(elements.error.hidden, false);
+});
+
+test("recovery preserves an unrelated valid & -joined query param on rewrite", () => {
+  const { elements, replaceStateCalls, location } = runPlayer("?relay=1080test1?relay=1080test1&debug=1");
+  assert.equal(elements["channel-label"].textContent, "Relay: 1080test1");
+  assert.equal(replaceStateCalls.length, 1);
+  const q = new URLSearchParams(location.search);
+  assert.equal(q.get("relay"), "1080test1");
+  assert.equal(q.get("debug"), "1", "unrelated valid param must survive the rewrite");
+});
+
+test("a legitimate relay value is never truncated merely for containing an unmatched '?' pattern", () => {
+  // Not a realistic relay name (fails validName regardless, since names are
+  // restricted to [a-z0-9_-]), but proves the recovery itself only fires on
+  // the exact recognizable duplicate shape, not on any '?' it sees.
+  const { elements, replaceStateCalls } = runPlayer("?relay=abc?xyz");
+  assert.equal(replaceStateCalls.length, 0);
+  assert.equal(elements.error.hidden, false);
+});
