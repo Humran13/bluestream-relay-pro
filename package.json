@@ -8,6 +8,6 @@
     "test:browser": "playwright test -c tests/browser/playwright.config.js"
   },
   "devDependencies": {
-    "@playwright/test": "1.49.1"
+    "@playwright/test": "1.56.1"
   }
 }

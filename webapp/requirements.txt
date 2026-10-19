@@ -1,0 +1,5 @@
+# Pinned to exactly what production installs via `apt-get install
+# python3-flask python3-werkzeug` on Ubuntu 24.04 (see install.sh) - not the
+# latest PyPI release - so CI exercises the same versions production runs.
+Flask==3.0.2
+Werkzeug==3.0.1
