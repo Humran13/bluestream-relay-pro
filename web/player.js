@@ -13,17 +13,45 @@
   var errorBox = document.getElementById("error");
   var label = document.getElementById("channel-label");
 
+  function validName(name) {
+    return /^[a-z0-9][a-z0-9_-]{0,47}$/.test(name || "");
+  }
+
+  // Some browsers' address bars can duplicate a pasted query string with no
+  // "&" separator (e.g. "?relay=foo?relay=foo"), which URLSearchParams then
+  // parses as a single malformed value "foo?relay=foo" for the first key.
+  // Recover the intended value by cutting at the embedded "?" and re-parsing
+  // whatever follows it as a second, redundant query string.
+  function dequalify(raw) {
+    if (!raw) return raw;
+    var cut = raw.indexOf("?");
+    if (cut === -1) return raw;
+    return raw.slice(0, cut);
+  }
+
   function params() {
     var q = new URLSearchParams(window.location.search);
     return {
-      relay: q.get("relay"),
-      playlist: q.get("playlist"),
-      src: q.get("src")
+      relay: dequalify(q.get("relay")),
+      playlist: dequalify(q.get("playlist")),
+      src: q.get("src") // src is itself a URL and may legitimately contain "?"
     };
   }
 
-  function validName(name) {
-    return /^[a-z0-9][a-z0-9_-]{0,47}$/.test(name || "");
+  // If the address bar query string was malformed (duplicated with no "&"),
+  // rewrite it to the canonical single-parameter form so refresh, copy, and
+  // browser history all carry the corrected URL instead of the broken one.
+  function canonicalizeAddressBar(p) {
+    var raw = window.location.search;
+    if (raw.indexOf("?", 1) === -1) return; // no embedded extra "?", nothing to fix
+    var qs = null;
+    if (p.relay && validName(p.relay)) qs = "relay=" + encodeURIComponent(p.relay);
+    else if (p.playlist && validName(p.playlist)) qs = "playlist=" + encodeURIComponent(p.playlist);
+    if (qs === null) return;
+    var clean = window.location.pathname + "?" + qs + window.location.hash;
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", clean);
+    }
   }
 
   function showError(msg) {
@@ -64,6 +92,7 @@
   }
 
   var p = params();
+  canonicalizeAddressBar(p);
   var url = null;
   if (p.relay && validName(p.relay)) {
     label.textContent = "Relay: " + p.relay;
