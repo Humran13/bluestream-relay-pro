@@ -68,7 +68,7 @@ if [ ! -f "$BS_ROOT/lib/common.sh" ]; then
     printf 'install.sh must run from the BlueStream Relay Pro project directory.\n' >&2
     exit 1
 fi
-for _bs_lib in common osdetect envdetect probe health relay playlist media nginx ssl firewall backup diagnostics selftest webconsole; do
+for _bs_lib in common osdetect envdetect probe health relay playlist media nginx supervise migrate ssl firewall backup diagnostics selftest webconsole admin info; do
     # shellcheck source=lib/common.sh
     source "$BS_ROOT/lib/$_bs_lib.sh" || { printf 'Failed to load library %s\n' "$_bs_lib" >&2; exit 1; }
 done
@@ -123,6 +123,30 @@ detect_environment() {
     bs_env_detect
     bs_env_report
     BLUESTREAM_NGINX_STRATEGY="$BS_NGINX_STRATEGY"
+
+    # Safe Owned -> Isolated migration (requirement 6): if a prior "owned"
+    # install already wrote its config directly into the SYSTEM nginx (not
+    # merely recorded "owned" in server.conf, but actual files verified by
+    # content marker - see lib/migrate.sh) and the environment just forced
+    # isolated mode for THIS run, switching live in the same install.sh pass
+    # would try to bind the shared RTMP/HTTP ports the legacy files are still
+    # using. That cannot be proven safe without an explicit, validated
+    # migration step (backup + disable-legacy + reload + verify + rollback),
+    # so install.sh stops here and tells the operator exactly how to do it,
+    # rather than guessing further.
+    if [ "$BS_ENV_STALE_OWNED_OVERRIDDEN" = "yes" ] && migrate_owned_present; then
+        bs_error "This host has a previous BlueStream OWNED install whose nginx configuration is still live on the"
+        bs_error "system nginx, but the environment detected just now requires ISOLATED mode (see the warning above)."
+        bs_error "Automatically moving it over cannot be proven safe inside a plain install.sh run (it would touch"
+        bs_error "the shared RTMP/HTTP ports while the legacy config is still active), so installation has stopped"
+        bs_error "WITHOUT changing anything further. The installed /usr/local/sbin/bluestream-manager may still be"
+        bs_error "the PRE-FIX version (install_files has not run yet this time), so run the guided migration from"
+        bs_error "THIS checkout directory instead ($BS_ROOT):"
+        bs_error "  sudo bash $BS_ROOT/bluestream-manager migrate status   # review what will change"
+        bs_error "  sudo bash $BS_ROOT/bluestream-manager migrate run       # backs up, migrates, validates; rollback-capable"
+        bs_error "('migrate status' also prints the full manual procedure if you prefer to do it by hand.)"
+        exit 1
+    fi
     return 0
 }
 
@@ -500,12 +524,12 @@ configure_server_conf() {
     # already owns 80/443, BlueStream's own independent nginx instance needs
     # its own ports too. Same reuse-on-reinstall pattern as WEB_PORT above.
     if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then
-        if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT" \
-            && [ -n "${BLUESTREAM_ISOLATED_HTTPS_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTPS_PORT"; then
-            bs_ok "Reusing existing isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+        if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
+            nginx_isolated_select_ports || bs_die "The persisted isolated gateway port is unsafe or unavailable. It was not changed automatically; review server.conf and the hosting-panel proxy target."
+            bs_ok "Reusing existing isolated gateway port: 127.0.0.1:$BLUESTREAM_ISOLATED_HTTP_PORT"
         else
-            nginx_isolated_select_ports || bs_die "Could not find free ports for BlueStream's independent nginx instance (tried HTTP: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES / HTTPS: $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES)."
-            bs_info "Selected isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+            nginx_isolated_select_ports || bs_die "Could not find a safe loopback port for BlueStream's independent nginx instance (tried: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES)."
+            bs_info "Selected isolated streaming gateway: 127.0.0.1:$BLUESTREAM_ISOLATED_HTTP_PORT (public HTTPS remains with the hosting panel)"
         fi
     fi
 
@@ -547,8 +571,8 @@ configure_nginx() {
         # Existing Nginx / control panel compatibility section of
         # docs/installation.md.
         nginx_isolated_gen_config || bs_die "Isolated nginx configuration failed."
-        nginx_isolated_install_unit
-        nginx_isolated_enable
+        nginx_isolated_install_unit || bs_die "Failed to install the isolated nginx systemd unit."
+        nginx_isolated_enable || bs_die "Failed to enable/start the isolated nginx service."
         bs_ok "BlueStream's independent nginx instance is configured and running (the existing web server/panel was not modified)."
     else
         nginx_gen_config
@@ -587,20 +611,10 @@ configure_web_console() {
 # ---------------------------------------------------------------------------
 post_install_info() {
     banner
-    printf '%s\n' \
-        "" \
-        "Installation complete." \
-        "" \
-        "  Manager : sudo bluestream-manager" \
-        "  Status  : sudo bluestream-status" \
-        "  Version : $(bs_version)" \
-        "" \
-        "Public URLs (once a relay or playlist is running):"
-    printf '  M3U8   : %s\n' "$(bs_public_base)/hls/relay/<name>/index.m3u8"
-    printf '          %s\n' "$(bs_public_base)/hls/playlist/<name>/index.m3u8"
-    printf '  Player : %s\n' "$(bs_public_base)/player/?relay=<name>"
-    printf '          %s\n' "$(bs_public_base)/player/?playlist=<name>"
-    printf '  Console: %s\n' "$(bs_public_base)/console/"
+    printf '\nInstallation complete.\n\n'
+    bs_print_install_summary
+    printf '\n'
+    bs_print_panel_instructions
     printf '%s\n' \
         "" \
         "Next steps:" \

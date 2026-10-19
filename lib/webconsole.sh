@@ -198,24 +198,10 @@ web_configure_state() {
     return 0
 }
 
-# Create the per-instance secret key if missing; preserve an existing one.
-# Runs as root through the existing security.py logic (never reimplemented).
-web_ensure_secret_key() {
-    local _keyfile="$BLUESTREAM_WEB_STATE_DIR/secret_key"
-    if [ -s "$_keyfile" ]; then
-        bs_ok "Existing web secret key preserved ($_keyfile)"
-        return 0
-    fi
-    if (cd "$BLUESTREAM_WEB_INSTALL_ROOT" && python3 -c 'import sys
-from webapp.security import ensure_secret_key
-ensure_secret_key(sys.argv[1])' "$BLUESTREAM_WEB_STATE_DIR") >/dev/null 2>&1; then
-        bs_ok "Web secret key generated."
-    else
-        bs_warn "Web secret key generation failed; the web service will fail closed at startup."
-        return 1
-    fi
-    return 0
-}
+# web_ensure_secret_key moved to lib/admin.sh (shared with
+# `bluestream-manager admin init`); kept out of this file so
+# bluestream-manager never needs to load webconsole.sh's full install-time
+# surface just to manage the admin account.
 
 # ---------------------------------------------------------------------------
 # Install web application code + web-ctl (root-only).
@@ -265,7 +251,19 @@ web_install_sudoers() {
     local _staged="${BLUESTREAM_WEB_SUDOERS}.staged"
     [ -f "$_src" ] || bs_die "sudoers source missing: $_src"
     command -v visudo >/dev/null 2>&1 || bs_die "visudo not found; cannot validate the sudoers policy safely."
-    install -o root -g root -m 0440 "$_src" "$_staged"
+    # Defensive normalization (found via Docker execution): a source checkout
+    # that passed through a CRLF-converting toolchain (e.g. a Windows git
+    # checkout with core.autocrlf=true, copied to the VPS via scp rather than
+    # cloned directly on Linux - docs/installation.md documents exactly this
+    # "Manual upload" path) can carry Windows line endings here. visudo
+    # rejects a CRLF sudoers file outright (the trailing CR is an unexpected
+    # token), which previously aborted the entire install on an unrelated-
+    # looking "syntax error" with no indication it was a line-ending issue.
+    # Stripping CR bytes is safe and lossless for this plain-ASCII policy
+    # file regardless of the source's actual line endings.
+    tr -d '\r' < "$_src" > "$_staged"
+    chown root:root "$_staged"
+    chmod 0440 "$_staged"
     if ! visudo -cf "$_staged" >/dev/null 2>&1; then
         rm -f "$_staged"
         bs_die "sudoers candidate failed 'visudo -cf' validation. The web console will not be granted sudo. Fix config/sudoers/bluestream-web and re-run."
@@ -277,56 +275,15 @@ web_install_sudoers() {
     return 0
 }
 
+
 # ---------------------------------------------------------------------------
-# First admin account (preserve existing). Password via stdin only.
+# Admin account management (web_init_admin, web_admin_status,
+# web_admin_init_cli, etc.) moved to lib/admin.sh, which bluestream-manager
+# also loads directly - kept out of this file so bluestream-manager never
+# needs webconsole.sh's full install-time surface (packages, system user
+# creation, sudoers staging) just to manage the admin account. install.sh
+# loads both.
 # ---------------------------------------------------------------------------
-web_init_admin() {
-    if [ -f "$BLUESTREAM_WEB_STATE_DIR/admin.json" ]; then
-        if python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
-            "$BLUESTREAM_WEB_STATE_DIR/admin.json" >/dev/null 2>&1; then
-            bs_ok "Existing web admin credentials preserved ($BLUESTREAM_WEB_STATE_DIR/admin.json)"
-        else
-            bs_warn "Existing $BLUESTREAM_WEB_STATE_DIR/admin.json appears malformed; the console will fail login safely."
-            bs_warn "To reset the admin password, remove that file and re-run install.sh (or run init-admin manually)."
-        fi
-        return 0
-    fi
-    if [ -f "$BLUESTREAM_WEB_STATE_DIR/secret_key" ]; then
-        bs_ok "Existing web secret key preserved"
-    fi
-
-    if [ "${NON_INTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-        bs_warn "No web admin account exists and this is a non-interactive install."
-        bs_warn "Create it after install (password via stdin, never argv):"
-        bs_warn "  printf '%s\\n' '<password>' | (cd $BLUESTREAM_WEB_INSTALL_ROOT && python3 -m webapp.security init-admin --state-dir $BLUESTREAM_WEB_STATE_DIR)"
-        return 0
-    fi
-
-    local _pw1="" _pw2=""
-    printf '%s' "Enter web admin password: " >&2
-    read -rs _pw1 || { printf '\n' >&2; return 1; }
-    printf '\n' >&2
-    if [ -z "$_pw1" ]; then
-        bs_warn "Empty password; skipping admin creation (run init-admin manually afterwards)."
-        return 0
-    fi
-    printf '%s' "Confirm web admin password: " >&2
-    read -rs _pw2 || { printf '\n' >&2; return 1; }
-    printf '\n' >&2
-    if [ "$_pw1" != "$_pw2" ]; then
-        bs_warn "Passwords did not match; skipping admin creation (run init-admin manually afterwards)."
-        return 0
-    fi
-
-    # Pipe the password to security.py via stdin; it never appears in argv.
-    if printf '%s\n' "$_pw1" | (cd "$BLUESTREAM_WEB_INSTALL_ROOT" && python3 -m webapp.security init-admin --state-dir "$BLUESTREAM_WEB_STATE_DIR") >/dev/null 2>&1; then
-        bs_ok "Web admin account initialized."
-    else
-        bs_warn "Web admin initialization failed; run init-admin manually afterwards."
-    fi
-    unset _pw1 _pw2
-    return 0
-}
 
 # ---------------------------------------------------------------------------
 # systemd service: reload, enable, start.

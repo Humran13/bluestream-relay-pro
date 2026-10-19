@@ -565,6 +565,7 @@ td.col-check { width: 2.5rem; text-align: center; }
 .badge-stale    { background: var(--warn-soft); color: var(--warn); }
 .badge-failed   { background: var(--danger-soft); color: var(--danger); }
 .badge-starting { background: var(--info-soft); color: var(--info); }
+.badge-reconnecting { background: var(--info-soft); color: var(--info); }
 .badge-unknown  { background: var(--panel-sub); color: var(--muted); border: 1px solid var(--border); }
 
 /* --------------------------------------------------------------------------

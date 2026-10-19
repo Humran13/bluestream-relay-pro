@@ -2,10 +2,16 @@
 # Instantiated as:  bluestream-relay@<relay-name>.service
 # Installed to:     /etc/systemd/system/bluestream-relay@.service
 #
-# The wrapper reads the root-only relay config, prepares the HLS output
-# directory, then permanently drops privileges (setpriv) before exec'ing
-# FFmpeg. FFmpeg never runs as root.
-
+# The wrapper reads the root-only relay config as root, then permanently
+# drops privileges (setpriv, by re-exec'ing itself) before running FFmpeg.
+# FFmpeg never runs as root. The unprivileged process is a SUPERVISION LOOP
+# (lib/supervise.sh), not a single `exec ffmpeg`: it runs FFmpeg as its own
+# child, in a retry loop, so it can tell a deliberate stop apart from an
+# unexpected live-source EOF (FFmpeg exits 0 on both - systemd's
+# ActiveState/Result cannot distinguish them, which is why a live relay
+# that hit a transient source hiccup could previously go silently
+# unrestarted). Restart=on-failure/StartLimitBurst below are an OUTER
+# safety net only, for when the internal loop itself gives up.
 [Unit]
 Description=BlueStream Relay Pro - Relay %i
 Documentation=file:/usr/local/lib/bluestream/docs/installation.md

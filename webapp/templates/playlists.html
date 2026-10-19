@@ -24,7 +24,7 @@
         <td>{{ playlist.get('items') or 0 }}</td>
         <td>{{ playlist.get('active') }}</td>
         <td>{{ playlist.get('enabled') }}</td>
-        <td><span class="badge badge-{{ playlist.get('health')|lower }}">{{ playlist.get('health') }}</span></td>
+        <td><span class="badge badge-{{ playlist.get('health')|lower }}" title="{{ playlist.get('health_detail', '') }}">{{ playlist.get('health') }}</span></td>
         <td>
           {% if playlist.get('scheduled') == 'yes' %}
           {% if playlist.get('schedule_state') == 'missed' %}

@@ -68,6 +68,23 @@ nginx_assert_no_placeholders() {
 nginx_ensure_single_worker() {
     local conf="/etc/nginx/nginx.conf"
     [ -f "$conf" ] || return 0
+    # Defense-in-depth (see lib/envdetect.sh / the legacy-ownership fix): this
+    # function edits the SYSTEM /etc/nginx/nginx.conf, which is only ever
+    # correct when BlueStream genuinely owns nginx on this host. It must
+    # never run against a panel-managed or otherwise non-owned nginx, even if
+    # some future bug calls it directly - re-verify right here, independent
+    # of whatever the caller already decided, rather than trusting it blindly.
+    if [ "${BLUESTREAM_NGINX_STRATEGY:-owned}" != "owned" ]; then
+        bs_die "Refusing to edit $conf: current nginx strategy is '${BLUESTREAM_NGINX_STRATEGY:-unknown}', not 'owned'. This is a safety guard against ever editing a panel-managed/non-owned system nginx.conf - see lib/envdetect.sh."
+    fi
+    if type bs_env_check_panel >/dev/null 2>&1; then
+        local _recheck_panel="$BS_ENV_PANEL"
+        bs_env_check_panel
+        if [ -n "$BS_ENV_PANEL" ]; then
+            bs_die "Refusing to edit $conf: a control panel ('$BS_ENV_PANEL') is present on this host right now. BlueStream must never edit a panel-managed nginx.conf, even in a strategy that was previously recorded as 'owned'. Run 'sudo bluestream-manager migrate status' / see docs/installation.md 'Safe Owned -> Isolated migration'."
+        fi
+        BS_ENV_PANEL="$_recheck_panel"
+    fi
     if grep -qE '^[[:space:]]*worker_processes[[:space:]]' "$conf"; then
         if grep -qE '^[[:space:]]*worker_processes[[:space:]]+1;[[:space:]]*$' "$conf"; then
             return 0
@@ -307,30 +324,35 @@ BLUESTREAM_ISOLATED_SITE_FILE="$BLUESTREAM_ISOLATED_ROOT/site.conf"
 BLUESTREAM_ISOLATED_PIDFILE="/run/bluestream-nginx.pid"
 BLUESTREAM_ISOLATED_LOG_DIR="/var/log/bluestream-nginx"
 BLUESTREAM_ISOLATED_UNIT="bluestream-nginx.service"
-# 80/443 are tried first (an "unknown/ambiguous" classification may still
-# have them free); the rest are quiet, uncommonly-used alternates.
-BLUESTREAM_ISOLATED_HTTP_CANDIDATES="80 8088 8188 8288 8388 18080"
-BLUESTREAM_ISOLATED_HTTPS_CANDIDATES="443 8443 8543 8643 18443"
+# The isolated gateway is an internal loopback upstream for the hosting
+# panel.  Never auto-claim the public web ports: a temporarily-stopped panel
+# still owns 80/443, and taking either port during that window would make the
+# next panel start fail.  TLS termination belongs to the panel; the isolated
+# instance intentionally has no HTTPS listener.
+BLUESTREAM_ISOLATED_HTTP_CANDIDATES="8088 8188 8288 8388 18080"
 
 nginx_isolated_select_ports() {
     local p
     if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
-        :
+        case "$BLUESTREAM_ISOLATED_HTTP_PORT" in
+            80|443)
+                bs_error "Refusing persisted isolated gateway port $BLUESTREAM_ISOLATED_HTTP_PORT: ports 80 and 443 are reserved for the hosting panel. Choose a safe loopback port explicitly; BlueStream will not silently change a working proxy destination."
+                return 1
+                ;;
+        esac
+        # A running isolated service legitimately owns its persisted port.
+        # Otherwise a collision means fail rather than silently changing the
+        # reverse-proxy destination operators already configured.
+        if ! nginx_isolated_running && bs_port_in_use "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
+            bs_error "Persisted isolated gateway port $BLUESTREAM_ISOLATED_HTTP_PORT is already in use. The configured proxy destination was not changed."
+            return 1
+        fi
     else
         BLUESTREAM_ISOLATED_HTTP_PORT=""
         for p in $BLUESTREAM_ISOLATED_HTTP_CANDIDATES; do
             if ! bs_port_in_use "$p"; then BLUESTREAM_ISOLATED_HTTP_PORT="$p"; break; fi
         done
         [ -n "$BLUESTREAM_ISOLATED_HTTP_PORT" ] || return 1
-    fi
-    if [ -n "${BLUESTREAM_ISOLATED_HTTPS_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTPS_PORT"; then
-        :
-    else
-        BLUESTREAM_ISOLATED_HTTPS_PORT=""
-        for p in $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES; do
-            if ! bs_port_in_use "$p"; then BLUESTREAM_ISOLATED_HTTPS_PORT="$p"; break; fi
-        done
-        [ -n "$BLUESTREAM_ISOLATED_HTTPS_PORT" ] || return 1
     fi
     return 0
 }
@@ -357,11 +379,20 @@ nginx_isolated_rtmp_module_path() {
 
 nginx_isolated_gen_config() {
     bs_require_root
-    bs_require_cmd nginx
-    nginx_isolated_select_ports || bs_die "Could not find free ports for BlueStream's isolated nginx instance (tried HTTP: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES / HTTPS: $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES)."
+    if ! command -v nginx >/dev/null 2>&1; then
+        bs_error "Required command not found: nginx"
+        return 1
+    fi
+    if ! nginx_isolated_select_ports; then
+        bs_error "Could not select a safe isolated gateway port (tried: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES)."
+        return 1
+    fi
 
     local modpath domain
-    modpath="$(nginx_isolated_rtmp_module_path)" || bs_die "nginx RTMP module (libnginx-mod-rtmp) not found; cannot configure the isolated streaming engine."
+    if ! modpath="$(nginx_isolated_rtmp_module_path)"; then
+        bs_error "nginx RTMP module (libnginx-mod-rtmp) not found; cannot configure the isolated streaming engine."
+        return 1
+    fi
     domain="${BLUESTREAM_DOMAIN:-_}"
 
     if ! bs_valid_upload_mb "$BLUESTREAM_MAX_MEDIA_UPLOAD_MB"; then
@@ -399,7 +430,10 @@ nginx_isolated_gen_config() {
         -e "s|__WEB_ROOT__|$BLUESTREAM_WEB_DIR|g" \
         -e "s|__NGINX_SNIPPET_DIR__|$BLUESTREAM_ISOLATED_SNIPPET_DIR|g" \
         -e "s|__HTTP_PORT__|$BLUESTREAM_ISOLATED_HTTP_PORT|g" \
-        "$(nginx_site_template)" | grep -v '^__HTTPS_BLOCK__$' > "$BLUESTREAM_ISOLATED_SITE_FILE.tmp"
+        "$(nginx_site_template)" | grep -v '^__HTTPS_BLOCK__$' \
+        | sed -e "s|^[[:space:]]*listen ${BLUESTREAM_ISOLATED_HTTP_PORT};|    listen 127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT};|" \
+              -e "/^[[:space:]]*listen \[::\]:${BLUESTREAM_ISOLATED_HTTP_PORT};/d" \
+        > "$BLUESTREAM_ISOLATED_SITE_FILE.tmp"
     mv -f "$BLUESTREAM_ISOLATED_SITE_FILE.tmp" "$BLUESTREAM_ISOLATED_SITE_FILE"
     chmod 0644 "$BLUESTREAM_ISOLATED_SITE_FILE"
 
@@ -450,7 +484,7 @@ nginx_isolated_gen_config() {
     fi
 
     nginx_sync_web_conf
-    bs_ok "Isolated nginx configuration written: $BLUESTREAM_ISOLATED_CONF_FILE (HTTP :$BLUESTREAM_ISOLATED_HTTP_PORT, HTTPS :$BLUESTREAM_ISOLATED_HTTPS_PORT reserved)"
+    bs_ok "Isolated nginx configuration written: $BLUESTREAM_ISOLATED_CONF_FILE (loopback HTTP 127.0.0.1:$BLUESTREAM_ISOLATED_HTTP_PORT; public HTTPS is provided by the hosting panel)"
     return 0
 }
 
@@ -461,24 +495,74 @@ nginx_isolated_test() {
 
 nginx_isolated_install_unit() {
     bs_require_root
-    [ -f "$BLUESTREAM_INSTALL_ROOT/config/systemd/bluestream-nginx.service" ] \
-        || bs_die "Isolated nginx unit template missing."
+    if [ ! -f "$BLUESTREAM_INSTALL_ROOT/config/systemd/bluestream-nginx.service" ]; then
+        bs_error "Isolated nginx unit template missing."
+        return 1
+    fi
     install -o root -g root -m 0644 \
         "$BLUESTREAM_INSTALL_ROOT/config/systemd/bluestream-nginx.service" \
-        "/etc/systemd/system/$BLUESTREAM_ISOLATED_UNIT"
-    systemctl daemon-reload 2>/dev/null || true
+        "/etc/systemd/system/$BLUESTREAM_ISOLATED_UNIT" || return 1
+    if ! systemctl daemon-reload; then
+        bs_error "systemd daemon-reload failed while installing $BLUESTREAM_ISOLATED_UNIT"
+        return 1
+    fi
+    return 0
+}
+
+# Recheck both listeners at the last safe moment before starting a stopped
+# isolated instance.  This closes the race between initial selection/config
+# generation and cutover. A start failure still remains observable and is
+# handled by the migration transaction's rollback path.
+nginx_isolated_validate_start_ports() {
+    local attempts=0 max_attempts="${BLUESTREAM_PORT_RELEASE_ATTEMPTS:-25}"
+    nginx_isolated_running && return 0
+    if bs_port_in_use "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
+        bs_error "Cannot start isolated nginx: loopback gateway port $BLUESTREAM_ISOLATED_HTTP_PORT is now in use."
+        return 1
+    fi
+    # A graceful system-nginx reload can leave its old worker holding the
+    # just-removed RTMP listener for a few seconds. Give that verified legacy
+    # listener a bounded drain window; a persistent or newly-arrived owner is
+    # a real collision and must fail the transaction.
+    while [ "$attempts" -lt "$max_attempts" ] && bs_port_in_use "$BLUESTREAM_RTMP_PORT"; do
+        sleep 0.2
+        attempts=$((attempts + 1))
+    done
+    if bs_port_in_use "$BLUESTREAM_RTMP_PORT"; then
+        bs_error "Cannot start isolated nginx: RTMP port $BLUESTREAM_RTMP_BIND:$BLUESTREAM_RTMP_PORT is still in use."
+        return 1
+    fi
+    return 0
 }
 
 nginx_isolated_enable() {
     bs_require_root
-    nginx_isolated_test || bs_die "Isolated nginx configuration failed validation"
-    systemctl enable "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null || true
+    if ! nginx_isolated_test; then
+        bs_error "Isolated nginx configuration failed validation"
+        return 1
+    fi
+    nginx_isolated_validate_start_ports || return 1
+    if ! systemctl enable "$BLUESTREAM_ISOLATED_UNIT"; then
+        bs_error "Failed to enable $BLUESTREAM_ISOLATED_UNIT"
+        return 1
+    fi
     if systemctl is-active "$BLUESTREAM_ISOLATED_UNIT" >/dev/null 2>&1; then
-        systemctl restart "$BLUESTREAM_ISOLATED_UNIT" || bs_die "Failed to restart $BLUESTREAM_ISOLATED_UNIT"
+        if ! systemctl restart "$BLUESTREAM_ISOLATED_UNIT"; then
+            bs_error "Failed to restart $BLUESTREAM_ISOLATED_UNIT"
+            return 1
+        fi
     else
-        systemctl start "$BLUESTREAM_ISOLATED_UNIT" || bs_die "Failed to start $BLUESTREAM_ISOLATED_UNIT"
+        if ! systemctl start "$BLUESTREAM_ISOLATED_UNIT"; then
+            bs_error "Failed to start $BLUESTREAM_ISOLATED_UNIT"
+            return 1
+        fi
+    fi
+    if [ "$(systemctl is-active "$BLUESTREAM_ISOLATED_UNIT" 2>/dev/null)" != "active" ]; then
+        bs_error "$BLUESTREAM_ISOLATED_UNIT did not reach active state"
+        return 1
     fi
     bs_ok "$BLUESTREAM_ISOLATED_UNIT started (BlueStream's own independent nginx instance)"
+    return 0
 }
 
 nginx_isolated_reload() {

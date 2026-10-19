@@ -305,6 +305,7 @@ wc_op_relay_list() {
             printf 'active\0%s\0'            "$active"
             printf 'enabled\0%s\0'           "$enabled"
             printf 'health\0%s\0'            "$health"
+            printf 'health_detail\0%s\0'     "${HEALTH_DETAILS:-}"
             printf 'destination_count\0%s\0' "$destcount"
             printf 'resolve_error\0%s\0'     "$resolve_error"
         }
@@ -345,6 +346,7 @@ wc_op_playlist_list() {
             printf 'enabled\0%s\0'            "$enabled"
             printf 'items\0%s\0'              "$items"
             printf 'health\0%s\0'             "$health"
+            printf 'health_detail\0%s\0'      "${HEALTH_DETAILS:-}"
             printf 'destination_count\0%s\0'  "$destcount"
             printf 'scheduled\0%s\0'          "$scheduled"
             printf 'scheduled_at\0%s\0'       "$sched_at"

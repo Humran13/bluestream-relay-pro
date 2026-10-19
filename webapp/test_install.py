@@ -7,6 +7,7 @@ Gunicorn/service start, nginx -t/reload) is recorded as VPS-pending.
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
@@ -53,10 +54,14 @@ class InstallerStaticTests(unittest.TestCase):
         self.assertIn("from webapp.app import PRODUCTION_STATE_DIR, create_app", wsgi)
 
     def test_05_admin_credentials_preserved_on_reinstall(self):
-        wc = repo_text("lib/webconsole.sh")
-        self.assertIn('if [ -f "$BLUESTREAM_WEB_STATE_DIR/admin.json" ]', wc)
-        self.assertIn("preserved", wc)
-        self.assertNotIn("--web-admin-password", wc)  # never an argv flag
+        # Admin account management (web_init_admin etc.) lives in
+        # lib/admin.sh, deliberately separate from lib/webconsole.sh - see
+        # HttpsFollowupTests.test_16_no_webconsole_dependency_in_manager.
+        ad = repo_text("lib/admin.sh")
+        self.assertIn('if [ -f "$BLUESTREAM_WEB_STATE_DIR/admin.json" ]', ad)
+        self.assertIn("preserved", ad)
+        self.assertNotIn("--web-admin-password", ad)  # never an argv flag
+        self.assertNotIn("--web-admin-password", repo_text("lib/webconsole.sh"))
 
     def test_06_secret_key_preserved_on_reinstall(self):
         wc = repo_text("lib/webconsole.sh")
@@ -70,7 +75,10 @@ class InstallerStaticTests(unittest.TestCase):
 
     def test_08_sudoers_install_mode_0440(self):
         wc = repo_text("lib/webconsole.sh")
-        self.assertIn('install -o root -g root -m 0440', wc)
+        # Staged via `tr -d '\r'` (CRLF-defensive, see web_install_sudoers)
+        # rather than a straight `install` copy, but still ends up root:root
+        # 0440 before AND after visudo validation.
+        self.assertIn('chmod 0440 "$_staged"', wc)
         self.assertIn("root:root 0440", wc)
 
     def test_09_sudoers_validated_with_visudo(self):
@@ -2377,6 +2385,7 @@ scenario="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
 bs_env_classify
 echo "MODE=$BS_ENV_MODE"
 echo "STRATEGY=$BS_NGINX_STRATEGY"
+echo "OVERRIDDEN=$BS_ENV_STALE_OWNED_OVERRIDDEN"
 """
 
     def _run(self, scenario_text):
@@ -2540,6 +2549,531 @@ echo "STRATEGY=$BS_NGINX_STRATEGY"
         )
         self.assertEqual(out["STRATEGY"], "owned")
         self.assertEqual(out["MODE"], "reinstall_owned")
+        self.assertEqual(out["OVERRIDDEN"], "no")
+
+    def test_11_legacy_owned_overridden_by_cloudpanel_THE_BUG_FIX(self):
+        # This is the exact real-world bug: a prior install recorded "owned"
+        # (a partially-completed earlier install, or one that predates
+        # CloudPanel being installed on this host), and CloudPanel is now
+        # present with other sites. A stale "owned" record must NEVER bypass
+        # today's safety check - isolated must be forced, and the override
+        # must be visible (BS_ENV_STALE_OWNED_OVERRIDDEN=yes) so install.sh
+        # and bluestream-manager can warn loudly and point at the migration
+        # tooling instead of silently reclassifying.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                panel="cloudpanel",
+                bluestream_existing="yes",
+                prior_strategy="owned",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_forced_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "yes")
+
+    def test_12_legacy_owned_overridden_by_other_sites_no_panel(self):
+        # Same safety override, triggered by positive evidence of another
+        # site rather than a recognized panel marker.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                bluestream_existing="yes",
+                prior_strategy="owned",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_forced_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "yes")
+
+    def test_13_isolated_strategy_is_sticky_even_when_env_looks_clear(self):
+        # The converse direction never happens automatically: once isolated,
+        # stay isolated even if the environment looks clear again today -
+        # downgrading to owned is a deliberate, reviewed action only.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                bluestream_existing="yes",
+                prior_strategy="isolated",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+        self.assertEqual(out["MODE"], "reinstall_isolated")
+        self.assertEqual(out["OVERRIDDEN"], "no")
+
+    def test_14_fresh_reinstall_with_no_prior_strategy_defaults_owned_path(self):
+        # bluestream_existing=yes but BLUESTREAM_NGINX_STRATEGY empty (e.g. a
+        # server.conf written by a version before NGINX_STRATEGY existed):
+        # must not crash, and must still apply today's safety check rather
+        # than silently defaulting to owned when the environment disagrees.
+        out = self._run(
+            self._scenario(
+                nginx_present="yes",
+                nginx_active="yes",
+                nginx_other_sites="yes",
+                panel="cloudpanel",
+                bluestream_existing="yes",
+                prior_strategy="",
+            )
+        )
+        self.assertEqual(out["STRATEGY"], "isolated")
+
+    def test_15_migration_instructions_use_gateway_not_gunicorn(self):
+        migrate = repo_text("lib/migrate.sh")
+        self.assertIn(
+            '127.0.0.1:${BLUESTREAM_ISOLATED_HTTP_PORT:-<isolated gateway port>}',
+            migrate,
+        )
+        self.assertIn(
+            'the BlueStream gateway for /console/, /player/ and /hls/',
+            migrate,
+        )
+        self.assertIn("Never proxy directly to Gunicorn", migrate)
+        self.assertNotIn(
+            "reverse proxy at 127.0.0.1:${BLUESTREAM_WEB_PORT:-<web port>}",
+            migrate,
+        )
+
+    def test_16_migration_uses_new_checkout_and_rollback_disables_isolated(self):
+        migrate = repo_text("lib/migrate.sh")
+        docs = repo_text("docs/installation.md")
+        readme = repo_text("README.md")
+        self.assertIn("migrate_stop_isolated_for_rollback || return 1", migrate)
+        self.assertIn('systemctl disable "$BLUESTREAM_ISOLATED_UNIT"', migrate)
+        self.assertIn("sudo bash $BS_ROOT/bluestream-manager migrate rollback", migrate)
+        for text in (docs, readme):
+            self.assertIn("sudo bash ./bluestream-manager migrate status", text)
+            self.assertIn("sudo bash ./bluestream-manager migrate run", text)
+            self.assertIn("sudo bash ./install.sh", text)
+
+
+class MigrationTransactionTests(unittest.TestCase):
+    """Executable bash tests for the migration state/rollback invariants."""
+
+    _PRELUDE = r"""
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+root="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+. "$repo/lib/common.sh"
+. "$repo/lib/nginx.sh"
+. "$repo/lib/migrate.sh"
+NGINX_SITE_FILE="$root/sites-available/bluestream"
+NGINX_SITE_LINK="$root/sites-enabled/bluestream"
+NGINX_RTMP_INCLUDE="$root/modules-enabled/60-bluestream-rtmp.conf"
+BLUESTREAM_ISOLATED_CONF_FILE="$root/isolated/nginx.conf"
+BLUESTREAM_ISOLATED_SITE_FILE="$root/isolated/site.conf"
+BLUESTREAM_ISOLATED_HTTP_PORT=8088
+mkdir -p "$root/sites-available" "$root/sites-enabled" "$root/modules-enabled" "$root/isolated"
+bs_require_root() { :; }
+nginx() { return 0; }
+bs_save_server_conf() { return 0; }
+systemctl() {
+    printf '%s\n' "$*" >> "$root/systemctl.log"
+    case "${1:-}" in
+        is-active) printf 'inactive\n'; return 3 ;;
+        is-enabled) printf 'disabled\n'; return 1 ;;
+        *) return 0 ;;
+    esac
+}
+bs_port_in_use() { [ "$1" = "$BLUESTREAM_RTMP_PORT" ]; }
+"""
+
+    def _run(self, body: str):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "migration-test.sh"
+            script.write_text(self._PRELUDE + body, encoding="utf-8")
+            proc = subprocess.run(
+                [engine_module.default_bash_path(), str(script), str(REPO_ROOT), tmp],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            output = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+            self.assertEqual(proc.returncode, 0, output)
+            return output
+
+    def test_01_verified_active_rtmp_restores_and_repeat_rollback_is_safe(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro active RTMP\n' > "$NGINX_RTMP_INCLUDE"
+chmod 0640 "$NGINX_RTMP_INCLUDE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 10
+mv "$NGINX_RTMP_INCLUDE" "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+migrate_restore_backup "$backup" || exit 11
+migrate_restore_backup "$backup" || exit 12
+[ -f "$NGINX_RTMP_INCLUDE" ] || exit 14
+[ ! -e "${NGINX_RTMP_INCLUDE}.migrated-disabled" ] || exit 15
+printf 'RESTORED\n'
+"""
+        )
+        self.assertIn("RESTORED", out)
+
+    def test_02_missing_original_rtmp_never_deletes_unverified_recovery_copy(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 20
+printf '# BlueStream Relay Pro only remaining RTMP copy\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+if migrate_restore_backup "$backup"; then exit 21; fi
+[ -f "${NGINX_RTMP_INCLUDE}.migrated-disabled" ] || exit 22
+[ ! -f "$root/systemctl.log" ] || exit 23
+printf 'PRESERVED\n'
+"""
+        )
+        self.assertIn("PRESERVED", out)
+
+    def test_03_already_disabled_rtmp_prestate_is_restored_exactly(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro originally disabled RTMP\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 30
+printf '# BlueStream Relay Pro changed\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+migrate_restore_backup "$backup" || exit 31
+[ ! -e "$NGINX_RTMP_INCLUDE" ] || exit 32
+grep -q 'originally disabled' "${NGINX_RTMP_INCLUDE}.migrated-disabled" || exit 33
+printf 'EXACT\n'
+"""
+        )
+        self.assertIn("EXACT", out)
+
+    def test_04_missing_backup_entry_fails_before_stopping_services(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 40
+rm "$backup/site.bak"
+if migrate_restore_backup "$backup"; then exit 41; fi
+[ ! -f "$root/systemctl.log" ] || exit 42
+printf 'FAILED-SAFE\n'
+"""
+        )
+        self.assertIn("FAILED-SAFE", out)
+
+    def test_05_completed_detection_and_enable_failure_are_nonfatal_to_caller(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro inactive old site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro isolated config\n' > "$BLUESTREAM_ISOLATED_CONF_FILE"
+printf '    listen 127.0.0.1:8088;\n' > "$BLUESTREAM_ISOLATED_SITE_FILE"
+BLUESTREAM_NGINX_STRATEGY=isolated
+nginx_isolated_running() { return 0; }
+migrate_status | grep -q 'Migration already completed. No migration required.' || exit 50
+nginx_isolated_test() { return 0; }
+nginx_isolated_validate_start_ports() { return 0; }
+systemctl() {
+    case "${1:-}" in
+        enable) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+if nginx_isolated_enable; then exit 51; fi
+printf 'CALLER-RETAINED-CONTROL\n'
+"""
+        )
+        self.assertIn("CALLER-RETAINED-CONTROL", out)
+
+    def test_06_reserved_and_colliding_gateway_ports_fail_without_reselection(self):
+        out = self._run(
+            r"""
+nginx_isolated_running() { return 1; }
+BLUESTREAM_ISOLATED_HTTP_PORT=80
+if nginx_isolated_select_ports; then exit 60; fi
+[ "$BLUESTREAM_ISOLATED_HTTP_PORT" = 80 ] || exit 61
+BLUESTREAM_ISOLATED_HTTP_PORT=8088
+bs_port_in_use() { return 0; }
+if nginx_isolated_select_ports; then exit 62; fi
+[ "$BLUESTREAM_ISOLATED_HTTP_PORT" = 8088 ] || exit 63
+printf 'PORTS-UNCHANGED\n'
+"""
+        )
+        self.assertIn("PORTS-UNCHANGED", out)
+
+
+class SuperviseStateMachineTests(unittest.TestCase):
+    """Real-bash-execution tests for lib/supervise.sh's retry/backoff state
+    machine - the root-cause fix for a relay silently never restarting after
+    an unexpected live-source EOF (FFmpeg exits 0 on both a deliberate stop
+    and a clean unexpected EOF; systemd's Restart=on-failure never restarts
+    on a 0 exit either way - see lib/supervise.sh for the full writeup).
+
+    A fake `ffmpeg` placed first on PATH stands in for the real binary so
+    these run fast and deterministically everywhere (not just under Docker);
+    the full real-FFmpeg/HLS/systemd path (including an actual mid-stream
+    kill-and-reconnect and a real deliberate `systemctl stop`) is covered
+    separately by the Docker-based scenario tests, not here.
+    """
+
+    _HARNESS = r"""#!/usr/bin/env bash
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+rundir="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+bindir="$(cygpath -u "$3" 2>/dev/null || printf '%s' "$3")"
+mode="$4"
+base_delay="$5"
+exit_code="$6"
+sleep_s="${7:-0}"
+kind="${8:-relay}"
+build_sleep="${9:-0}"
+
+mkdir -p "$bindir"
+cat > "$bindir/ffmpeg" <<FAKE
+#!/usr/bin/env bash
+# Forward TERM to our own sleep child and wait for it, so a SIGTERM never
+# leaves an orphaned grandchild holding this process's stdout/stderr pipes
+# open (which would hang the test harness's communicate() even though the
+# supervisor itself handled the stop correctly - the real production
+# FFmpeg process has no such wrapper layer, so this is a FAKE-binary-only
+# concern, not a production one).
+trap 'kill -TERM "\$p" 2>/dev/null; wait "\$p" 2>/dev/null; exit 143' TERM
+printf '%s\\n' "\$\$" >> "$rundir/ffmpeg.pids"
+printf '%s\\n' "\$*" >> "$rundir/ffmpeg.args"
+/usr/bin/sleep $sleep_s &
+p=\$!
+wait "\$p"
+exit $exit_code
+FAKE
+chmod +x "$bindir/ffmpeg"
+export PATH="$bindir:$PATH"
+
+. "$repo/lib/common.sh"
+. "$repo/lib/supervise.sh"
+
+BLUESTREAM_RUN_DIR="$rundir"
+BS_SUPERVISE_MAX_ATTEMPTS=2
+BS_SUPERVISE_WINDOW_RESET=9999
+BS_SUPERVISE_DELAY_CAP=1
+
+_fake_build() {
+    local app="bluestream-relay"
+    /usr/bin/sleep "$build_sleep"
+    [ "$kind" = "playlist" ] && app="bluestream-playlist"
+    FFMPEG_ARGS=( -nostdin -y -loglevel warning -re -i /dev/null -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -f flv "rtmp://127.0.0.1:1935/$app/testx" )
+    return 0
+}
+
+bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
+"""
+
+    def _run(
+        self, mode, base_delay, exit_code, sleep_s=0, kill_after=None,
+        timeout=25, kind="relay", build_sleep=0,
+    ):
+        import os
+        import signal
+        import subprocess
+        import tempfile
+        import time
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            rundir = tmpdir / "run"
+            bindir = tmpdir / "bin"
+            rundir.mkdir()
+            harness = tmpdir / "harness.sh"
+            harness.write_text(self._HARNESS, encoding="utf-8")
+            bash = engine_module.default_bash_path()
+            started = time.monotonic()
+            proc = subprocess.Popen(
+                [
+                    bash, str(harness), str(REPO_ROOT), str(rundir), str(bindir),
+                    str(mode), str(base_delay), str(exit_code), str(sleep_s),
+                    kind, str(build_sleep),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if kill_after is not None:
+                time.sleep(kill_after)
+                try:
+                    os.kill(proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                self.fail(
+                    "supervise harness did not exit within %ss (stderr: %s)"
+                    % (timeout, err.decode("utf-8", "replace"))
+                )
+            status_file = rundir / "relay-testx.status"
+            if kind != "relay":
+                status_file = rundir / (kind + "-testx.status")
+            status = {}
+            if status_file.exists():
+                for line in status_file.read_text(encoding="utf-8").splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        status[k] = v
+            args_file = rundir / "ffmpeg.args"
+            status["_FFMPEG_ARGS"] = (
+                args_file.read_text(encoding="utf-8").splitlines()
+                if args_file.exists() else []
+            )
+            pids_file = rundir / "ffmpeg.pids"
+            pids = (
+                [int(value) for value in pids_file.read_text(encoding="utf-8").splitlines()]
+                if pids_file.exists() else []
+            )
+            status["_FFMPEG_PIDS"] = pids
+            if not sys.platform.startswith("win"):
+                alive = []
+                for pid in pids:
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        continue
+                    alive.append(pid)
+                status["_LIVE_FFMPEG_PIDS"] = alive
+            status["_ELAPSED"] = time.monotonic() - started
+            return proc.returncode, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+    def test_01_finite_ok_clean_exit_completes_no_retry(self):
+        # finite_ok=1, ffmpeg exits 0 immediately: expected natural
+        # completion of finite media with no loop - never retried.
+        rc, status, _out, err = self._run(mode=1, base_delay=1, exit_code=0, sleep_s=0)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "COMPLETED")
+        self.assertEqual(status.get("ATTEMPT"), "0")
+
+    def test_02_unexpected_clean_exit_reconnects_then_gives_up(self):
+        # finite_ok=0 (a live/remote type, or looped media), ffmpeg exits 0
+        # every time with NO signal involved - this is EXACTLY the real
+        # VPS bug: a "successful" exit that was never a deliberate stop.
+        # Must be retried with backoff, and must eventually give up and
+        # report FAILED (bounded) rather than retry forever.
+        rc, status, _out, err = self._run(mode=0, base_delay=1, exit_code=0, sleep_s=0)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        # MAX_ATTEMPTS=2 in the test harness: gives up on the 3rd attempt.
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(status.get("EXIT_CODE"), "0")
+
+    def test_03_nonzero_exit_is_also_treated_as_unexpected(self):
+        # A real crash (nonzero exit) must also be retried, not just a
+        # clean exit - "unexpected" covers any exit code.
+        rc, status, _out, err = self._run(mode=0, base_delay=1, exit_code=1, sleep_s=0)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "1")
+
+    def test_04_sigterm_is_a_deliberate_stop_never_a_failure(self):
+        # A deliberate stop (systemd sends SIGTERM on `systemctl stop`) must
+        # be recognized via the trapped signal - NEVER inferred from
+        # FFmpeg's exit code - and must exit 0 as STOPPED, not retried, even
+        # though the fake ffmpeg here would otherwise still be "running".
+        #
+        # Skipped on native Windows: Python's os.kill() cannot deliver a
+        # true, trappable POSIX signal across the boundary into a nested
+        # Git-Bash/MSYS process tree (it calls TerminateProcess instead),
+        # so the bash trap this test exercises never runs there - a
+        # limitation of cross-boundary signal delivery on this platform,
+        # not of the code under test. Verified for real under Linux/Docker
+        # both here (bash delivers a real SIGTERM) and, more importantly,
+        # end-to-end against a genuine relay via `systemctl stop` in the
+        # Docker-based scenario tests.
+        if sys.platform.startswith("win"):
+            self.skipTest("POSIX signal delivery into nested Git-Bash/MSYS is not reliable from native Windows Python; verified under Docker/Linux instead.")
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30, kill_after=0.7, timeout=15
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
+
+    def test_05_continuous_playlist_reconnects_after_clean_exit(self):
+        # A playlist is an always-looping channel. Therefore even exit 0 is
+        # unexpected, and must reconnect until the bounded policy is reached.
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "0")
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        # Two one-second capped backoff sleeps separate the three launches.
+        self.assertGreaterEqual(status["_ELAPSED"], 1.8)
+
+    def test_06_continuous_playlist_reconnects_after_nonzero_exit(self):
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=17, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(status.get("STATE"), "FAILED")
+        self.assertEqual(status.get("EXIT_CODE"), "17")
+        self.assertEqual(status.get("ATTEMPT"), "3")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+
+    def test_07_playlist_reconnect_uses_the_same_output(self):
+        _rc, status, _out, _err = self._run(
+            mode=0, base_delay=1, exit_code=0, kind="playlist"
+        )
+        attempts = status["_FFMPEG_ARGS"]
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(set(attempts)), 1)
+        self.assertIn(
+            "rtmp://127.0.0.1:1935/bluestream-playlist/testx", attempts[0]
+        )
+
+    def test_08_repeated_playlist_failures_are_bounded(self):
+        # MAX_ATTEMPTS=2 means exactly three FFmpeg processes total: the
+        # initial run plus two reconnects. No fourth process may escape the
+        # failure policy.
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=1, kind="playlist"
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        if not sys.platform.startswith("win"):
+            self.assertEqual(status["_LIVE_FFMPEG_PIDS"], [])
+
+    def test_09_playlist_sigterm_stops_without_reconnect_or_orphan(self):
+        if sys.platform.startswith("win"):
+            self.skipTest(
+                "POSIX signal delivery into nested Git-Bash/MSYS is not reliable; "
+                "this playlist case is run under Docker/Linux."
+            )
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30,
+            kill_after=0.7, timeout=15, kind="playlist",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 1)
+        self.assertEqual(status["_LIVE_FFMPEG_PIDS"], [])
+
+    def test_10_sigterm_during_playlist_build_never_launches_ffmpeg(self):
+        if sys.platform.startswith("win"):
+            self.skipTest(
+                "POSIX signal delivery into nested Git-Bash/MSYS is not reliable; "
+                "this playlist race case is run under Docker/Linux."
+            )
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, sleep_s=30,
+            kill_after=0.1, timeout=10, kind="playlist", build_sleep=1,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(status.get("STATE"), "STOPPED")
+        self.assertEqual(status["_FFMPEG_PIDS"], [])
 
 
 if __name__ == "__main__":

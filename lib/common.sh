@@ -213,7 +213,10 @@ bs_load_server_conf() {
             ISOLATED_HTTP_PORT)
                 if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTP_PORT="$val"; fi ;;
             ISOLATED_HTTPS_PORT)
-                if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTPS_PORT="$val"; fi ;;
+                # Retired compatibility key. Older builds recorded a reserved
+                # port that had no listener; ignore it so the next save clears
+                # the misleading value while retaining the stable file shape.
+                : ;;
         esac
     done < "$BLUESTREAM_SERVER_CONF"
     return 0
@@ -756,6 +759,28 @@ bs_prompt() {
     if [ -z "$val" ] && [ -n "$def" ]; then
         val="$def"
     fi
+    printf -v "$var" '%s' "$val"
+    return 0
+}
+
+# Hidden (no-echo) read for secrets (passwords), using the same /dev/stdin ->
+# /dev/tty fallback as bs_prompt (see bs_input_source) so password prompts
+# keep working under `curl ... | sudo bash` piped installs, where stdin is
+# the install script itself but a real controlling terminal still exists.
+# Never has a default (a password must never silently fall back to a fixed
+# value); returns 1 when no terminal is reachable at all, or on a read
+# failure, and the caller decides what to do (fail closed, never block).
+bs_prompt_hidden() {
+    local var="$1" prompt="$2" src val
+    if ! src="$(bs_input_source)"; then
+        return 1
+    fi
+    printf '%s: ' "$prompt" >&2
+    if ! read -rs val < "$src"; then
+        printf '\n' >&2
+        return 1
+    fi
+    printf '\n' >&2
     printf -v "$var" '%s' "$val"
     return 0
 }

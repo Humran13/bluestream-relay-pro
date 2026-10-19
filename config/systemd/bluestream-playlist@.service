@@ -2,11 +2,17 @@
 # Instantiated as:  bluestream-playlist@<playlist-name>.service
 # Installed to:     /etc/systemd/system/bluestream-playlist@.service
 #
-# The wrapper reads the root-only playlist config, normalizes every entry into
-# the managed playlist cache, writes the concat file (listing only the
-# prepared baseline artifacts), prepares the HLS output directory, then
-# permanently drops privileges (setpriv) before exec'ing FFmpeg. FFmpeg never
-# runs as root.
+# The wrapper reads the root-only playlist config, normalizes every entry
+# into the managed playlist cache, writes the concat file (listing only the
+# prepared baseline artifacts), then re-execs itself as the unprivileged
+# bluestream-relay user (setpriv) to run the actual FFmpeg supervision loop
+# (lib/supervise.sh, shared with run-relay.sh - never duplicated). FFmpeg
+# never runs as root. Playlists are always the continuous/24-7 case (no
+# finite-playlist concept exists): any unexpected FFmpeg termination,
+# including a clean exit 0, is reconnected with bounded exponential
+# backoff rather than left stopped - the same root-cause fix as relays.
+# Restart=on-failure/StartLimitBurst below are an OUTER safety net only,
+# for when the internal supervisor itself gives up.
 
 [Unit]
 Description=BlueStream Relay Pro - Playlist %i

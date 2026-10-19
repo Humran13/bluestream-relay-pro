@@ -190,7 +190,20 @@ bs_env_detect() {
     bs_env_classify
 }
 
-# Decide MODE and the nginx strategy that follows from it.
+# Set alongside BS_ENV_MODE/BS_NGINX_STRATEGY whenever an existing BlueStream
+# install's RECORDED strategy (server.conf NGINX_STRATEGY=) turns out to
+# disagree with what bs_env_classify_current just found on THIS run. "yes"
+# means: a stale "owned" classification from a prior/partial install was
+# overridden to "isolated" because the live environment now demands it (a
+# control panel appeared, other sites showed up, etc.) - see bs_env_classify.
+# install.sh and bluestream-manager use this to warn loudly and point at the
+# Owned->Isolated migration helper instead of silently flipping strategies.
+BS_ENV_STALE_OWNED_OVERRIDDEN="no"
+
+# Classify based ONLY on what is observed on THIS run - never on any
+# previously recorded strategy. This is the single source of truth for "is
+# it safe to let BlueStream manage the system nginx directly right now",
+# and it is always (re-)computed fresh, every run, including reinstalls.
 #
 # CRITICAL SAFETY RULE: an existing nginx is never assumed to be
 # BlueStream-owned just because no *known* panel marker fired. Ownership
@@ -223,24 +236,7 @@ bs_env_detect() {
 #                       strategy=isolated
 #   unknown           - any other ambiguous combination: isolated, never
 #                       guessed as fresh.
-bs_env_classify() {
-    if [ "$BS_ENV_BLUESTREAM_EXISTING" = "yes" ]; then
-        # A prior BlueStream install already recorded (and the operator is
-        # re-running install.sh to repair/update/upgrade it) is authoritative
-        # over any fresh classification: reuse whatever strategy it already
-        # used, recorded alongside the rest of server.conf. Distinct MODE
-        # values from a first-time "managed"/"plain_nginx" classification -
-        # this is a REUSE decision, not a fresh re-detection, and the label
-        # must say so plainly rather than implying a panel was just found.
-        if [ "${BLUESTREAM_NGINX_STRATEGY:-}" = "isolated" ]; then
-            BS_ENV_MODE="reinstall_isolated"
-            BS_NGINX_STRATEGY="isolated"
-        else
-            BS_ENV_MODE="reinstall_owned"
-            BS_NGINX_STRATEGY="owned"
-        fi
-        return 0
-    fi
+bs_env_classify_current() {
     if [ -n "$BS_ENV_PANEL" ]; then
         BS_ENV_MODE="managed"
         BS_NGINX_STRATEGY="isolated"
@@ -273,6 +269,74 @@ bs_env_classify() {
     return 0
 }
 
+# Decide MODE and the nginx strategy that follows from it, for a possible
+# re-install/repair/upgrade of an existing BlueStream install.
+#
+# CRITICAL SAFETY RULE (the legacy-ownership bug fix): a prior install's
+# RECORDED strategy (server.conf NGINX_STRATEGY=) is NEVER trusted blindly.
+# The live environment is ALWAYS re-classified fresh first
+# (bs_env_classify_current), and that fresh result is authoritative for
+# whether "owned" is safe RIGHT NOW:
+#   - If the fresh classification says isolated is required (a control
+#     panel now exists, other sites appeared, nginx is inactive/ambiguous,
+#     etc.) then isolated is ALWAYS used, regardless of what server.conf
+#     previously recorded. A stale "owned" record can never bypass this.
+#   - Once an install has ever legitimately needed isolated mode, it stays
+#     isolated on every subsequent run even if the environment looks clear
+#     again later (e.g. a panel was briefly misdetected then uninstalled) -
+#     downgrading isolation back to "owned" automatically is itself an
+#     unreviewed strategy change and is never done silently; the Owned ->
+#     Isolated migration tooling only ever moves in the safe direction.
+#   - Only when the fresh classification says owned is safe AND the prior
+#     record (if any) also said owned does the install stay in owned mode.
+bs_env_classify_existing() {
+    bs_env_classify_current
+    local fresh_mode="$BS_ENV_MODE" fresh_strategy="$BS_NGINX_STRATEGY"
+    local recorded_strategy="${BLUESTREAM_NGINX_STRATEGY:-owned}"
+
+    BS_ENV_STALE_OWNED_OVERRIDDEN="no"
+    if [ "$fresh_strategy" = "isolated" ]; then
+        BS_NGINX_STRATEGY="isolated"
+        if [ "$recorded_strategy" = "owned" ]; then
+            # The exact bug this fixes: a previously-recorded "owned"
+            # install must never be reused once the live environment
+            # (today) positively requires isolation. Surfaced loudly by
+            # bs_env_report/install.sh/bluestream-manager rather than
+            # silently reclassified.
+            BS_ENV_STALE_OWNED_OVERRIDDEN="yes"
+            BS_ENV_MODE="reinstall_forced_isolated"
+        else
+            BS_ENV_MODE="reinstall_isolated"
+        fi
+        return 0
+    fi
+    # Fresh classification says owned is safe right now.
+    if [ "$recorded_strategy" = "isolated" ]; then
+        # Sticky isolation: never auto-downgrade back to owned just because
+        # the environment looks clear again today - that is also a strategy
+        # change and must go through the explicit migration tooling, not an
+        # implicit reclassification.
+        BS_NGINX_STRATEGY="isolated"
+        BS_ENV_MODE="reinstall_isolated"
+        return 0
+    fi
+    BS_NGINX_STRATEGY="owned"
+    BS_ENV_MODE="reinstall_owned"
+    # Record what a from-scratch classification would have been today, for
+    # diagnostics/reporting only (does not affect the decision above).
+    : "$fresh_mode"
+    return 0
+}
+
+bs_env_classify() {
+    if [ "$BS_ENV_BLUESTREAM_EXISTING" = "yes" ]; then
+        bs_env_classify_existing
+        return 0
+    fi
+    bs_env_classify_current
+    return 0
+}
+
 bs_env_mode_label() {
     case "$BS_ENV_MODE" in
         fresh)              printf 'Fresh VPS (no existing web server)' ;;
@@ -281,8 +345,10 @@ bs_env_mode_label() {
         nginx_inactive)     printf 'Nginx present but not running - too ambiguous to assume ownership' ;;
         managed)            printf 'Managed environment (%s detected)' "${BS_ENV_PANEL:-unknown panel}" ;;
         alt_webserver)      printf 'Alternative web server (Apache/Caddy, no Nginx)' ;;
-        reinstall_isolated) printf 'Existing BlueStream install - reusing its isolated nginx strategy' ;;
-        reinstall_owned)    printf 'Existing BlueStream install - reusing its owned nginx strategy' ;;
+        reinstall_isolated) printf 'Existing BlueStream install - isolated nginx strategy confirmed still required' ;;
+        reinstall_owned)    printf 'Existing BlueStream install - owned nginx strategy re-confirmed safe' ;;
+        reinstall_forced_isolated)
+            printf 'Existing BlueStream install - environment now requires ISOLATED (overriding a stale "owned" record - see warning below)' ;;
         *)                  printf 'Unknown/custom environment' ;;
     esac
 }
@@ -298,6 +364,15 @@ bs_env_report() {
     printf '  Port 80 free    : %s\n' "$BS_ENV_PORT80_FREE"
     printf '  Port 443 free   : %s\n' "$BS_ENV_PORT443_FREE"
     printf '  Existing install: %s\n' "$BS_ENV_BLUESTREAM_EXISTING"
+    if [ "$BS_ENV_STALE_OWNED_OVERRIDDEN" = "yes" ]; then
+        bs_warn "SAFETY OVERRIDE: this install was previously recorded as OWNED (server.conf NGINX_STRATEGY=owned),"
+        bs_warn "but the environment detected RIGHT NOW requires ISOLATED mode (a control panel and/or other"
+        bs_warn "site(s) are present). The stale 'owned' record is NOT being reused - BlueStream is switching to"
+        bs_warn "isolated mode this run. If BlueStream's nginx config is already live on the system nginx from the"
+        bs_warn "earlier owned install, use the NEW source checkout (the installed old manager may lack migrate):"
+        bs_warn "sudo bash <new-checkout>/bluestream-manager migrate status   (then 'migrate run' after review). See"
+        bs_warn "docs/installation.md 'Safe Owned -> Isolated migration'."
+    fi
     if [ "$BS_NGINX_STRATEGY" = "isolated" ]; then
         bs_warn "An existing web server/control panel was detected (or the environment is ambiguous)."
         bs_warn "BlueStream will NOT modify it. A separate, independent nginx instance will be installed"
