@@ -178,8 +178,8 @@ its **own** independent nginx instance:
 | --- | --- | --- |
 | Config root | `/etc/nginx/` | `/etc/bluestream/nginx/` |
 | systemd unit | `nginx.service` (system) | `bluestream-nginx.service` |
-| HTTP port | 80 | first free port from `80 8088 8188 8288 8388 18080` |
-| HTTPS port | 443 | first free port from `443 8443 8543 8643 18443` (reserved; see below) |
+| HTTP port | 80 | loopback-only; first free port from `8088 8188 8288 8388 18080` |
+| HTTPS | 443 | no isolated listener; the hosting panel terminates public HTTPS |
 | `--with-ssl` | certbot `--nginx`, fully automatic | **not supported automatically** — see below |
 
 Everything else is identical: the same RTMP bus, the same HLS/player/console
@@ -222,15 +222,16 @@ server {
 }
 ```
 
+Ports 80 and 443 are always reserved for the hosting panel in isolated mode,
+even if the panel nginx is temporarily stopped while BlueStream is installed.
+The selected gateway port is persisted and reused; a later collision fails
+loudly without silently changing the panel's configured proxy destination.
+
 `--with-ssl` is refused (with a clear message, not silently ignored) for an
 isolated install, because the only automatic path (`certbot --nginx`) would
 mean editing the panel's own nginx configuration — exactly what this
-installer promises never to do. If you want certbot to manage a certificate
-for BlueStream's own instance directly (bypassing the panel entirely), point
-a dedicated subdomain's DNS straight at this server and run certbot
-yourself with `--webroot` or `--standalone` against
-`/etc/bluestream/nginx/nginx.conf`'s HTTP port once it is reachable from the
-internet on port 80.
+installer promises never to do. Issue and attach the public certificate in
+the panel; BlueStream's gateway remains plain HTTP on loopback.
 
 **An existing nginx that is not managed by apt/dpkg** (some panels ship
 their own build, sometimes at the very same `/usr/sbin/nginx` path the
@@ -250,12 +251,34 @@ doing so inside a plain install run cannot be proven safe, because the
 legacy owned config is still bound to the same ports (80 and the private
 RTMP bus on 1935) the new isolated instance also needs.
 
-Instead, run the guided migration explicitly:
+The installed old manager may not have a `migrate` command. Therefore the
+safe production order is: fetch and verify the **new** source, run its
+manager directly to migrate, and only then run its installer. Replace
+`<approved-commit>` with the reviewed PR head supplied for the release:
 
 ```bash
-sudo bluestream-manager migrate status   # shows exactly what would change, and the manual procedure
-sudo bluestream-manager migrate run      # performs it: backup -> generate+validate -> cutover -> verify
+git clone https://github.com/Humran13/bluestream-relay-pro.git
+cd bluestream-relay-pro
+git fetch origin fix-installer-admin-ports-legacy-migration
+git switch --detach <approved-commit>
+test "$(git rev-parse HEAD)" = "<approved-commit>"
+git status --short                 # must print nothing
+
+# Independent pre-upgrade backup; verify that the archive is readable.
+backup="/root/bluestream-preupgrade-$(date +%Y%m%d-%H%M%S).tar.gz"
+sudo tar --ignore-failed-read -C / -czpf "$backup" \
+  etc/bluestream var/lib/bluestream etc/nginx
+sudo test -s "$backup"
+sudo tar -tzf "$backup" >/dev/null
+
+sudo bash ./bluestream-manager migrate status
+sudo bash ./bluestream-manager migrate run
 ```
+
+Do not run the ordinary installer before the migration as the planned
+sequence. If you do, its initial read-only environment check safely stops
+before package installation, file installation, or nginx changes and prints
+the same new-checkout commands; it never attempts the cutover implicitly.
 
 What `migrate run` does, in order, stopping and rolling back automatically
 if any step fails:
@@ -265,8 +288,11 @@ if any step fails:
    BlueStream's own generated files (every one carries a
    `# BlueStream Relay Pro` header comment) — never assumes ownership from
    a path alone.
-2. **Backs up** those files to `/var/lib/bluestream/backups/nginx-migration-
-   <timestamp>/` before touching anything.
+2. **Backs up** the exact site/RTMP state (including an already-disabled or
+   missing RTMP include) to `/var/lib/bluestream/backups/nginx-migration-
+   <timestamp>-<pid>/`, writes a checksum manifest, and verifies every
+   required entry before touching anything. `cp -a` preserves ownership and
+   permissions.
 3. **Generates and validates** (`nginx -t`) BlueStream's own isolated
    instance, without starting it yet.
 4. **Disables** (never deletes) BlueStream's own two files on the system
@@ -275,24 +301,63 @@ if any step fails:
    panel-managed nginx, and it only ever removes files BlueStream itself
    created and verified in step 1. No other site, panel config, or firewall
    rule is ever touched.
-5. **Starts and verifies** BlueStream's isolated instance.
+5. Rechecks the persisted loopback HTTP port and RTMP port immediately before
+   startup, then **starts and verifies** BlueStream's isolated instance.
 6. Records `NGINX_STRATEGY=isolated` in `server.conf` only after every
    prior step succeeded.
 
-Any failure at any step rolls the system nginx back to the pre-migration
-state automatically (`nginx -t` + reload) and prints the backup location
-and the full **manual procedure** instead of retrying blindly. You can also
+Any failure at any step returns control to the migration transaction, stops
+and disables the isolated unit, restores the manifest-recorded pre-migration
+state, validates/reloads system nginx, and verifies the former RTMP listener
+is accepting connections when the manifest says it existed. If recovery
+cannot be verified, rollback fails explicitly and preserves all copies with
+manual recovery guidance; it never deletes a disabled RTMP configuration
+unless a checksum-verified active replacement has already been restored.
+You can also
 roll back a completed migration by hand:
 
 ```bash
-sudo bluestream-manager migrate rollback /var/lib/bluestream/backups/nginx-migration-<timestamp>
+cd /path/to/new/bluestream-relay-pro
+sudo bash ./bluestream-manager migrate rollback \
+  /var/lib/bluestream/backups/nginx-migration-<timestamp>-<pid>
 ```
 
-If you prefer to do it by hand instead of running `migrate run`, `migrate
-status` always prints the exact manual steps (back up, generate the
-isolated config with `migrate gen-isolated`, remove BlueStream's two files
-from the system nginx, validate + reload, start `bluestream-nginx.service`,
-then update your panel's reverse proxy).
+Use the same new checkout for rollback until the ordinary installer has
+successfully installed the new manager. Rollback restores only the two
+content-verified BlueStream-owned nginx files. It never restores a global
+`/etc/nginx/nginx.conf` or a panel site file over newer CloudPanel changes.
+Running the same rollback again is safe. A backup with a missing manifest,
+missing required entry, checksum mismatch, or unexpected file at a managed
+path is refused before services are stopped.
+
+After migration succeeds, validate the gateway before upgrading the installed
+manager (substitute the exact port printed by `migrate run`):
+
+```bash
+curl -fsS http://127.0.0.1:<gateway-port>/player/ >/dev/null
+curl -fsS http://127.0.0.1:<gateway-port>/console/ >/dev/null
+sudo ss -ltnp | grep -E '127\.0\.0\.1:(<gateway-port>|1935)'
+sudo nginx -t
+sudo systemctl is-active nginx bluestream-nginx.service
+
+# Install the reviewed version only after those checks pass.
+sudo bash ./install.sh
+sudo bluestream-manager installinfo
+sudo bluestream-manager diagnostics
+sudo bluestream-manager selftest
+```
+
+In CloudPanel, configure the public site's reverse proxy to the exact
+`http://127.0.0.1:<gateway-port>` shown as **Reverse-proxy destination** by
+`installinfo`; do not use the Gunicorn port. Let CloudPanel terminate HTTPS.
+Then test the public `/console/`, `/player/`, and a live `/hls/.../index.m3u8`
+plus at least one changing `.ts` segment. A real relay/playlist publish is the
+functional RTMP check; an HTTP 200 or `nginx -t` alone is not sufficient.
+
+`migrate status` also prints the safe recovery commands. Do not improvise a
+manual cutover: missing and already-disabled RTMP states are intentionally
+different, and only the manifest-backed transaction knows which one to
+restore.
 
 Your data — relays, playlists, destinations, schedules, secrets, and the
 web admin account — is never touched by this migration; it lives entirely
@@ -518,4 +583,4 @@ Common issues:
 | **502 Bad Gateway** from your control panel/reverse proxy | The reverse proxy is almost always pointed at the wrong port. Run `sudo bluestream-manager installinfo` and confirm your panel's vhost targets the exact "Reverse-proxy destination" value shown — in isolated mode this is the **gateway** port (BlueStream's own nginx, e.g. `127.0.0.1:8088`), **never** the raw Gunicorn port (e.g. `127.0.0.1:8180`) and never 80/443/a guessed port. The install output's `PORT CONFIGURATION` section states this explicitly for the same reason. |
 | `/console/` works (redirects fine) but `/player/?relay=<name>` and `/hls/relay/<name>/index.m3u8` both 404 through your panel's HTTPS domain | The reverse proxy is pointed at the **Gunicorn** port instead of the gateway port. Gunicorn/Flask only implements `/console/*` routes — it has no `/player/` or `/hls/` routes at all, so proxying straight to it makes `/console/` work while everything else 404s. Fix: point the panel's reverse proxy at the isolated gateway port shown by `sudo bluestream-manager installinfo` ("Isolated streaming gateway" / "Reverse-proxy destination"), not at "Internal Gunicorn port". |
 | "No web admin account exists" / cannot log in after install | Admin onboarding was pending (no terminal was reachable during a non-interactive install). Run `sudo bluestream-manager admin init`, or check status with `sudo bluestream-manager admin status`. |
-| Installed as "owned" but a panel (e.g. CloudPanel) now exists | `install.sh` now stops and prints a migration procedure instead of silently reusing the old strategy — see "Safe Owned -> Isolated migration" above. Run `sudo bluestream-manager migrate status`. |
+| Installed as "owned" but a panel (e.g. CloudPanel) now exists | `install.sh` stops and prints a migration procedure instead of silently reusing the old strategy. The installed old manager may not support it: from the verified new checkout run `sudo bash ./bluestream-manager migrate status`; see "Safe Owned -> Isolated migration" above. |

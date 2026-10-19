@@ -213,7 +213,10 @@ bs_load_server_conf() {
             ISOLATED_HTTP_PORT)
                 if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTP_PORT="$val"; fi ;;
             ISOLATED_HTTPS_PORT)
-                if bs_valid_port "$val"; then BLUESTREAM_ISOLATED_HTTPS_PORT="$val"; fi ;;
+                # Retired compatibility key. Older builds recorded a reserved
+                # port that had no listener; ignore it so the next save clears
+                # the misleading value while retaining the stable file shape.
+                : ;;
         esac
     done < "$BLUESTREAM_SERVER_CONF"
     return 0

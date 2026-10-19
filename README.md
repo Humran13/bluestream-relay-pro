@@ -228,26 +228,36 @@ than risk overwriting it.
 
 **If a previous "owned" install's config is still live on the system
 nginx** when the environment now requires isolated (e.g. CloudPanel was
-installed after BlueStream), `install.sh` stops — before changing anything
-else — and tells you to run the guided migration:
+installed after BlueStream), the migration must use the **new checkout
+before its installer runs**. The installed old manager may not have a
+`migrate` command. From the newly downloaded checkout, run:
 
 ```bash
-sudo bluestream-manager migrate status   # shows exactly what would change
-sudo bluestream-manager migrate run      # backs up, migrates, validates; rollback-capable
+cd /path/to/new/bluestream-relay-pro
+sudo bash ./bluestream-manager migrate status
+sudo bash ./bluestream-manager migrate run
+sudo bash ./install.sh                    # only after migration succeeds
 ```
+
+Running the new `install.sh` first is safe—it detects the legacy conflict
+and stops before package installation or nginx changes—but the commands
+above are the direct, executable upgrade order and avoid relying on the old
+installed manager.
 
 It backs up the two BlueStream-generated files involved, disables them on
 the system nginx, validates with `nginx -t` before every reload, starts
 BlueStream's own isolated instance, and rolls back automatically on any
-failure. `sudo bluestream-manager migrate rollback <backup-dir>` reverses a
+failure. Before the ordinary installer has installed the new manager, use
+`sudo bash ./bluestream-manager migrate rollback <backup-dir>` from that
+same new checkout to reverse a
 completed migration by hand if needed. See `docs/installation.md` → "Safe
-Owned -> Isolated migration" for the full procedure (including the fully
-manual steps, printed by `migrate status`, if you prefer not to automate
-it).
+Owned -> Isolated migration" for the full verified checkout, backup,
+CloudPanel, validation, and recovery procedure.
 
 In isolated mode: your panel/Apache/Caddy keeps its ports, config, and
 certificates exactly as they were. BlueStream's independent instance picks
-its own loopback-adjacent ports (shown during install and in
+one persisted loopback-only HTTP gateway port from `8088 8188 8288 8388
+18080` (shown during install and in
 `bluestream-manager`'s Server Status) for its RTMP bus, HLS output and web
 console. To reach it from your real domain, add one reverse-proxy rule in
 your panel pointing a (sub)domain at `http://127.0.0.1:<isolated-http-port>/`
@@ -255,6 +265,8 @@ and let the panel terminate HTTPS — `--with-ssl` is not supported for the
 isolated instance itself (it would require editing the panel's nginx
 config, which this installer will never do); see
 `docs/installation.md` for the exact steps and a fully worked example.
+Ports 80/443 remain reserved for the panel even while it is stopped, and
+BlueStream does not advertise a nonexistent isolated HTTPS listener.
 
 ### Web admin account
 

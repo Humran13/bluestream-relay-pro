@@ -32,7 +32,7 @@ bs_print_port_configuration() {
 
     if [ "$strategy" = "isolated" ]; then
         printf '  Isolated streaming gateway: 127.0.0.1:%s (BlueStream'\''s own nginx - fronts Gunicorn for /console/ AND serves /player/ and /hls/ itself)\n' "${BLUESTREAM_ISOLATED_HTTP_PORT:-<not yet selected>}"
-        printf '  Gateway HTTPS (reserved)  : 127.0.0.1:%s (no certificate is issued automatically in isolated mode)\n' "${BLUESTREAM_ISOLATED_HTTPS_PORT:-<not yet selected>}"
+        printf '  Public HTTPS              : provided by the hosting panel (BlueStream has no isolated HTTPS listener)\n'
         printf '  Reverse-proxy destination : 127.0.0.1:%s  <-- point your control panel / reverse proxy vhost at EXACTLY this (the gateway, NOT the Gunicorn port above)\n' "${BLUESTREAM_ISOLATED_HTTP_PORT:-<not yet selected>}"
     else
         printf '  Nginx HTTP port           : 0.0.0.0:80 (this IS the gateway in owned mode - serves /console/, /player/ and /hls/ together)\n'
@@ -55,7 +55,9 @@ bs_print_port_configuration() {
     if [ -z "${BLUESTREAM_WEB_PORT:-}" ]; then
         bs_warn "WEB_PORT is not set - the web console is not fully configured yet."
     fi
-    if [ "${BLUESTREAM_SSL_ENABLED:-no}" != "yes" ]; then
+    if [ "$strategy" = "isolated" ]; then
+        bs_warn "Public HTTPS is terminated by the hosting panel and cannot be verified from BlueStream's loopback-only gateway alone."
+    elif [ "${BLUESTREAM_SSL_ENABLED:-no}" != "yes" ]; then
         bs_warn "HTTPS is NOT verified/configured for this install. Do not treat the dashboard as publicly HTTPS-ready."
     fi
     if [ "$strategy" = "isolated" ]; then

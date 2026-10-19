@@ -2639,6 +2639,171 @@ echo "OVERRIDDEN=$BS_ENV_STALE_OWNED_OVERRIDDEN"
             migrate,
         )
 
+    def test_16_migration_uses_new_checkout_and_rollback_disables_isolated(self):
+        migrate = repo_text("lib/migrate.sh")
+        docs = repo_text("docs/installation.md")
+        readme = repo_text("README.md")
+        self.assertIn("migrate_stop_isolated_for_rollback || return 1", migrate)
+        self.assertIn('systemctl disable "$BLUESTREAM_ISOLATED_UNIT"', migrate)
+        self.assertIn("sudo bash $BS_ROOT/bluestream-manager migrate rollback", migrate)
+        for text in (docs, readme):
+            self.assertIn("sudo bash ./bluestream-manager migrate status", text)
+            self.assertIn("sudo bash ./bluestream-manager migrate run", text)
+            self.assertIn("sudo bash ./install.sh", text)
+
+
+class MigrationTransactionTests(unittest.TestCase):
+    """Executable bash tests for the migration state/rollback invariants."""
+
+    _PRELUDE = r"""
+set -u
+repo="$(cygpath -u "$1" 2>/dev/null || printf '%s' "$1")"
+root="$(cygpath -u "$2" 2>/dev/null || printf '%s' "$2")"
+. "$repo/lib/common.sh"
+. "$repo/lib/nginx.sh"
+. "$repo/lib/migrate.sh"
+NGINX_SITE_FILE="$root/sites-available/bluestream"
+NGINX_SITE_LINK="$root/sites-enabled/bluestream"
+NGINX_RTMP_INCLUDE="$root/modules-enabled/60-bluestream-rtmp.conf"
+BLUESTREAM_ISOLATED_CONF_FILE="$root/isolated/nginx.conf"
+BLUESTREAM_ISOLATED_SITE_FILE="$root/isolated/site.conf"
+BLUESTREAM_ISOLATED_HTTP_PORT=8088
+mkdir -p "$root/sites-available" "$root/sites-enabled" "$root/modules-enabled" "$root/isolated"
+bs_require_root() { :; }
+nginx() { return 0; }
+bs_save_server_conf() { return 0; }
+systemctl() {
+    printf '%s\n' "$*" >> "$root/systemctl.log"
+    case "${1:-}" in
+        is-active) printf 'inactive\n'; return 3 ;;
+        is-enabled) printf 'disabled\n'; return 1 ;;
+        *) return 0 ;;
+    esac
+}
+bs_port_in_use() { [ "$1" = "$BLUESTREAM_RTMP_PORT" ]; }
+"""
+
+    def _run(self, body: str):
+        import subprocess
+        import tempfile
+
+        import webapp.engine as engine_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "migration-test.sh"
+            script.write_text(self._PRELUDE + body, encoding="utf-8")
+            proc = subprocess.run(
+                [engine_module.default_bash_path(), str(script), str(REPO_ROOT), tmp],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            output = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+            self.assertEqual(proc.returncode, 0, output)
+            return output
+
+    def test_01_verified_active_rtmp_restores_and_repeat_rollback_is_safe(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro active RTMP\n' > "$NGINX_RTMP_INCLUDE"
+chmod 0640 "$NGINX_RTMP_INCLUDE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 10
+mv "$NGINX_RTMP_INCLUDE" "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+migrate_restore_backup "$backup" || exit 11
+migrate_restore_backup "$backup" || exit 12
+[ -f "$NGINX_RTMP_INCLUDE" ] || exit 14
+[ ! -e "${NGINX_RTMP_INCLUDE}.migrated-disabled" ] || exit 15
+printf 'RESTORED\n'
+"""
+        )
+        self.assertIn("RESTORED", out)
+
+    def test_02_missing_original_rtmp_never_deletes_unverified_recovery_copy(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 20
+printf '# BlueStream Relay Pro only remaining RTMP copy\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+if migrate_restore_backup "$backup"; then exit 21; fi
+[ -f "${NGINX_RTMP_INCLUDE}.migrated-disabled" ] || exit 22
+[ ! -f "$root/systemctl.log" ] || exit 23
+printf 'PRESERVED\n'
+"""
+        )
+        self.assertIn("PRESERVED", out)
+
+    def test_03_already_disabled_rtmp_prestate_is_restored_exactly(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro originally disabled RTMP\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 30
+printf '# BlueStream Relay Pro changed\n' > "${NGINX_RTMP_INCLUDE}.migrated-disabled"
+migrate_restore_backup "$backup" || exit 31
+[ ! -e "$NGINX_RTMP_INCLUDE" ] || exit 32
+grep -q 'originally disabled' "${NGINX_RTMP_INCLUDE}.migrated-disabled" || exit 33
+printf 'EXACT\n'
+"""
+        )
+        self.assertIn("EXACT", out)
+
+    def test_04_missing_backup_entry_fails_before_stopping_services(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro site\n' > "$NGINX_SITE_FILE"
+backup="$root/backup"; mkdir "$backup"
+migrate_create_backup "$backup" || exit 40
+rm "$backup/site.bak"
+if migrate_restore_backup "$backup"; then exit 41; fi
+[ ! -f "$root/systemctl.log" ] || exit 42
+printf 'FAILED-SAFE\n'
+"""
+        )
+        self.assertIn("FAILED-SAFE", out)
+
+    def test_05_completed_detection_and_enable_failure_are_nonfatal_to_caller(self):
+        out = self._run(
+            r"""
+printf '# BlueStream Relay Pro inactive old site\n' > "$NGINX_SITE_FILE"
+printf '# BlueStream Relay Pro isolated config\n' > "$BLUESTREAM_ISOLATED_CONF_FILE"
+printf '    listen 127.0.0.1:8088;\n' > "$BLUESTREAM_ISOLATED_SITE_FILE"
+BLUESTREAM_NGINX_STRATEGY=isolated
+nginx_isolated_running() { return 0; }
+migrate_status | grep -q 'Migration already completed. No migration required.' || exit 50
+nginx_isolated_test() { return 0; }
+nginx_isolated_validate_start_ports() { return 0; }
+systemctl() {
+    case "${1:-}" in
+        enable) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+if nginx_isolated_enable; then exit 51; fi
+printf 'CALLER-RETAINED-CONTROL\n'
+"""
+        )
+        self.assertIn("CALLER-RETAINED-CONTROL", out)
+
+    def test_06_reserved_and_colliding_gateway_ports_fail_without_reselection(self):
+        out = self._run(
+            r"""
+nginx_isolated_running() { return 1; }
+BLUESTREAM_ISOLATED_HTTP_PORT=80
+if nginx_isolated_select_ports; then exit 60; fi
+[ "$BLUESTREAM_ISOLATED_HTTP_PORT" = 80 ] || exit 61
+BLUESTREAM_ISOLATED_HTTP_PORT=8088
+bs_port_in_use() { return 0; }
+if nginx_isolated_select_ports; then exit 62; fi
+[ "$BLUESTREAM_ISOLATED_HTTP_PORT" = 8088 ] || exit 63
+printf 'PORTS-UNCHANGED\n'
+"""
+        )
+        self.assertIn("PORTS-UNCHANGED", out)
+
 
 class SuperviseStateMachineTests(unittest.TestCase):
     """Real-bash-execution tests for lib/supervise.sh's retry/backoff state

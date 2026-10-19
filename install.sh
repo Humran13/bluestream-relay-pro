@@ -524,12 +524,12 @@ configure_server_conf() {
     # already owns 80/443, BlueStream's own independent nginx instance needs
     # its own ports too. Same reuse-on-reinstall pattern as WEB_PORT above.
     if [ "$BLUESTREAM_NGINX_STRATEGY" = "isolated" ]; then
-        if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT" \
-            && [ -n "${BLUESTREAM_ISOLATED_HTTPS_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTPS_PORT"; then
-            bs_ok "Reusing existing isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+        if [ -n "${BLUESTREAM_ISOLATED_HTTP_PORT:-}" ] && bs_valid_port "$BLUESTREAM_ISOLATED_HTTP_PORT"; then
+            nginx_isolated_select_ports || bs_die "The persisted isolated gateway port is unsafe or unavailable. It was not changed automatically; review server.conf and the hosting-panel proxy target."
+            bs_ok "Reusing existing isolated gateway port: 127.0.0.1:$BLUESTREAM_ISOLATED_HTTP_PORT"
         else
-            nginx_isolated_select_ports || bs_die "Could not find free ports for BlueStream's independent nginx instance (tried HTTP: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES / HTTPS: $BLUESTREAM_ISOLATED_HTTPS_CANDIDATES)."
-            bs_info "Selected isolated nginx ports: HTTP $BLUESTREAM_ISOLATED_HTTP_PORT / HTTPS $BLUESTREAM_ISOLATED_HTTPS_PORT (reserved)"
+            nginx_isolated_select_ports || bs_die "Could not find a safe loopback port for BlueStream's independent nginx instance (tried: $BLUESTREAM_ISOLATED_HTTP_CANDIDATES)."
+            bs_info "Selected isolated streaming gateway: 127.0.0.1:$BLUESTREAM_ISOLATED_HTTP_PORT (public HTTPS remains with the hosting panel)"
         fi
     fi
 
@@ -571,8 +571,8 @@ configure_nginx() {
         # Existing Nginx / control panel compatibility section of
         # docs/installation.md.
         nginx_isolated_gen_config || bs_die "Isolated nginx configuration failed."
-        nginx_isolated_install_unit
-        nginx_isolated_enable
+        nginx_isolated_install_unit || bs_die "Failed to install the isolated nginx systemd unit."
+        nginx_isolated_enable || bs_die "Failed to enable/start the isolated nginx service."
         bs_ok "BlueStream's independent nginx instance is configured and running (the existing web server/panel was not modified)."
     else
         nginx_gen_config

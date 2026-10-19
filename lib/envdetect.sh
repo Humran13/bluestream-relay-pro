@@ -369,8 +369,8 @@ bs_env_report() {
         bs_warn "but the environment detected RIGHT NOW requires ISOLATED mode (a control panel and/or other"
         bs_warn "site(s) are present). The stale 'owned' record is NOT being reused - BlueStream is switching to"
         bs_warn "isolated mode this run. If BlueStream's nginx config is already live on the system nginx from the"
-        bs_warn "earlier owned install, run: sudo bluestream-manager migrate status   (then 'migrate run' once you"
-        bs_warn "have reviewed what it will do) to cleanly move it over with a backup and rollback. See"
+        bs_warn "earlier owned install, use the NEW source checkout (the installed old manager may lack migrate):"
+        bs_warn "sudo bash <new-checkout>/bluestream-manager migrate status   (then 'migrate run' after review). See"
         bs_warn "docs/installation.md 'Safe Owned -> Isolated migration'."
     fi
     if [ "$BS_NGINX_STRATEGY" = "isolated" ]; then
