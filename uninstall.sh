@@ -114,13 +114,18 @@ if [ -L /usr/local/bin/yt-dlp ] && \
 fi
 rm -rf /usr/local/lib/bluestream
 
-# --- remove nginx site config and RTMP include (keep nginx itself) ---
-rm -f /etc/nginx/sites-available/bluestream
-rm -f /etc/nginx/sites-enabled/bluestream
-rm -f /etc/nginx/modules-enabled/60-bluestream-rtmp.conf
-rm -rf /etc/nginx/bluestream
-if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
-    systemctl reload nginx 2>/dev/null || true
+# --- remove nginx site config and RTMP include (owned mode only - an
+# isolated-mode install never wrote any of these onto the system nginx, so
+# there is nothing to remove here and the system/panel nginx is never
+# reloaded either; its service is not ours to touch in that mode) ---
+if [ "${BLUESTREAM_NGINX_STRATEGY:-owned}" = "owned" ]; then
+    rm -f /etc/nginx/sites-available/bluestream
+    rm -f /etc/nginx/sites-enabled/bluestream
+    rm -f /etc/nginx/modules-enabled/60-bluestream-rtmp.conf
+    rm -rf /etc/nginx/bluestream
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
 fi
 
 # --- data removal (optional) ---

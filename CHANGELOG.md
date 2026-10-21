@@ -5,6 +5,32 @@ All notable changes to BlueStream Relay Pro are documented in this file.
 The format is based on Keep a Changelog and this project adheres to
 Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- The web console's status snapshot (`web-ctl snapshot`, feeds the
+  dashboard's "Nginx" health field) hard-coded `systemctl is-active nginx`,
+  which checks the hosting panel's own nginx instead of BlueStream's when
+  running in isolated mode. It now goes through the existing
+  strategy-aware `nginx_status`/`nginx_running` helpers (`lib/nginx.sh`),
+  which `web-ctl` now loads.
+- `uninstall.sh` reloaded the system/panel nginx and removed owned-mode-only
+  files unconditionally, even on an isolated-mode install where BlueStream
+  never touched the system nginx in the first place. Both are now gated to
+  owned mode only.
+
+### Added
+
+- `tests/integration/crash-isolation.sh`: a real-service (not mocked)
+  integration test proving BlueStream's own streaming engine can be
+  repeatedly crashed (SIGSEGV) without affecting a pre-existing web
+  server/control panel on the same host, without an uncontrolled restart
+  storm, and without an invalid config ever replacing a working one. See
+  `docs/troubleshooting.md` "An nginx worker crashed / repeated RTMP or
+  HLS segfaults" for how/when to run it and how to investigate a real
+  `ngx_rtmp_module` crash on a production host.
+
 ## [0.1.0] - 2026-08-28
 
 Foundation release.

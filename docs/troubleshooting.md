@@ -105,6 +105,83 @@ systemd limits restarts (`StartLimitIntervalSec=300`, `StartLimitBurst=10`).
 If a relay keeps failing, it stops restarting and shows FAILED instead of
 endlessly burning CPU. Fix the source, then `relay restart <name>`.
 
+## An nginx worker crashed / repeated RTMP or HLS segfaults
+
+BlueStream's RTMP ingest and HLS output are handled by a single nginx
+worker process (`worker_processes 1;` - required because nginx-rtmp-module
+keeps live-stream publish/play state per worker, so the publisher and any
+local reader must land on the same one; see `lib/nginx.sh`
+`nginx_ensure_single_worker`). `ngx_rtmp_module` itself is a third-party,
+long-unmaintained module, and a crash inside it (visible as
+`segfault at ... in ngx_rtmp_module.so`) is a known class of native defect
+in that module, most often tied to HLS fragment-rotation/cleanup timers or
+RTMP session teardown on publisher/subscriber disconnect - **not** something
+BlueStream's own code can patch, since the module is a pre-built binary
+package (`libnginx-mod-rtmp`).
+
+**What a crash does and does not affect:**
+- The crashing worker belongs to **BlueStream's own nginx** - either the
+  system nginx it owns directly (owned mode) or, whenever any other web
+  server/control panel is present, `bluestream-nginx.service`, BlueStream's
+  own independent instance (isolated mode; see "Environment detection..."
+  above). A worker crash never reaches a different nginx process.
+- nginx's master process auto-respawns a crashed worker immediately;
+  `Restart=on-failure` (`RestartSec=5`, `StartLimitBurst=10` /
+  `StartLimitIntervalSec=300`) covers a full master crash too. A single
+  crash is a brief (sub-second to a few seconds) interruption of
+  BlueStream's own RTMP/HLS/web-console traffic, not a sustained outage -
+  unless the same trigger fires again immediately (see below).
+- **A crash in BlueStream's RTMP/HLS engine can never stop CloudPanel, any
+  other control panel, or any unrelated website on the same host.** This is
+  an architectural guarantee (dedicated process, dedicated systemd unit,
+  dedicated config root, dedicated PID/log files - see
+  `config/systemd/bluestream-nginx.service` and `lib/nginx.sh`
+  `nginx_isolated_*`), proven with real kill signals against real services
+  in `tests/integration/crash-isolation.sh` (not a theoretical claim; run
+  that script after touching any installer/nginx/systemd code to re-verify
+  it).
+- Because `worker_processes 1` is required, a crash that repeats on every
+  HLS fragment rotation (every `hls_fragment` interval, 5s by default) can
+  make a near-continuous respawn loop that leaves **BlueStream's own**
+  player/HLS/web-console degraded for as long as that specific stream keeps
+  triggering it, even though every other site on the host stays completely
+  unaffected the whole time. The GUI's dashboard "Nginx" field
+  (`bluestream-manager`, or the web console) reflects this using the
+  correct, strategy-aware check (`nginx_status`/`nginx_running` in
+  `lib/nginx.sh`) - it checks BlueStream's own instance, never the
+  unrelated panel nginx, in isolated mode.
+
+**If this happens on your VPS, gather real evidence before changing
+anything** (changing `hls_fragment` without evidence and calling it fixed
+hides the real defect):
+
+```bash
+# Confirm the exact binaries/versions actually loaded
+nginx -V 2>&1
+dpkg -s libnginx-mod-rtmp | grep -E 'Version|Status'
+ls -l /usr/lib/nginx/modules/ngx_rtmp_module.so
+
+# Find the crash in the system/kernel log (or journalctl -u bluestream-nginx
+# / journalctl -u nginx, whichever unit owns it on your install)
+journalctl -k --since "-1 hour" | grep -i segfault
+journalctl -u bluestream-nginx.service --since "-1 hour" | grep -iE 'signal|segfault|core'
+
+# If a core dump is available (coredumpctl list / ulimit -c), resolve the
+# crash offset against the EXACT module file on disk:
+addr2line -Cfipe /usr/lib/nginx/modules/ngx_rtmp_module.so <offset>
+objdump -dC /usr/lib/nginx/modules/ngx_rtmp_module.so | grep -B20 -A30 '<offset>:'
+
+# Build a controlled reproduction: toggle HLS off entirely, then vary
+# hls_fragment, then vary viewer connect/disconnect churn, one variable at
+# a time, to see whether the crash interval actually tracks the fragment
+# interval or is coincidental.
+```
+
+If you can reproduce it reliably, please attach the `addr2line` output and
+the exact `nginx -V` / `libnginx-mod-rtmp` version to a bug report - that is
+the evidence needed to either patch BlueStream's generated config around
+the trigger or document a hard upstream limitation of `ngx_rtmp_module`.
+
 ## Health states at a glance
 
 | State | Meaning |
