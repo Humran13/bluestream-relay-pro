@@ -2368,6 +2368,33 @@ class UniversalInstallCompatStaticTests(unittest.TestCase):
         docs = repo_text("docs/installation.md")
         self.assertIn("CloudPanel", docs)
 
+    def test_18_uninstall_nginx_reload_gated_to_owned_mode(self):
+        # Regression: the uninstaller used to unconditionally run
+        # `systemctl reload nginx` (and remove owned-mode-only files) even
+        # on an isolated-mode install, where BlueStream never touched the
+        # system/panel nginx in the first place. Both must now be gated
+        # behind the owned-mode check.
+        u = repo_text("uninstall.sh")
+        gate_idx = u.index('if [ "${BLUESTREAM_NGINX_STRATEGY:-owned}" = "owned" ]')
+        reload_idx = u.index("systemctl reload nginx")
+        rm_site_idx = u.index("rm -f /etc/nginx/sites-available/bluestream")
+        self.assertLess(gate_idx, rm_site_idx)
+        self.assertLess(gate_idx, reload_idx)
+
+    def test_19_web_ctl_snapshot_nginx_status_is_strategy_aware(self):
+        # Regression: web-ctl's snapshot operation (feeds the GUI dashboard's
+        # "Nginx" health field) used to hard-code `systemctl is-active
+        # nginx`, which checks the PANEL's nginx in isolated mode instead of
+        # BlueStream's own bluestream-nginx.service - the exact field meant
+        # to show "is BlueStream's streaming engine up". It must go through
+        # the shared, already strategy-aware nginx_running()/nginx_status()
+        # helpers (lib/nginx.sh), which it can only do once lib/nginx.sh is
+        # actually loaded.
+        wc = repo_text("web-ctl")
+        self.assertIn("for _bs_lib in common health probe nginx relay", wc)
+        self.assertNotIn("systemctl is-active nginx", wc)
+        self.assertIn("nginx_running", wc)
+
 
 class EnvDetectClassificationTests(unittest.TestCase):
     """Real-bash-execution tests for bs_env_classify's decision table (the

@@ -186,7 +186,7 @@ fi
 # business logic (version, config parsing, discovery, service state, health)
 # stays in these libraries; Python is used only for JSON serialization.
 # ---------------------------------------------------------------------------
-for _bs_lib in common health probe relay playlist media destinations schedule publisher; do
+for _bs_lib in common health probe nginx relay playlist media destinations schedule publisher; do
     # shellcheck source=lib/common.sh
     . "$BS_ROOT/lib/$_bs_lib.sh" || {
         printf '%s\n' '{"ok": false, "error": "failed to load a BlueStream library", "code": "LIB_LOAD_FAILED"}'
@@ -240,8 +240,14 @@ wc_op_snapshot() {
     uptime_str="$(uptime -p 2>/dev/null || uptime 2>/dev/null || printf 'unknown')"
     domain="${BLUESTREAM_DOMAIN:-}"
     if [ "${BLUESTREAM_SSL_ENABLED:-no}" = "yes" ]; then https_conf="yes"; else https_conf="no"; fi
+    # Strategy-aware: in isolated mode this checks BlueStream's OWN
+    # bluestream-nginx.service, never the panel/system nginx it never
+    # touches - see lib/nginx.sh nginx_status(). Using the raw unit name
+    # here would report on the wrong process once a control panel is
+    # present (the exact gap that left the GUI unable to show a correct
+    # "Streaming Engine Offline" state after the panel-isolation work).
     nginx_active="no"
-    if [ "$(systemctl is-active nginx 2>/dev/null)" = "active" ]; then nginx_active="yes"; fi
+    if nginx_running; then nginx_active="yes"; fi
     ffmpeg_ok="no";  command -v ffmpeg  >/dev/null 2>&1 && ffmpeg_ok="yes"
     ffprobe_ok="no"; command -v ffprobe >/dev/null 2>&1 && ffprobe_ok="yes"
     # GUI-7A: yt-dlp is required only for TYPE=youtube (public YouTube Live)
