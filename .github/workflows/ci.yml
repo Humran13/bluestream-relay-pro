@@ -72,10 +72,11 @@ jobs:
         run: |
           # apt mirror downloads can stall indefinitely on hosted runners:
           # bound each apt request and retry the whole install a few times.
-          printf 'Acquire::Retries "3";
-Acquire::http::Timeout "30";
-Acquire::https::Timeout "30";
-' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
+          {
+            echo 'Acquire::Retries "3";'
+            echo 'Acquire::http::Timeout "30";'
+            echo 'Acquire::https::Timeout "30";'
+          } | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
           npm ci
           for attempt in 1 2 3; do
             if timeout 240 npx playwright install --with-deps chromium firefox webkit; then
