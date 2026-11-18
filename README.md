@@ -355,11 +355,14 @@ Available pages:
   quick actions.
 - **Streams** — list relays, start/stop/restart, **create a stream** from a
   source URL (HLS, HTTP media, RTMP/RTMPS, RTSP, or a public YouTube/webpage
-  URL resolved via yt-dlp), edit its source, and attach destinations.
+  URL resolved via yt-dlp), edit its source, and attach destinations. Local
+  video rows clearly show whether **24/7 Mode** is on and provide an editor.
 - **Media Library** — list managed media, **upload** a video file, and create a
   local-file stream from it. Uploads are staged in a narrow web-writable
   directory, probed with ffprobe, and imported by the root bridge — a file is
   never overwritten and the staged copy is removed after every import attempt.
+  New local-video streams default to **24/7 Continuous Streaming**, but remain
+  stopped until the operator explicitly presses **Start**.
 - **Playlists** — create/list playlists, control them (start/stop/restart),
   schedule a one-time future start, and attach destinations.
 - **Destinations** — create/enable/disable/delete outbound streaming

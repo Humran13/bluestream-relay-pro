@@ -170,4 +170,11 @@ else
     RELAY_FINITE_OK=0
 fi
 
-bs_supervise_run relay "$RELAY_NAME" "$RELAY_FINITE_OK" "$RELAY_RESTART_SEC" _relay_build_for_supervisor
+# Only explicit 24/7 local-video mode receives indefinite in-process recovery.
+# All unrelated source types retain the existing bounded retry policy.
+RELAY_RETRY_FOREVER=0
+if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
+    RELAY_RETRY_FOREVER=1
+fi
+
+bs_supervise_run relay "$RELAY_NAME" "$RELAY_FINITE_OK" "$RELAY_RESTART_SEC" _relay_build_for_supervisor "$RELAY_RETRY_FOREVER"

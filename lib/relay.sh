@@ -127,13 +127,14 @@ relay_exists() {
 # starts it from the console. Shares the exact config model/save path as the
 # CLI. Returns 0 on success.
 relay_create() {
-    local name="$1" type="$2" url="$3"
+    local name="$1" type="$2" url="$3" loop="${4:-no}"
     bs_require_root
     bs_valid_name "$name" || return 1
     bs_valid_type "$type" || return 1
     relay_exists "$name" && return 1
     RELAY_NAME="$name"; RELAY_TYPE="$type"; RELAY_URL="$url"
-    RELAY_LOOP="no"; RELAY_RESTART_SEC="5"
+    case "$loop" in yes|no) ;; *) return 1 ;; esac
+    RELAY_LOOP="$loop"; RELAY_RESTART_SEC="5"
     RELAY_ENABLED="no"; RELAY_NOTE="created via web console"
     RELAY_CREATED="$(bs_now_ts)"
     RELAY_DESTINATIONS=""
@@ -143,6 +144,40 @@ relay_create() {
     # green success to the caller (and therefore to the browser).
     mkdir -p "$BLUESTREAM_RELAY_CONF_DIR" 2>/dev/null || return 1
     relay_save_config "$name" || return 1
+    return 0
+}
+
+# Change the explicit 24/7 mode of a STOPPED local-video relay while
+# preserving its name, source, destinations, HLS URL and every other setting.
+# LOOP is the on-disk compatibility field used by all existing releases, so
+# no migration or silent reinterpretation of existing configs is required.
+# Enabling 24/7 here does not start or enable the unit: boot persistence is
+# applied by the user's next explicit Start. Disabling it immediately removes
+# any prior boot enablement so a one-time video cannot return after reboot.
+#   0 ok | 1 invalid name | 2 not found | 3 not definitively stopped |
+#   4 not local-file | 5 invalid mode | 6 persistence/config update failed
+relay_set_continuous() {
+    local name="$1" continuous="${2:-}" unit was_enabled
+    bs_require_root
+    bs_valid_name "$name" || return 1
+    relay_load_config "$name" || return 2
+    bs_unit_definitively_stopped "$(bs_unit relay "$name")" || return 3
+    [ "$RELAY_TYPE" = "local-file" ] || return 4
+    case "$continuous" in yes|no) ;; *) return 5 ;; esac
+
+    unit="$(bs_unit relay "$name")"
+    was_enabled="$RELAY_ENABLED"
+    RELAY_LOOP="$continuous"
+    if [ "$continuous" = "no" ]; then
+        systemctl disable "$unit" 2>/dev/null || return 6
+        RELAY_ENABLED="no"
+    fi
+    if ! relay_save_config "$name"; then
+        if [ "$continuous" = "no" ] && [ "$was_enabled" = "yes" ]; then
+            systemctl enable "$unit" 2>/dev/null || true
+        fi
+        return 6
+    fi
     return 0
 }
 
@@ -336,12 +371,26 @@ relay_sync_dropin() {
 # systemd lifecycle
 # ---------------------------------------------------------------------------
 relay_start() {
-    local name="$1"
+    local name="$1" unit was_enabled
     bs_require_root
     relay_load_config "$name" || bs_die "Relay '$name' not found"
     relay_config_validate || bs_die "Relay '$name' failed configuration validation"
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
+    unit="$(bs_unit relay "$name")"
+    # 24/7 local video becomes boot-persistent only after this explicit Start.
+    # systemctl stop remains respected: an enabled unit is not restarted merely
+    # because an operator stopped it; it starts again only on a later Start or
+    # on the next boot.
+    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
+        was_enabled="$RELAY_ENABLED"
+        systemctl enable "$unit" 2>/dev/null || bs_die "Failed to enable relay '$name' at boot"
+        RELAY_ENABLED="yes"
+        if ! relay_save_config "$name"; then
+            [ "$was_enabled" = "yes" ] || systemctl disable "$unit" 2>/dev/null || true
+            bs_die "Failed to persist boot configuration for relay '$name'"
+        fi
+    fi
     # A fresh start clears any stale start-failure diagnostic from an earlier
     # attempt; run-relay.sh re-writes it only if resolution fails again. Also
     # clear the supervisor status file (see lib/supervise.sh) so the
@@ -353,7 +402,7 @@ relay_start() {
     if command -v bs_supervise_clear_status >/dev/null 2>&1; then
         bs_supervise_clear_status relay "$name"
     fi
-    systemctl start "$(bs_unit relay "$name")" || bs_die "Failed to start relay '$name'"
+    systemctl start "$unit" || bs_die "Failed to start relay '$name'"
     bs_ok "Relay '$name' started"
 }
 
@@ -379,17 +428,27 @@ relay_stop() {
 }
 
 relay_restart() {
-    local name="$1"
+    local name="$1" unit was_enabled
     bs_require_root
     relay_load_config "$name" || bs_die "Relay '$name' not found"
     relay_config_validate || bs_die "Relay '$name' failed configuration validation"
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
+    unit="$(bs_unit relay "$name")"
+    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
+        was_enabled="$RELAY_ENABLED"
+        systemctl enable "$unit" 2>/dev/null || bs_die "Failed to enable relay '$name' at boot"
+        RELAY_ENABLED="yes"
+        if ! relay_save_config "$name"; then
+            [ "$was_enabled" = "yes" ] || systemctl disable "$unit" 2>/dev/null || true
+            bs_die "Failed to persist boot configuration for relay '$name'"
+        fi
+    fi
     rm -f "$BLUESTREAM_RUN_DIR/$name.resolve-fail" 2>/dev/null || true
     if command -v bs_supervise_clear_status >/dev/null 2>&1; then
         bs_supervise_clear_status relay "$name"
     fi
-    systemctl restart "$(bs_unit relay "$name")" || bs_die "Failed to restart relay '$name'"
+    systemctl restart "$unit" || bs_die "Failed to restart relay '$name'"
     bs_ok "Relay '$name' restarted"
 }
 

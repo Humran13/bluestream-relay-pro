@@ -76,6 +76,7 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "playlist_restart",
         "relay_create_url",
         "relay_create_media",
+        "relay_set_continuous",
         "media_import_staged",
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
@@ -567,14 +568,25 @@ class EngineClient:
                 )
             return [name, url]
         if operation == "relay_create_media":
-            if len(values) != 2:
+            if len(values) != 3:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
-            name, media = values
+            name, media, continuous = values
             if not valid_target_name(name):
                 raise EngineError("invalid stream name", code="INVALID_NAME")
             if not valid_media_name(media):
                 raise EngineError("invalid media name", code="INVALID_MEDIA")
-            return [name, media]
+            if continuous not in ("yes", "no"):
+                raise EngineError("invalid 24/7 mode", code="INVALID_CONTINUOUS")
+            return [name, media, continuous]
+        if operation == "relay_set_continuous":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, continuous = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if continuous not in ("yes", "no"):
+                raise EngineError("invalid 24/7 mode", code="INVALID_CONTINUOUS")
+            return [name, continuous]
         if operation == "playlist_create":
             # Fixed argv: name + 2..MAX_PLAYLIST_ITEMS unique, strictly-valid
             # media basenames.  Anything malformed raises BEFORE a subprocess
@@ -769,8 +781,12 @@ class EngineClient:
         """Cancel a playlist's one-time start schedule (idempotent)."""
         return self._mutation("playlist_schedule_clear", name)
 
-    def relay_create_media(self, name: str, media: str):
-        return self._mutation("relay_create_media", name, media)
+    def relay_create_media(self, name: str, media: str, continuous: str = "yes"):
+        return self._mutation("relay_create_media", name, media, continuous)
+
+    def relay_set_continuous(self, name: str, continuous: str):
+        """Set explicit 24/7 mode on a stopped local-video stream."""
+        return self._mutation("relay_set_continuous", name, continuous)
 
     def media_import_staged(self, staging: str):
         return self._mutation("media_import_staged", staging)

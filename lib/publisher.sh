@@ -223,9 +223,20 @@ publisher_dump_ffmpeg_args() {
 # that was not already validated (kind/name pass through bs_unit/bs_valid_name).
 publisher_sync_dropin() {
     local kind="$1" name="$2" destid="$3"
-    local unit source_unit dropin tmp
+    local unit source_unit dropin tmp continuous_source="no"
     unit="$(publisher_unit "$kind" "$name" "$destid")"
     source_unit="$(bs_unit "$kind" "$name")"
+    # A 24/7 local-video source is itself supervised forever. Its destination
+    # worker must also remain eligible to restart throughout a source gap;
+    # otherwise systemd's default start limit could permanently strand a
+    # YouTube/RTMP publisher before the source returns. Scope this override to
+    # that mode only so unrelated relay and playlist behavior is unchanged.
+    if [ "$kind" = "relay" ] \
+        && relay_load_config "$name" 2>/dev/null \
+        && [ "$RELAY_TYPE" = "local-file" ] \
+        && [ "$RELAY_LOOP" = "yes" ]; then
+        continuous_source="yes"
+    fi
     dropin="/etc/systemd/system/$unit.d"
     mkdir -p "$dropin" 2>/dev/null || return 1
     tmp="$dropin/.override.conf.tmp.$$"
@@ -234,8 +245,10 @@ publisher_sync_dropin() {
         printf '[Unit]\n'
         printf 'BindsTo=%s\n' "$source_unit"
         printf 'After=%s\n' "$source_unit"
+        [ "$continuous_source" = "yes" ] && printf 'StartLimitIntervalSec=0\n'
         printf '[Service]\n'
         printf 'RestartSec=%s\n' "$BLUESTREAM_PUBLISHER_RESTART_SEC"
+        [ "$continuous_source" = "yes" ] && printf 'Restart=always\n'
     } > "$tmp"; then
         rm -f "$tmp"
         return 1

@@ -119,6 +119,9 @@ bs_supervise_clear_status() {
 #                 a stale URL). Must set the global FFMPEG_ARGS array and
 #                 return 0, or return non-zero if the source could not be
 #                 prepared (e.g. resolver failure) - treated as fatal.
+#   $6 retry_forever 1 only for explicit 24/7 local-video mode. Unexpected
+#                 FFmpeg endings are retried forever with capped backoff;
+#                 every other source retains the existing bounded policy.
 #
 # Traps SIGTERM/SIGINT (what `systemctl stop` sends) to distinguish a
 # DELIBERATE stop from FFmpeg exiting on its own: a deliberate stop forwards
@@ -128,13 +131,14 @@ bs_supervise_clear_status() {
 # inferred from FFmpeg's exit code, which is 0 on both a clean stop and a
 # clean unexpected live-source EOF.
 bs_supervise_run() {
-    local kind="$1" name="$2" finite_ok="$3" base_delay="$4" build_fn="$5"
+    local kind="$1" name="$2" finite_ok="$3" base_delay="$4" build_fn="$5" retry_forever="${6:-0}"
     local attempt=0 stop_requested=0 current_child="" start_ts now ran_for ec delay
 
     case "$base_delay" in
         ''|*[!0-9]*) base_delay=5 ;;
     esac
     [ "$base_delay" -ge 1 ] 2>/dev/null || base_delay=5
+    case "$retry_forever" in 0|1) ;; *) retry_forever=0 ;; esac
 
     _bs_supervise_on_signal() {
         stop_requested=1
@@ -209,13 +213,23 @@ bs_supervise_run() {
             attempt=0
         fi
         attempt=$(( attempt + 1 ))
-        if [ "$attempt" -gt "$BS_SUPERVISE_MAX_ATTEMPTS" ]; then
+        if [ "$attempt" -gt "$BS_SUPERVISE_MAX_ATTEMPTS" ] && [ "$retry_forever" != "1" ]; then
             bs_supervise_write_status "$kind" "$name" FAILED "exceeded $BS_SUPERVISE_MAX_ATTEMPTS reconnection attempts (last ffmpeg exit=$ec)" "$ec" "$attempt"
             exit 1
         fi
-        delay=$(( base_delay * (1 << (attempt - 1)) ))
+        # Avoid an unbounded bit shift in retry-forever mode. Once the normal
+        # attempt ceiling is reached, stay at the capped delay indefinitely.
+        if [ "$attempt" -gt "$BS_SUPERVISE_MAX_ATTEMPTS" ]; then
+            delay="$BS_SUPERVISE_DELAY_CAP"
+        else
+            delay=$(( base_delay * (1 << (attempt - 1)) ))
+        fi
         [ "$delay" -gt "$BS_SUPERVISE_DELAY_CAP" ] && delay="$BS_SUPERVISE_DELAY_CAP"
-        bs_supervise_write_status "$kind" "$name" RECONNECTING "unexpected end (ffmpeg exit=$ec after ${ran_for}s); reconnecting in ${delay}s (attempt $attempt/$BS_SUPERVISE_MAX_ATTEMPTS)" "$ec" "$attempt"
+        if [ "$retry_forever" = "1" ]; then
+            bs_supervise_write_status "$kind" "$name" RECONNECTING "unexpected end (ffmpeg exit=$ec after ${ran_for}s); 24/7 recovery in ${delay}s (attempt $attempt)" "$ec" "$attempt"
+        else
+            bs_supervise_write_status "$kind" "$name" RECONNECTING "unexpected end (ffmpeg exit=$ec after ${ran_for}s); reconnecting in ${delay}s (attempt $attempt/$BS_SUPERVISE_MAX_ATTEMPTS)" "$ec" "$attempt"
+        fi
         sleep "$delay" &
         current_child=$!
         wait "$current_child"
