@@ -5,6 +5,22 @@ All notable changes to BlueStream Relay Pro are documented in this file.
 The format is based on Keep a Changelog and this project adheres to
 Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Added a backend-enforced **24/7 Continuous Streaming** mode for uploaded
+  local videos. New local-video streams default to the mode but remain stopped
+  until Start is pressed; Start applies loop, indefinite crash recovery and
+  reboot persistence.
+- Added stopped-only editing and clear Streams-page status for existing local
+  videos. Disabling the mode intentionally restores one-time playback and
+  removes boot persistence without changing names, media, destinations, keys
+  or HLS URLs.
+- Kept attached destination publishers restartable for the lifetime of a 24/7
+  local-video source, including recovery gaps, while preserving explicit Stop
+  semantics and leaving unrelated source types unchanged.
+
 ## [0.1.0] - 2026-08-28
 
 Foundation release.

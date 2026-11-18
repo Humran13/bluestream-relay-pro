@@ -48,6 +48,30 @@ Supported `relay add` options:
 - `--start` — start immediately
 - `--enable` — enable at boot
 
+## Local video: 24/7 or one-time playback
+
+The web console exposes an explicit **24/7 Continuous Streaming** checkbox
+when a stream is created from uploaded media. It is on by default. Creation
+never starts the stream: press **Start** when ready.
+
+With 24/7 mode on, Start:
+
+- passes `-stream_loop -1` to FFmpeg, so the media repeats indefinitely;
+- keeps the stable HLS output and attached YouTube/RTMP destinations active;
+- retries unexpected FFmpeg endings indefinitely with capped backoff; and
+- enables the relay's systemd unit so it starts after a VPS reboot.
+
+An explicit **Stop** is never treated as a crash and does not cause an
+immediate restart. Stop also removes boot persistence, so a stream you stopped
+stays stopped after a VPS reboot until you press **Start** again. **Restart** reapplies the same 24/7 and boot-persistence rules.
+
+Clear 24/7 mode to play the file exactly once. A clean end is recorded as
+`COMPLETED`, and disabling 24/7 also removes boot persistence. Existing streams
+are not migrated or changed automatically: on **Streams**, open **Edit 24/7**
+for a stopped local-video stream (for example `dino`), enable the option, save,
+then press **Start**. Names, media, destination attachments and public HLS URLs
+are preserved.
+
 ## Probing and compatibility
 
 BlueStream uses `ffprobe` before configuring a source. The probe report

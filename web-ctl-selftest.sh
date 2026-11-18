@@ -379,11 +379,17 @@ fi
 
 if [ -n "$PY" ]; then
     _ok=1
-    _out="$(bash web-ctl relay_create_media goodname '../evil.mp4' 2>/dev/null)"; _rc=$?
+    _out="$(bash web-ctl relay_create_media goodname '../evil.mp4' yes 2>/dev/null)"; _rc=$?
     if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_MEDIA"'; then :; else _ok=0; fi
     unset _out _rc
-    _out="$(bash web-ctl relay_create_media --help 'a.mp4' 2>/dev/null)"; _rc=$?
+    _out="$(bash web-ctl relay_create_media --help 'a.mp4' yes 2>/dev/null)"; _rc=$?
     if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_NAME"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_media goodname 'a.mp4' maybe 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "INVALID_CONTINUOUS"'; then :; else _ok=0; fi
+    unset _out _rc
+    _out="$(bash web-ctl relay_create_media goodname 'a.mp4' 2>/dev/null)"; _rc=$?
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | assert_json 'assert d["ok"] is False and d["code"] == "MISSING_ARGUMENT"'; then :; else _ok=0; fi
     unset _out _rc
     if [ "$_ok" -eq 1 ]; then
         check "create bridge: relay_create_media invalid media/name rejected" 0

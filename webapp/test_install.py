@@ -529,6 +529,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "relay_start", "relay_stop", "relay_restart",
                     "playlist_start", "playlist_stop", "playlist_restart",
                     "relay_create_url", "relay_create_media", "media_import_staged",
+                    "relay_set_continuous",
                     # GUI-1D.1: fixed-argv playlist creation
                     "playlist_create",
                     # GUI-3A: manual playlist-cache cleanup (no arguments)
@@ -578,6 +579,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             "relay_start", "relay_stop", "relay_restart",
             "playlist_start", "playlist_stop", "playlist_restart",
             "relay_create_url", "relay_create_media", "media_import_staged",
+            "relay_set_continuous",
             "playlist_create", "playlist_cache_clear_unused",
             "destination_list", "destination_create",
             "destination_enable", "destination_disable", "destination_delete",
@@ -1569,18 +1571,101 @@ export PATH="$tmp/bin:$PATH"
     def test_03_relay_create_media_local_file(self):
         out = self._run(
             "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/promo.mp4\"\n"
-            "relay_create promo-loop local-file \"$BLUESTREAM_MEDIA_DIR/promo.mp4\"\n"
+            "relay_create promo-loop local-file \"$BLUESTREAM_MEDIA_DIR/promo.mp4\" yes\n"
             "echo CREATE_RC=$?\n"
             "relay_load_config promo-loop\n"
-            "echo \"TYPE=$RELAY_TYPE URL=$(basename \"$RELAY_URL\") ENABLED=$RELAY_ENABLED\"\n"
+            "echo \"TYPE=$RELAY_TYPE URL=$(basename \"$RELAY_URL\") LOOP=$RELAY_LOOP ENABLED=$RELAY_ENABLED\"\n"
         )
         self.assertEqual(
             out,
             [
                 "CREATE_RC=0",
-                "TYPE=local-file URL=promo.mp4 ENABLED=no",
+                "TYPE=local-file URL=promo.mp4 LOOP=yes ENABLED=no",
             ],
         )
+
+    def test_20_existing_streams_keep_their_mode_and_other_fields(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/dino.mp4\"\n"
+            "relay_create dino local-file \"$BLUESTREAM_MEDIA_DIR/dino.mp4\" no\n"
+            "relay_load_config dino\n"
+            "RELAY_DESTINATIONS=youtube-main\n"
+            "RELAY_NOTE=preserve-me\n"
+            "relay_save_config dino\n"
+            "relay_load_config dino\n"
+            "echo BEFORE=$RELAY_LOOP,$RELAY_ENABLED,$RELAY_DESTINATIONS,$RELAY_NOTE\n"
+            "systemctl() { return 0; }\n"
+            "bs_unit_definitively_stopped() { return 0; }\n"
+            "relay_set_continuous dino yes\n"
+            "echo SET_RC=$?\n"
+            "relay_load_config dino\n"
+            "echo AFTER=$RELAY_LOOP,$RELAY_ENABLED,$RELAY_DESTINATIONS,$RELAY_NOTE\n"
+        )
+        self.assertEqual(out, [
+            "BEFORE=no,no,youtube-main,preserve-me",
+            "SET_RC=0",
+            "AFTER=yes,no,youtube-main,preserve-me",
+        ])
+
+    def test_21_start_applies_boot_persistence_only_to_24x7_local_video(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/always.mp4\"\n"
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/once.mp4\"\n"
+            "relay_create always local-file \"$BLUESTREAM_MEDIA_DIR/always.mp4\" yes\n"
+            "relay_create once local-file \"$BLUESTREAM_MEDIA_DIR/once.mp4\" no\n"
+            "systemctl() { printf 'SYSTEMCTL:%s\\n' \"$*\"; return 0; }\n"
+            "bs_ensure_hls_dir() { return 0; }\n"
+            "relay_sync_dropin() { return 0; }\n"
+            "bs_supervise_clear_status() { return 0; }\n"
+            "relay_start always\n"
+            "relay_start once\n"
+            "relay_load_config always; echo ALWAYS=$RELAY_LOOP,$RELAY_ENABLED\n"
+            "relay_load_config once; echo ONCE=$RELAY_LOOP,$RELAY_ENABLED\n"
+        )
+        self.assertIn("SYSTEMCTL:enable bluestream-relay@always.service", out)
+        self.assertIn("SYSTEMCTL:start bluestream-relay@always.service", out)
+        self.assertIn("SYSTEMCTL:start bluestream-relay@once.service", out)
+        self.assertNotIn("SYSTEMCTL:enable bluestream-relay@once.service", out)
+        self.assertIn("ALWAYS=yes,yes", out)
+        self.assertIn("ONCE=no,no", out)
+
+    def test_22_disabling_24x7_removes_boot_persistence_without_starting(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/dino.mp4\"\n"
+            "relay_create dino local-file \"$BLUESTREAM_MEDIA_DIR/dino.mp4\" yes\n"
+            "relay_load_config dino; RELAY_ENABLED=yes; relay_save_config dino\n"
+            "systemctl() { printf 'SYSTEMCTL:%s\\n' \"$*\"; return 0; }\n"
+            "bs_unit_definitively_stopped() { return 0; }\n"
+            "relay_set_continuous dino no\n"
+            "echo SET_RC=$?\n"
+            "relay_load_config dino; echo MODE=$RELAY_LOOP ENABLED=$RELAY_ENABLED\n"
+        )
+        self.assertEqual(out, [
+            "SYSTEMCTL:disable bluestream-relay@dino.service",
+            "SET_RC=0",
+            "MODE=no ENABLED=no",
+        ])
+
+    def test_23_restart_reapplies_boot_persistence_and_stop_is_authoritative(self):
+        out = self._run(
+            "printf 'dummy' > \"$BLUESTREAM_MEDIA_DIR/dino.mp4\"\n"
+            "relay_create dino local-file \"$BLUESTREAM_MEDIA_DIR/dino.mp4\" yes\n"
+            "systemctl() { printf 'SYSTEMCTL:%s\\n' \"$*\"; return 0; }\n"
+            "bs_ensure_hls_dir() { return 0; }\n"
+            "relay_sync_dropin() { return 0; }\n"
+            "bs_supervise_clear_status() { return 0; }\n"
+            "relay_restart dino\n"
+            "relay_stop dino\n"
+            "relay_load_config dino; echo MODE=$RELAY_LOOP ENABLED=$RELAY_ENABLED\n"
+        )
+        self.assertIn("SYSTEMCTL:enable bluestream-relay@dino.service", out)
+        self.assertIn("SYSTEMCTL:restart bluestream-relay@dino.service", out)
+        self.assertIn("SYSTEMCTL:stop bluestream-relay@dino.service", out)
+        self.assertNotIn("SYSTEMCTL:start bluestream-relay@dino.service", out)
+        # Stop withdraws boot persistence: no resume after a VPS reboot.
+        self.assertIn("SYSTEMCTL:disable bluestream-relay@dino.service", out)
+        self.assertIn("MODE=yes ENABLED=no", out)
+
 
     def test_04_media_import_staged_imports_and_cleans(self):
         out = self._run(
@@ -1861,6 +1946,34 @@ export PATH="$tmp/bin:$PATH"
             "echo TMP_COUNT=$(ls -1 \"$BLUESTREAM_RELAY_CONF_DIR\" 2>/dev/null | wc -l)\n"
         )
         self.assertEqual(out, ["SAVE_RC=1", "CONF=no", "TMP_COUNT=0"])
+
+
+class ContinuousPublisherRecoveryTests(unittest.TestCase):
+    """Destination continuity and reboot wiring for 24/7 local video."""
+
+    def test_youtube_publisher_retries_for_full_24x7_source_lifetime(self):
+        publisher = repo_text("lib/publisher.sh")
+        self.assertIn('[ "$RELAY_TYPE" = "local-file" ]', publisher)
+        self.assertIn('[ "$RELAY_LOOP" = "yes" ]', publisher)
+        self.assertIn("StartLimitIntervalSec=0", publisher)
+        self.assertIn("Restart=always", publisher)
+        self.assertIn("BindsTo=%s", publisher)
+
+    def test_destination_sync_runs_on_every_service_start_and_reboot(self):
+        wrapper = repo_text("config/systemd/run-relay.sh")
+        unit = repo_text("config/systemd/bluestream-relay@.service")
+        self.assertIn("publisher_sync_target relay \"$NAME\"", wrapper)
+        self.assertIn("WantedBy=multi-user.target", unit)
+        self.assertIn("Restart=on-failure", unit)
+
+    def test_unrelated_sources_do_not_receive_infinite_publisher_override(self):
+        publisher = repo_text("lib/publisher.sh")
+        function = publisher.index("publisher_sync_dropin()")
+        condition = publisher.index('if [ "$kind" = "relay" ]', function)
+        override = publisher.index("StartLimitIntervalSec=0", condition)
+        between = publisher[condition:override]
+        self.assertIn('RELAY_TYPE" = "local-file', between)
+        self.assertIn('RELAY_LOOP" = "yes', between)
 
 
 class Gui1dPlaylistEngineTests(unittest.TestCase):
@@ -2830,6 +2943,8 @@ exit_code="$6"
 sleep_s="${7:-0}"
 kind="${8:-relay}"
 build_sleep="${9:-0}"
+retry_forever="${10:-0}"
+build_fail_after="${11:-0}"
 
 mkdir -p "$bindir"
 cat > "$bindir/ffmpeg" <<FAKE
@@ -2861,18 +2976,24 @@ BS_SUPERVISE_DELAY_CAP=1
 
 _fake_build() {
     local app="bluestream-relay"
+    BUILD_COUNT=$(( ${BUILD_COUNT:-0} + 1 ))
+    if [ "$build_fail_after" -gt 0 ] && [ "$BUILD_COUNT" -ge "$build_fail_after" ]; then
+        printf 'REACHED_BUILD=%s\n' "$BUILD_COUNT" > "$rundir/build-marker"
+        return 1
+    fi
     /usr/bin/sleep "$build_sleep"
     [ "$kind" = "playlist" ] && app="bluestream-playlist"
     FFMPEG_ARGS=( -nostdin -y -loglevel warning -re -i /dev/null -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -f flv "rtmp://127.0.0.1:1935/$app/testx" )
     return 0
 }
 
-bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
+bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build "$retry_forever"
 """
 
     def _run(
         self, mode, base_delay, exit_code, sleep_s=0, kill_after=None,
-        timeout=25, kind="relay", build_sleep=0,
+        timeout=25, kind="relay", build_sleep=0, retry_forever=0,
+        build_fail_after=0,
     ):
         import os
         import signal
@@ -2895,7 +3016,8 @@ bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
                 [
                     bash, str(harness), str(REPO_ROOT), str(rundir), str(bindir),
                     str(mode), str(base_delay), str(exit_code), str(sleep_s),
-                    kind, str(build_sleep),
+                    kind, str(build_sleep), str(retry_forever),
+                    str(build_fail_after),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2945,6 +3067,11 @@ bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
                     alive.append(pid)
                 status["_LIVE_FFMPEG_PIDS"] = alive
             status["_ELAPSED"] = time.monotonic() - started
+            marker = rundir / "build-marker"
+            status["_BUILD_MARKER"] = (
+                marker.read_text(encoding="utf-8").strip()
+                if marker.exists() else ""
+            )
             return proc.returncode, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
     def test_01_finite_ok_clean_exit_completes_no_retry(self):
@@ -3074,6 +3201,25 @@ bs_supervise_run "$kind" testx "$mode" "$base_delay" _fake_build
         self.assertEqual(rc, 0, err)
         self.assertEqual(status.get("STATE"), "STOPPED")
         self.assertEqual(status["_FFMPEG_PIDS"], [])
+
+    def test_11_24x7_local_video_retries_beyond_normal_ceiling_after_clean_endings(self):
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=0, retry_forever=1,
+            build_fail_after=4,
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        self.assertEqual(status["_BUILD_MARKER"], "REACHED_BUILD=4")
+        self.assertIn("could not prepare the source", status.get("DETAIL", ""))
+
+    def test_12_24x7_local_video_retries_beyond_normal_ceiling_after_crashes(self):
+        rc, status, _out, err = self._run(
+            mode=0, base_delay=1, exit_code=17, retry_forever=1,
+            build_fail_after=4,
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(len(status["_FFMPEG_PIDS"]), 3)
+        self.assertEqual(status["_BUILD_MARKER"], "REACHED_BUILD=4")
 
 
 if __name__ == "__main__":

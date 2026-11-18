@@ -834,6 +834,8 @@ _NAV_SECTIONS = {
     "console.relay_delete_post": "streams",
     "console.relay_edit_source": "streams",
     "console.relay_edit_source_post": "streams",
+    "console.relay_continuous": "streams",
+    "console.relay_continuous_post": "streams",
     "console.media": "media",
     "console.media_upload": "media",
     "console.media_upload_post": "media",
@@ -1418,7 +1420,8 @@ def _register_console_routes(app: Flask) -> None:
             return redirect(url_for("console.media_create_stream", name=name))
         engine = current_app.extensions["bluestream_engine"]
         try:
-            engine.relay_create_media(stream_name, name)
+            continuous = "yes" if request.form.get("continuous") == "on" else "no"
+            engine.relay_create_media(stream_name, name, continuous)
         except EngineError as exc:
             current_app.logger.warning("relay_create_media '%s' failed: %s", stream_name, exc)
             if exc.code == "ALREADY_EXISTS":
@@ -2051,6 +2054,51 @@ def _register_console_routes(app: Flask) -> None:
             if isinstance(relay, dict) and relay.get("name") == name:
                 return relay, False
         return None, False
+
+    @console.route("/streams/<name>/continuous", methods=["GET"])
+    def relay_continuous(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That stream name is not valid.", "error")
+            return redirect(url_for("console.streams"))
+        relay, unavailable = _find_relay(name)
+        if unavailable or relay is None:
+            flash("That stream is unavailable.", "error")
+            return redirect(url_for("console.streams"))
+        if relay.get("type") != "local-file":
+            flash("24/7 mode is available only for local video streams.", "error")
+            return redirect(url_for("console.streams"))
+        return render_template(
+            "streams_continuous.html",
+            relay=relay,
+            running=(relay.get("active") == "yes"),
+        )
+
+    @console.route("/streams/<name>/continuous", methods=["POST"])
+    def relay_continuous_post(name):
+        if not session.get("authenticated"):
+            return redirect(url_for("console.login"))
+        if not valid_target_name(name):
+            flash("That stream name is not valid.", "error")
+            return redirect(url_for("console.streams"))
+        continuous = "yes" if request.form.get("continuous") == "on" else "no"
+        engine = current_app.extensions["bluestream_engine"]
+        try:
+            engine.relay_set_continuous(name, continuous)
+        except EngineError as exc:
+            messages = {
+                "NOT_STOPPED": "Stop the stream before changing its 24/7 mode.",
+                "NOT_LOCAL_VIDEO": "24/7 mode is available only for local video streams.",
+                "NOT_FOUND": "That stream no longer exists.",
+            }
+            flash(messages.get(exc.code or "", "The 24/7 setting could not be updated."), "error")
+            return redirect(url_for("console.relay_continuous", name=name))
+        if continuous == "yes":
+            flash("24/7 mode enabled for '%s'. Press Start to stream now and enable reboot recovery." % name, "success")
+        else:
+            flash("24/7 mode disabled for '%s'. The next Start will play the video once." % name, "success")
+        return redirect(url_for("console.streams"))
 
     @console.route("/streams/<name>/edit-source", methods=["GET"])
     def relay_edit_source(name):

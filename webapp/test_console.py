@@ -109,8 +109,11 @@ class FakeEngine:
     def relay_set_source_webpage(self, name, url):
         return self._mutation("relay_set_source_webpage", name, url)
 
-    def relay_create_media(self, name, media):
-        return self._mutation("relay_create_media", name, media)
+    def relay_create_media(self, name, media, continuous="yes"):
+        return self._mutation("relay_create_media", name, media, continuous)
+
+    def relay_set_continuous(self, name, continuous):
+        return self._mutation("relay_set_continuous", name, continuous)
 
     def media_import_staged(self, staging):
         return self._mutation("media_import_staged", staging)
@@ -505,6 +508,8 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
             # GUI-6A: fixed edit of one stopped, URL-backed stream's source URL
             "console.relay_edit_source",
             "console.relay_edit_source_post",
+            "console.relay_continuous",
+            "console.relay_continuous_post",
         }
         endpoints = set()
         for rule in self.app.url_map.iter_rules():
@@ -561,6 +566,9 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 # GUI-6A: edit stream source URL
                 "console.relay_edit_source",
                 "console.relay_edit_source_post",
+                # Local-video 24/7 mode editor (stopped-only in the engine)
+                "console.relay_continuous",
+                "console.relay_continuous_post",
                 # GUI-8A: one-time playlist start schedule
                 "console.playlist_schedule",
                 "console.playlist_schedule_post",
@@ -922,6 +930,7 @@ class EngineClientTests(unittest.TestCase):
             "playlist_restart",
             "relay_create_url",
             "relay_create_media",
+            "relay_set_continuous",
             "media_import_staged",
             # GUI-1D.1: fixed-argv playlist creation
             "playlist_create",
@@ -975,6 +984,7 @@ class EngineClientTests(unittest.TestCase):
                     "playlist_restart",
                     "relay_create_url",
                     "relay_create_media",
+                    "relay_set_continuous",
                     "media_import_staged",
                     "playlist_create",
                     "playlist_cache_clear_unused",
@@ -1498,9 +1508,24 @@ class WebCtlArgvBoundaryTests(unittest.TestCase):
         self.assertEqual(doc["code"], "INVALID_URL")
 
     def test_24_relay_create_media_invalid_media_name_fails(self):
-        rc, doc = self._run("relay_create_media", "news24", "../evil.mp4")
+        rc, doc = self._run("relay_create_media", "news24", "../evil.mp4", "yes")
         self.assertEqual(rc, 1)
         self.assertEqual(doc["code"], "INVALID_MEDIA")
+
+    def test_24b_relay_create_media_requires_explicit_24x7_mode(self):
+        rc, doc = self._run("relay_create_media", "news24", "promo.mp4")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "MISSING_ARGUMENT")
+
+    def test_24c_relay_create_media_rejects_invalid_24x7_mode(self):
+        rc, doc = self._run("relay_create_media", "news24", "promo.mp4", "maybe")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_CONTINUOUS")
+
+    def test_24d_relay_set_continuous_validates_target(self):
+        rc, doc = self._run("relay_set_continuous", "../dino", "yes")
+        self.assertEqual(rc, 1)
+        self.assertEqual(doc["code"], "INVALID_NAME")
 
     def test_25_media_import_staged_missing_fails(self):
         rc, doc = self._run("media_import_staged")
@@ -2370,18 +2395,32 @@ class Gui1cWorkflowTests(unittest.TestCase):
         html = self.client.get("/console/media/promo.mp4/create-stream").get_data(as_text=True)
         self.assertIn("promo.mp4", html)
         self.assertIn('name="csrf_token"', html)
+        self.assertIn('name="continuous" checked', html)
+        self.assertIn("24/7 Continuous Streaming", html)
 
     def test_17_media_create_stream_success_prg(self):
         self._login()
         rv = self.client.post(
             "/console/media/promo.mp4/create-stream",
-            data={"name": "promo-loop", "csrf_token": self._csrf()},
+            data={"name": "promo-loop", "continuous": "on", "csrf_token": self._csrf()},
         )
         self.assertEqual(rv.status_code, 302)
         self.assertIn("/console/streams", rv.headers["Location"])
         self.assertEqual(
             self.engine.mutation_calls,
-            [("relay_create_media", "promo-loop", "promo.mp4")],
+            [("relay_create_media", "promo-loop", "promo.mp4", "yes")],
+        )
+
+    def test_17b_media_create_stream_can_explicitly_play_once(self):
+        self._login()
+        rv = self.client.post(
+            "/console/media/promo.mp4/create-stream",
+            data={"name": "promo-once", "csrf_token": self._csrf()},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_create_media", "promo-once", "promo.mp4", "no")],
         )
 
     def test_18_media_create_stream_nonexistent_media(self):
@@ -2474,13 +2513,13 @@ class Gui1cWorkflowTests(unittest.TestCase):
         self._login()
         rv = self.client.post(
             "/console/media/promo.mp4/create-stream",
-            data={"name": "My Timer Stream", "csrf_token": self._csrf()},
+            data={"name": "My Timer Stream", "continuous": "on", "csrf_token": self._csrf()},
         )
         self.assertEqual(rv.status_code, 302)
         self.assertIn("/console/streams", rv.headers["Location"])
         self.assertEqual(
             self.engine.mutation_calls,
-            [("relay_create_media", "my-timer-stream", "promo.mp4")],
+            [("relay_create_media", "my-timer-stream", "promo.mp4", "yes")],
         )
 
     # ------------------------------------------------------------------
@@ -5443,6 +5482,79 @@ class EditStreamSourceTests(unittest.TestCase):
             follow_redirects=True,
         )
         self.assertIn("managed media", rv.get_data(as_text=True).lower())
+
+
+class ContinuousLocalVideoTests(unittest.TestCase):
+    """24/7 local-video status and stopped-only editor."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.payloads = {
+            "snapshot": VALID_SNAPSHOT,
+            "relay_list": [
+                {"name": "dino", "type": "local-file", "source": "/media/dino.mp4",
+                 "continuous": "no", "active": "no", "enabled": "no",
+                 "health": "COMPLETED", "destination_count": "1"},
+                {"name": "always", "type": "local-file", "source": "/media/always.mp4",
+                 "continuous": "yes", "active": "yes", "enabled": "yes",
+                 "health": "HEALTHY", "destination_count": "1"},
+                {"name": "news", "type": "remote-hls", "source": "https://x/live.m3u8",
+                 "continuous": "no", "active": "no", "enabled": "no",
+                 "health": "STOPPED", "destination_count": "0"},
+            ],
+            "playlist_list": [], "media_list": [],
+        }
+        self.engine = FakeEngine(self.payloads)
+        self.app, _ = make_app(self._tmp.name, engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+
+    def _csrf(self, path):
+        match = CSRF_RE.search(self.client.get(path).get_data(as_text=True))
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def test_streams_page_clearly_displays_mode_and_editor(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        self.assertIn("24/7 Mode", html)
+        self.assertIn("/console/streams/dino/continuous", html)
+        self.assertIn("/console/streams/always/continuous", html)
+
+    def test_existing_one_time_stream_can_enable_24x7(self):
+        path = "/console/streams/dino/continuous"
+        html = self.client.get(path).get_data(as_text=True)
+        self.assertIn("24/7 Continuous Streaming", html)
+        rv = self.client.post(
+            path,
+            data={"continuous": "on", "csrf_token": self._csrf(path)},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_set_continuous", "dino", "yes")],
+        )
+
+    def test_mode_can_be_explicitly_disabled(self):
+        path = "/console/streams/always/continuous"
+        # The UI refuses editing while running; the backend remains the
+        # authoritative guard if a POST races with lifecycle state.
+        html = self.client.get(path).get_data(as_text=True)
+        self.assertIn("Stop this stream", html)
+        rv = self.client.post(
+            path,
+            data={"csrf_token": self._csrf("/console/streams")},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(
+            self.engine.mutation_calls,
+            [("relay_set_continuous", "always", "no")],
+        )
+
+    def test_unrelated_stream_type_has_no_24x7_editor(self):
+        rv = self.client.get("/console/streams/news/continuous")
+        self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
 
 
 class PlaylistScheduleTests(unittest.TestCase):

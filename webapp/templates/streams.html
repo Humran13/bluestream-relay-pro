@@ -15,7 +15,7 @@
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Name</th><th>Source Type</th><th>Source</th><th>Active</th><th>Enabled</th><th>Health</th><th>Links</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Source Type</th><th>Source</th><th>24/7 Mode</th><th>Active</th><th>Boot</th><th>Health</th><th>Links</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for relay in relays %}
@@ -23,6 +23,7 @@
         <td>{{ relay.get('name') }}</td>
         <td>{{ type_labels.get(relay.get('type'), relay.get('type')) }}</td>
         <td class="source">{{ relay.get('source') or '-' }}</td>
+        <td>{% if relay.get('type') == 'local-file' %}<span class="badge badge-{{ 'healthy' if relay.get('continuous') == 'yes' else 'stopped' }}">{{ 'ON' if relay.get('continuous') == 'yes' else 'OFF' }}</span>{% else %}<span class="muted">N/A</span>{% endif %}</td>
         <td>{{ relay.get('active') }}</td>
         <td>{{ relay.get('enabled') }}</td>
         <td><span class="badge badge-{{ relay.get('health')|lower }}" title="{{ relay.get('health_detail', '') }}">{{ relay.get('health') }}</span>{% if relay.get('resolve_message') and relay.get('health') == 'FAILED' %}<p class="muted">{{ relay.get('resolve_message') }}</p>{% endif %}{% if relay.get('health') == 'RECONNECTING' and relay.get('health_detail') %}<p class="muted">{{ relay.get('health_detail') }}</p>{% endif %}</td>
@@ -62,6 +63,8 @@
             <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_destinations', name=relay.get('name')) }}">Destinations ({{ relay.get('destination_count') or 0 }})</a>
             {% if relay.get('type') != 'local-file' %}
             <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_edit_source', name=relay.get('name')) }}">Edit Source</a>
+            {% else %}
+            <a class="btn btn-sm btn-secondary" href="{{ url_for('console.relay_continuous', name=relay.get('name')) }}">Edit 24/7</a>
             {% endif %}
             <form method="post" action="{{ url_for('console.relay_delete_post', name=relay.get('name')) }}"
                   onsubmit="return confirm('Delete this stream? This removes its configuration and output and cannot be undone.');">
