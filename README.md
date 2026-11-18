@@ -356,7 +356,7 @@ Available pages:
 - **Streams** — list relays, start/stop/restart, **create a stream** from a
   source URL (HLS, HTTP media, RTMP/RTMPS, RTSP, or a public YouTube/webpage
   URL resolved via yt-dlp), edit its source, and attach destinations. Local
-  video rows clearly show whether **24/7 Mode** is on and provide an editor.
+  video rows clearly show whether **Loop** (24/7) is on, with a one-click toggle.
 - **Media Library** — list managed media, **upload** a video file, and create a
   local-file stream from it. Uploads are staged in a narrow web-writable
   directory, probed with ffprobe, and imported by the root bridge — a file is

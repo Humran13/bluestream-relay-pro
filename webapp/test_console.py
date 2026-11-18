@@ -508,7 +508,6 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
             # GUI-6A: fixed edit of one stopped, URL-backed stream's source URL
             "console.relay_edit_source",
             "console.relay_edit_source_post",
-            "console.relay_continuous",
             "console.relay_continuous_post",
         }
         endpoints = set()
@@ -566,8 +565,7 @@ class ConsoleRateLimitAndSafetyTests(unittest.TestCase):
                 # GUI-6A: edit stream source URL
                 "console.relay_edit_source",
                 "console.relay_edit_source_post",
-                # Local-video 24/7 mode editor (stopped-only in the engine)
-                "console.relay_continuous",
+                # Loop toggle (POST only)
                 "console.relay_continuous_post",
                 # GUI-8A: one-time playlist start schedule
                 "console.playlist_schedule",
@@ -5515,45 +5513,44 @@ class ContinuousLocalVideoTests(unittest.TestCase):
         self.assertIsNotNone(match)
         return match.group(1)
 
-    def test_streams_page_clearly_displays_mode_and_editor(self):
+    def test_streams_page_shows_loop_toggle_not_editor(self):
         html = self.client.get("/console/streams").get_data(as_text=True)
-        self.assertIn("24/7 Mode", html)
-        self.assertIn("/console/streams/dino/continuous", html)
-        self.assertIn("/console/streams/always/continuous", html)
+        self.assertIn("<th>Loop</th>", html)
+        self.assertNotIn("Edit 24/7", html)
+        self.assertNotIn("24/7 Mode", html)
+        self.assertIn('role="switch"', html)
+        self.assertEqual(html.count('class="loop-toggle'), 2)  # not for remote-hls
+        self.assertIn('aria-checked="true"', html)
+        self.assertIn('aria-checked="false"', html)
+        self.assertEqual(self.client.get("/console/streams/dino/continuous").status_code, 405)
 
-    def test_existing_one_time_stream_can_enable_24x7(self):
+    def test_toggle_on_when_stopped_only_sets_mode(self):
         path = "/console/streams/dino/continuous"
-        html = self.client.get(path).get_data(as_text=True)
-        self.assertIn("24/7 Continuous Streaming", html)
-        rv = self.client.post(
-            path,
-            data={"continuous": "on", "csrf_token": self._csrf(path)},
-        )
+        rv = self.client.post(path, data={"continuous": "yes", "csrf_token": self._csrf("/console/streams")})
         self.assertEqual(rv.status_code, 302)
-        self.assertEqual(
-            self.engine.mutation_calls,
-            [("relay_set_continuous", "dino", "yes")],
-        )
+        self.assertEqual(self.engine.mutation_calls, [("relay_set_continuous", "dino", "yes")])
 
-    def test_mode_can_be_explicitly_disabled(self):
+    def test_toggle_running_requires_confirmation(self):
         path = "/console/streams/always/continuous"
-        # The UI refuses editing while running; the backend remains the
-        # authoritative guard if a POST races with lifecycle state.
-        html = self.client.get(path).get_data(as_text=True)
-        self.assertIn("Stop this stream", html)
-        rv = self.client.post(
-            path,
-            data={"csrf_token": self._csrf("/console/streams")},
-        )
+        rv = self.client.post(path, data={"continuous": "no", "csrf_token": self._csrf("/console/streams")})
         self.assertEqual(rv.status_code, 302)
+        self.assertEqual(self.engine.mutation_calls, [])
+
+    def test_toggle_running_confirmed_restarts_only_that_stream(self):
+        path = "/console/streams/always/continuous"
+        self.client.post(path, data={"continuous": "no", "restart": "1",
+                                     "csrf_token": self._csrf("/console/streams")})
         self.assertEqual(
             self.engine.mutation_calls,
-            [("relay_set_continuous", "always", "no")],
+            [("relay_stop", "always"), ("relay_set_continuous", "always", "no"),
+             ("relay_start", "always")],
         )
 
-    def test_unrelated_stream_type_has_no_24x7_editor(self):
-        rv = self.client.get("/console/streams/news/continuous")
-        self.assertEqual(rv.status_code, 302)
+    def test_toggle_requires_csrf_and_local_video(self):
+        rv = self.client.post("/console/streams/dino/continuous", data={"continuous": "yes"})
+        self.assertIn(rv.status_code, (400, 403))
+        self.client.post("/console/streams/news/continuous",
+                         data={"continuous": "yes", "csrf_token": self._csrf("/console/streams")})
         self.assertEqual(self.engine.mutation_calls, [])
 
 

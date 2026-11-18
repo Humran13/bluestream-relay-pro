@@ -834,7 +834,6 @@ _NAV_SECTIONS = {
     "console.relay_delete_post": "streams",
     "console.relay_edit_source": "streams",
     "console.relay_edit_source_post": "streams",
-    "console.relay_continuous": "streams",
     "console.relay_continuous_post": "streams",
     "console.media": "media",
     "console.media_upload": "media",
@@ -2055,49 +2054,51 @@ def _register_console_routes(app: Flask) -> None:
                 return relay, False
         return None, False
 
-    @console.route("/streams/<name>/continuous", methods=["GET"])
-    def relay_continuous(name):
+    @console.route("/streams/<name>/continuous", methods=["POST"])
+    def relay_continuous_post(name):
+        """One-click Loop toggle. Reuses the engine's relay_set_continuous; a
+        running stream is stopped, updated and started again (only that stream)
+        and only when the operator explicitly confirmed the restart."""
         if not session.get("authenticated"):
             return redirect(url_for("console.login"))
         if not valid_target_name(name):
             flash("That stream name is not valid.", "error")
             return redirect(url_for("console.streams"))
+        continuous = "yes" if request.form.get("continuous") == "yes" else "no"
+        engine = current_app.extensions["bluestream_engine"]
         relay, unavailable = _find_relay(name)
         if unavailable or relay is None:
             flash("That stream is unavailable.", "error")
             return redirect(url_for("console.streams"))
         if relay.get("type") != "local-file":
-            flash("24/7 mode is available only for local video streams.", "error")
+            flash("Loop is available only for local video streams.", "error")
             return redirect(url_for("console.streams"))
-        return render_template(
-            "streams_continuous.html",
-            relay=relay,
-            running=(relay.get("active") == "yes"),
-        )
-
-    @console.route("/streams/<name>/continuous", methods=["POST"])
-    def relay_continuous_post(name):
-        if not session.get("authenticated"):
-            return redirect(url_for("console.login"))
-        if not valid_target_name(name):
-            flash("That stream name is not valid.", "error")
+        running = relay.get("active") == "yes"
+        if running and request.form.get("restart") != "1":
+            flash("Confirm the restart to change Loop on a running stream.", "error")
             return redirect(url_for("console.streams"))
-        continuous = "yes" if request.form.get("continuous") == "on" else "no"
-        engine = current_app.extensions["bluestream_engine"]
         try:
+            if running:
+                engine.relay_stop(name)
             engine.relay_set_continuous(name, continuous)
+            if running:
+                engine.relay_start(name)
         except EngineError as exc:
             messages = {
-                "NOT_STOPPED": "Stop the stream before changing its 24/7 mode.",
-                "NOT_LOCAL_VIDEO": "24/7 mode is available only for local video streams.",
+                "NOT_STOPPED": "The stream did not stop; Loop was not changed.",
+                "NOT_LOCAL_VIDEO": "Loop is available only for local video streams.",
                 "NOT_FOUND": "That stream no longer exists.",
             }
-            flash(messages.get(exc.code or "", "The 24/7 setting could not be updated."), "error")
-            return redirect(url_for("console.relay_continuous", name=name))
-        if continuous == "yes":
-            flash("24/7 mode enabled for '%s'. Press Start to stream now and enable reboot recovery." % name, "success")
+            current_app.logger.warning("relay_continuous '%s' failed: %s", name, exc)
+            flash(messages.get(exc.code or "", "The Loop setting could not be updated."), "error")
+            return redirect(url_for("console.streams"))
+        state = "ON" if continuous == "yes" else "OFF"
+        if running:
+            flash("Loop %s for '%s'; stream restarted." % (state, name), "success")
+        elif continuous == "yes":
+            flash("Loop ON for '%s'. Press Start to stream now and enable reboot recovery." % name, "success")
         else:
-            flash("24/7 mode disabled for '%s'. The next Start will play the video once." % name, "success")
+            flash("Loop OFF for '%s'. The next Start plays the video once." % name, "success")
         return redirect(url_for("console.streams"))
 
     @console.route("/streams/<name>/edit-source", methods=["GET"])

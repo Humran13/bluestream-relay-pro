@@ -710,3 +710,13 @@ td.col-check { width: 2.5rem; text-align: center; }
   h1 { font-size: 1.25rem; }
   .toolbar { align-items: flex-start; }
 }
+
+/* Loop toggle (Streams) */
+.loop-form { margin: 0; }
+.loop-toggle { position: relative; width: 38px; height: 22px; padding: 0; border-radius: 11px; cursor: pointer;
+  background: var(--panel-sub); border: 1px solid var(--border); transition: background .15s; }
+.loop-toggle .knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--muted); transition: transform .15s, background .15s; }
+.loop-toggle.on { background: #1f8f4e; border-color: #1f8f4e; }
+.loop-toggle.on .knob { transform: translateX(16px); background: #fff; }
+.loop-toggle:focus-visible { outline: 2px solid #6aa9ff; outline-offset: 2px; }

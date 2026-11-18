@@ -67,9 +67,10 @@ stays stopped after a VPS reboot until you press **Start** again. **Restart** re
 
 Clear 24/7 mode to play the file exactly once. A clean end is recorded as
 `COMPLETED`, and disabling 24/7 also removes boot persistence. Existing streams
-are not migrated or changed automatically: on **Streams**, open **Edit 24/7**
-for a stopped local-video stream (for example `dino`), enable the option, save,
-then press **Start**. Names, media, destination attachments and public HLS URLs
+are not migrated or changed automatically: on **Streams**, click the **Loop**
+toggle for a local-video stream (for example `dino`) and, if it is stopped,
+press **Start**. On a running stream the toggle asks for confirmation and
+restarts only that stream. Names, media, destination attachments and public HLS URLs
 are preserved.
 
 ## Probing and compatibility
