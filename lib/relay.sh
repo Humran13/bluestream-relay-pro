@@ -412,6 +412,15 @@ relay_stop() {
     relay_load_config "$name" || bs_die "Relay '$name' not found"
     unit="$(bs_unit relay "$name")"
     systemctl stop "$unit" 2>/dev/null || bs_die "Failed to stop relay '$name'"
+    # An explicit Stop of a 24/7 local-video stream also withdraws its boot
+    # persistence, so a deliberately stopped stream does not resume after a
+    # VPS reboot. A later explicit Start/Restart re-enables it. Other source
+    # types keep their existing Stop behavior unchanged.
+    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ] && [ "$RELAY_ENABLED" = "yes" ]; then
+        systemctl disable "$unit" 2>/dev/null || true
+        RELAY_ENABLED="no"
+        relay_save_config "$name" || true
+    fi
     # The run-relay.sh supervision loop (lib/supervise.sh) traps SIGTERM -
     # the signal `systemctl stop` sends - and exits 0 deliberately, writing
     # a STOPPED status before it does. That is now the authoritative record

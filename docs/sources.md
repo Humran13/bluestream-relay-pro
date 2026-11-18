@@ -62,8 +62,8 @@ With 24/7 mode on, Start:
 - enables the relay's systemd unit so it starts after a VPS reboot.
 
 An explicit **Stop** is never treated as a crash and does not cause an
-immediate restart. The unit remains stopped until another Start or a later VPS
-boot. **Restart** reapplies the same 24/7 and boot-persistence rules.
+immediate restart. Stop also removes boot persistence, so a stream you stopped
+stays stopped after a VPS reboot until you press **Start** again. **Restart** reapplies the same 24/7 and boot-persistence rules.
 
 Clear 24/7 mode to play the file exactly once. A clean end is recorded as
 `COMPLETED`, and disabling 24/7 also removes boot persistence. Existing streams

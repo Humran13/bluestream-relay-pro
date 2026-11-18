@@ -1662,7 +1662,9 @@ export PATH="$tmp/bin:$PATH"
         self.assertIn("SYSTEMCTL:restart bluestream-relay@dino.service", out)
         self.assertIn("SYSTEMCTL:stop bluestream-relay@dino.service", out)
         self.assertNotIn("SYSTEMCTL:start bluestream-relay@dino.service", out)
-        self.assertIn("MODE=yes ENABLED=yes", out)
+        # Stop withdraws boot persistence: no resume after a VPS reboot.
+        self.assertIn("SYSTEMCTL:disable bluestream-relay@dino.service", out)
+        self.assertIn("MODE=yes ENABLED=no", out)
 
 
     def test_04_media_import_staged_imports_and_cleans(self):
