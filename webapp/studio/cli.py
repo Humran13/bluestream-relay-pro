@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import entitlement, planner, runtime, store, widgets
+from . import entitlement, netguard, planner, runtime, store, widgets
 from .model import NAME_RE, ValidationError
 
 
@@ -62,12 +62,39 @@ def _render_cache(project, src_in, info, plan, relay):
     return final
 
 
-def _write_static_text(project, workdir, now=None):
+def _now_playing(project):
+    """Best effort: `<run>/<playlist>.nowplaying` written by the playlist engine, if present."""
+    if project.source_kind != "playlist":
+        return ""
+    try:
+        with open(os.path.join(runtime.run_dir(), project.source_ref + ".nowplaying"), encoding="utf-8") as fh:
+            return fh.read(200).strip()
+    except OSError:
+        return ""
+
+
+def _write_static_text(project, workdir, now=None, data=None):
     now = now or datetime.now(timezone.utc)
+    data = data or {}
+    playing = _now_playing(project)
     for i, o in enumerate(project.visible_overlays()):
         if o.kind in ("rect", "image"):
             continue
-        widgets.atomic_write(sff.text_file_path(workdir, i), widgets.render_text(o, now))
+        widgets.atomic_write(sff.text_file_path(workdir, i),
+                             widgets.render_text(o, now, playing, data.get(i, "")))
+
+
+def _refresh_data(project, data, last):
+    """Fetch each data overlay on its own cadence; keep the last good value on failure."""
+    t = time.monotonic()
+    for i, o in enumerate(project.visible_overlays()):
+        if o.kind != "data" or t - last.get(i, -1e9) < o.refresh_s:
+            continue
+        last[i] = t
+        try:
+            data[i] = netguard.fetch_value(o.url, o.json_path)[:100]
+        except (netguard.BlockedError, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            sys.stderr.write("studio: data source %d failed (%s); keeping last value\n" % (i, type(exc).__name__))
 
 
 def cmd_argv(relay, name):
@@ -121,8 +148,10 @@ def cmd_widgets(relay, name):
     if dynamic:
         runtime.take_live_lease(relay)
     try:
+        data, last = {}, {}
         while not stop:
-            _write_static_text(project, wd)
+            _refresh_data(project, data, last)
+            _write_static_text(project, wd, data=data)
             # monotonic sleep aligned to wall-clock seconds so timers don't drift
             time.sleep(1.0 - (time.time() % 1.0))
     finally:

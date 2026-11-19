@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Studio: {{ project.name }} - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="toolbar"><h1>Studio: {{ project.name }}</h1><a class="btn btn-secondary" href="{{ url_for('console.studio_home') }}">&laquo; Projects</a></div>
+
+{% if not licence_ok %}<p class="error">Studio editing needs an active Premium licence ({{ licence.reason }}). Your existing stream is not affected.</p>{% endif %}
+
+<section class="card">
+  <h2>Preview <span class="muted">(snapshot; live widgets update every second on the stream)</span></h2>
+  <div class="studio-canvas" role="img" aria-label="Layout preview of 16:9 output">
+    {% for it in items %}{% set o = it.o %}
+    <div class="studio-item studio-{{ o.kind }}" style="left:{{ (o.x*100)|round(2) }}%;top:{{ (o.y*100)|round(2) }}%;width:{{ (o.w*100)|round(2) }}%;height:{{ (o.h*100)|round(2) }}%;opacity:{{ o.opacity }};color:{{ o.color }};{% if o.kind == 'rect' %}background:{{ o.color }};{% endif %}font-size:{{ (o.size/7.2)|round(1) }}cqh">{% if o.kind == 'image' %}[{{ o.asset }}]{% else %}{{ it.text }}{% endif %}</div>
+    {% endfor %}
+  </div>
+  <p><strong>Pipeline:</strong> {{ plan_title }}. {{ plan_why }} Estimated transfer for one destination: about {{ monthly_tb }} TB / 30 days.</p>
+</section>
+
+<section class="card">
+  <h2>Stream</h2>
+  {% if relay %}
+    <p>Status: <span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span> &middot; running: {{ relay.get('active') }}</p>
+    <p><a class="btn btn-sm" href="{{ url_for('console.relay_destinations', name=project.name) }}">Destinations</a>
+       <a class="btn btn-sm btn-secondary" href="{{ url_for('console.streams') }}">Start / Stop on Streams</a></p>
+  {% elif licence_ok %}
+    <p class="muted">No stream exists for this project yet. Apply to Live first, then create the stream.</p>
+    <form method="post" action="{{ url_for('console.studio_create_stream_post', name=project.name) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="btn btn-sm" type="submit">Create stream "{{ project.name }}"</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if licence_ok %}
+<form method="post" action="{{ url_for('console.studio_save_post', name=project.name) }}" class="card studio-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="count" value="{{ project.overlays|length }}">
+  <h2>Sources &amp; overlays</h2>
+  <label for="sref">{{ project.source_kind|capitalize }} source</label>
+  <input id="sref" name="source_ref" value="{{ project.source_ref }}">
+  {% for o in project.overlays %}{% set i = loop.index0 %}
+  <fieldset class="overlay-box">
+    <legend>{{ loop.index }}. {{ o.kind }}</legend>
+    <input type="hidden" name="kind_{{ i }}" value="{{ o.kind }}">
+    <label><input type="checkbox" name="visible_{{ i }}" {% if o.visible %}checked{% endif %}> Visible</label>
+    <label>X <input name="x_{{ i }}" value="{{ o.x }}" size="5"></label>
+    <label>Y <input name="y_{{ i }}" value="{{ o.y }}" size="5"></label>
+    <label>W <input name="w_{{ i }}" value="{{ o.w }}" size="5"></label>
+    <label>H <input name="h_{{ i }}" value="{{ o.h }}" size="5"></label>
+    <label>Opacity <input name="opacity_{{ i }}" value="{{ o.opacity }}" size="4"></label>
+    {% if o.kind not in ('rect','image') %}
+    <label>Size <input name="size_{{ i }}" value="{{ o.size }}" size="4"></label>
+    <label>Font <input name="font_{{ i }}" value="{{ o.font }}"></label>{% endif %}
+    <label>Colour <input name="color_{{ i }}" value="{{ o.color }}" size="8"></label>
+    {% if o.kind in ('text','ticker','nowplaying') %}<label>Text <input name="text_{{ i }}" value="{{ o.text }}" maxlength="500"></label>{% endif %}
+    {% if o.kind == 'image' %}<label>Image (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>{% endif %}
+    {% if o.kind in ('clock','countdown','countup','pomodoro') %}<label>Timezone <input name="tz_{{ i }}" value="{{ o.tz }}"></label>{% endif %}
+    {% if o.kind in ('countdown','countup','pomodoro') %}<label>{{ 'Anchor' if o.kind == 'pomodoro' else 'Date/time' }} (YYYY-MM-DDTHH:MM:SS) <input name="target_{{ i }}" value="{{ o.target }}"></label>{% endif %}
+    {% if o.kind == 'countdown' %}<label>When finished <input name="finished_text_{{ i }}" value="{{ o.finished_text }}"></label>{% endif %}
+    {% if o.kind == 'pomodoro' %}<label>Focus min <input name="work_min_{{ i }}" value="{{ o.work_min }}" size="3"></label><label>Break min <input name="break_min_{{ i }}" value="{{ o.break_min }}" size="3"></label>{% endif %}
+    <span class="overlay-actions">
+      <button class="btn btn-sm btn-secondary" name="action" value="up:{{ i }}" type="submit" aria-label="Move overlay {{ loop.index }} up">&uarr;</button>
+      <button class="btn btn-sm btn-secondary" name="action" value="down:{{ i }}" type="submit" aria-label="Move overlay {{ loop.index }} down">&darr;</button>
+      <label><input type="checkbox" name="delete_{{ i }}"> Remove</label>
+    </span>
+  </fieldset>
+  {% endfor %}
+  <p>Add:
+    {% for k in kinds %}<button class="btn btn-sm btn-secondary" name="action" value="add:{{ k }}" type="submit">+ {{ k }}</button> {% endfor %}
+  </p>
+  <button class="btn" name="action" value="save" type="submit">Save draft</button>
+</form>
+
+<section class="card">
+  <h2>Apply to Live</h2>
+  {% if unpublished %}<p><span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span> The running stream keeps using the last applied revision until you apply.</p>{% else %}<p><span class="badge badge-healthy">UP TO DATE</span></p>{% endif %}
+  <form method="post" action="{{ url_for('console.studio_publish_post', name=project.name) }}"
+        {% if relay and relay.get('active') == 'yes' %}onsubmit="return confirm('Applying restarts this stream (a short interruption for viewers). Continue?');"{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% if relay and relay.get('active') == 'yes' %}<input type="hidden" name="restart" value="1"><p class="muted">This stream is running: applying performs a controlled restart of this stream only.</p>{% endif %}
+    <button class="btn" type="submit">Apply to Live</button>
+  </form>
+  {% if revisions %}
+  <form method="post" action="{{ url_for('console.studio_rollback_post', name=project.name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="rev">Revert draft to earlier revision</label>
+    <select id="rev" name="revision">{% for r in revisions|reverse %}<option value="{{ r }}">Revision {{ r }}</option>{% endfor %}</select>
+    <button class="btn btn-sm btn-secondary" type="submit">Load into draft</button>
+  </form>{% endif %}
+  {% if not relay %}
+  <form method="post" action="{{ url_for('console.studio_delete_post', name=project.name) }}" onsubmit="return confirm('Delete this project and its revisions?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn btn-sm btn-danger" type="submit">Delete project</button>
+  </form>{% endif %}
+</section>
+{% endif %}
+<style>
+.studio-canvas{position:relative;width:100%;max-width:760px;aspect-ratio:16/9;background:#10151c;border:1px solid var(--border);overflow:hidden;container-type:size}
+.studio-item{position:absolute;overflow:hidden;white-space:nowrap;line-height:1.1;display:flex;align-items:center}
+.studio-rect{border-radius:2px}
+.overlay-box{margin:.6rem 0;padding:.5rem;border:1px solid var(--border)}
+.overlay-box label{margin-right:.6rem;display:inline-block}
+.studio-form input,.studio-form select{max-width:100%}
+@media(max-width:640px){.overlay-box label{display:block;margin:.3rem 0}}
+</style>
+{% endblock %}

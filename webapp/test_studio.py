@@ -310,3 +310,10 @@ class StoreRuntimeCliTests(unittest.TestCase):
         self.assertEqual(wd.render_text(Overlay("countup", target=(now - timedelta(seconds=75)).isoformat()), now), "00:01:15")
         self.assertEqual(wd.render_text(Overlay("pomodoro", target=now.isoformat(), work_min=25), now + timedelta(minutes=1)), "FOCUS 24:00")
         self.assertEqual(wd.render_text(Overlay("nowplaying", text="Now:"), now, "Song"), "Now: Song")
+
+
+class SelfSourceTests(unittest.TestCase):
+    def test_stream_cannot_read_itself(self):
+        with self.assertRaises(ValidationError):
+            Project("loop", "relay", "loop").validate()
+        Project("loop2", "relay", "loop").validate()

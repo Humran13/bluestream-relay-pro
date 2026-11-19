@@ -14,9 +14,9 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying")
+KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data")
 # Kinds whose rendered output changes over time -> need live composition.
-DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying"})
+DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data"})
 MAX_OVERLAYS = 24
 
 
@@ -75,6 +75,9 @@ class Overlay:
     work_min: int = 25
     break_min: int = 5
     finished_text: str = "LIVE NOW"
+    url: str = ""        # data overlay: public http(s) JSON endpoint (SSRF-guarded fetch)
+    json_path: str = ""  # data overlay: dotted path to a scalar, e.g. "items.0.subscribers"
+    refresh_s: int = 60
 
     @property
     def dynamic(self):
@@ -104,6 +107,13 @@ class Overlay:
             raise ValidationError("%s needs a target/anchor time" % self.kind)
         if not (1 <= self.work_min <= 600 and 1 <= self.break_min <= 600):
             raise ValidationError("pomodoro minutes out of range")
+        if self.kind == "data":
+            if not (self.url.startswith(("http://", "https://")) and len(self.url) <= 500):
+                raise ValidationError("data overlay needs an http(s) URL")
+            if not re.match(r"^[A-Za-z0-9_.-]{1,100}$", self.json_path):
+                raise ValidationError("invalid JSON path")
+            if not 30 <= self.refresh_s <= 86400:
+                raise ValidationError("refresh must be 30-86400 seconds")
         if len(self.finished_text) > 100:
             raise ValidationError("finished text too long")
         return self
@@ -125,6 +135,8 @@ class Project:
             raise ValidationError("invalid source kind")
         if not self.source_ref or len(self.source_ref) > 255 or "\x00" in self.source_ref:
             raise ValidationError("invalid source reference")
+        if self.source_kind == "relay" and self.source_ref == self.name:
+            raise ValidationError("a Studio stream cannot read from itself")
         if len(self.overlays) > MAX_OVERLAYS:
             raise ValidationError("too many overlays")
         self.profile.validate()

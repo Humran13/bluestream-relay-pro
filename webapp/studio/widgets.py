@@ -79,7 +79,7 @@ def format_countup(anchor, tz, now_utc):
     return ("%dd %02d:%02d:%02d" % (days, h, m, s)) if days else ("%02d:%02d:%02d" % (h, m, s))
 
 
-def render_text(overlay, now_utc, now_playing=""):
+def render_text(overlay, now_utc, now_playing="", data_value=""):
     """Current text for any text-backed overlay at `now_utc` (pure function)."""
     k = overlay.kind
     if k in ("text", "ticker"):
@@ -94,6 +94,8 @@ def render_text(overlay, now_utc, now_playing=""):
         label, left = pomodoro_phase(parse_target(overlay.target, overlay.tz), now_utc,
                                      overlay.work_min, overlay.break_min)
         return "%s %02d:%02d" % (label, left // 60, left % 60)
+    if k == "data":
+        return (overlay.text or "{value}").replace("{value}", data_value or "--")
     if k == "nowplaying":
         return (overlay.text + " " if overlay.text else "") + now_playing
     return ""

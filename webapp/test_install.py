@@ -529,7 +529,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "relay_start", "relay_stop", "relay_restart",
                     "playlist_start", "playlist_stop", "playlist_restart",
                     "relay_create_url", "relay_create_media", "media_import_staged",
-                    "relay_set_continuous",
+                    "relay_set_continuous", "relay_create_studio",
                     # GUI-1D.1: fixed-argv playlist creation
                     "playlist_create",
                     # GUI-3A: manual playlist-cache cleanup (no arguments)
@@ -1665,6 +1665,63 @@ export PATH="$tmp/bin:$PATH"
         # Stop withdraws boot persistence: no resume after a VPS reboot.
         self.assertIn("SYSTEMCTL:disable bluestream-relay@dino.service", out)
         self.assertIn("MODE=yes ENABLED=no", out)
+
+    # ---- BlueStream Studio (relay TYPE=studio) -------------------------------
+    def test_24_studio_type_requires_published_project(self):
+        out = self._run(
+            "export BLUESTREAM_STUDIO_DIR=\"$tmp/studio\"; mkdir -p \"$BLUESTREAM_STUDIO_DIR\"\n"
+            "printf '{}' > \"$BLUESTREAM_STUDIO_DIR/demo.json\"\n"
+            "relay_create st studio demo; echo CREATE_RC=$?\n"
+            "relay_load_config st; relay_config_validate; echo PROJECT_RC=$?\n"
+            "rm -f \"$BLUESTREAM_STUDIO_DIR/demo.json\"\n"
+            "relay_config_validate; echo NOPROJECT_RC=$?\n"
+            "relay_create st2 studio '../etc/passwd'; echo TRAVERSAL_CREATE_RC=$?\n"
+            "if relay_load_config st2; then relay_config_validate; echo TRAVERSAL_VALIDATE_RC=$?; fi\n"
+            "true\n"
+        )
+        self.assertIn("CREATE_RC=0", out)
+        self.assertIn("NOPROJECT_RC=1", out)
+        self.assertIn("PROJECT_RC=0", out)
+        self.assertNotIn("TRAVERSAL_VALIDATE_RC=0", out)
+
+    def test_25_studio_start_enables_boot_and_stop_withdraws_it(self):
+        out = self._run(
+            "export BLUESTREAM_STUDIO_DIR=\"$tmp/studio\"; mkdir -p \"$BLUESTREAM_STUDIO_DIR\"\n"
+            "printf '{}' > \"$BLUESTREAM_STUDIO_DIR/demo.json\"\n"
+            "relay_create st studio demo\n"
+            "systemctl() { printf 'SYSTEMCTL:%s\\n' \"$*\"; return 0; }\n"
+            "bs_ensure_hls_dir() { return 0; }\n"
+            "relay_sync_dropin() { return 0; }\n"
+            "bs_supervise_clear_status() { return 0; }\n"
+            "relay_start st\n"
+            "relay_load_config st; echo AFTER_START=$RELAY_ENABLED\n"
+            "relay_stop st\n"
+            "relay_load_config st; echo AFTER_STOP=$RELAY_ENABLED\n"
+        )
+        self.assertIn("SYSTEMCTL:enable bluestream-relay@st.service", out)
+        self.assertIn("SYSTEMCTL:start bluestream-relay@st.service", out)
+        self.assertIn("AFTER_START=yes", out)
+        self.assertIn("SYSTEMCTL:disable bluestream-relay@st.service", out)
+        self.assertIn("AFTER_STOP=no", out)
+
+    def test_26_verifier_allows_studio_encode_only_when_flagged(self):
+        base = (
+            "FFMPEG_ARGS=( -nostdin -y -loglevel warning -i rtmp://127.0.0.1:1935/bluestream-relay/src "
+            "-map 0:v:0 -map 0:a:0? -c:v libx264 -c:a aac -b:v 4000k -f flv "
+            "rtmp://127.0.0.1:1935/bluestream-relay/out )\n"
+        )
+        out = self._run(
+            base + "BS_ALLOW_ENCODE=0; bs_verify_ffmpeg_args >/dev/null 2>&1; echo DEFAULT_RC=$?\n"
+            "BS_ALLOW_ENCODE=1; bs_verify_ffmpeg_args >/dev/null 2>&1; echo STUDIO_RC=$?\n"
+            "FFMPEG_ARGS=( \"${FFMPEG_ARGS[@]:0:11}\" -c:v libx265 \"${FFMPEG_ARGS[@]:13}\" )\n"
+            "bs_verify_ffmpeg_args >/dev/null 2>&1; echo OTHERCODEC_RC=$?\n"
+            "BS_ALLOW_ENCODE=1; FFMPEG_ARGS=( \"${FFMPEG_ARGS[@]:0:14}\" -f flv rtmp://evil.example/x/y )\n"
+            "bs_verify_ffmpeg_args >/dev/null 2>&1; echo BADOUT_RC=$?\n"
+        )
+        self.assertIn("DEFAULT_RC=1", out)
+        self.assertIn("STUDIO_RC=0", out)
+        self.assertIn("OTHERCODEC_RC=1", out)
+        self.assertIn("BADOUT_RC=1", out)
 
 
     def test_04_media_import_staged_imports_and_cleans(self):
