@@ -28,6 +28,7 @@ def to_dict(project):
     return {
         "name": project.name, "source_kind": project.source_kind,
         "source_ref": project.source_ref, "revision": project.revision,
+        "slide_seconds": project.slide_seconds, "slide_shuffle": project.slide_shuffle,
         "profile": dict(project.profile.__dict__),
         "overlays": [dict(o.__dict__) for o in project.overlays],
     }
@@ -45,7 +46,9 @@ def from_dict(doc):
             overlays.append(Overlay(**{k: v for k, v in o.items() if k in _FIELDS}))
         p = Project(name=doc["name"], source_kind=doc["source_kind"],
                     source_ref=doc["source_ref"], overlays=overlays,
-                    profile=OutputProfile(**prof), revision=int(doc.get("revision", 1)))
+                    profile=OutputProfile(**prof), revision=int(doc.get("revision", 1)),
+                    slide_seconds=int(doc.get("slide_seconds", 10)),
+                    slide_shuffle=bool(doc.get("slide_shuffle", False)))
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, ValidationError):
             raise

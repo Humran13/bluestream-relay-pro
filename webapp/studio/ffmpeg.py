@@ -127,6 +127,29 @@ def build_prerender_args(project, input_file, output_file, workdir, assets_dir,
     return a
 
 
+def build_slideshow_args(image_paths, seconds, profile, output_file, ffmpeg="ffmpeg"):
+    """Render still images (each shown `seconds`) into one profile-exact clip with
+    silent stereo audio. Finite and static, so the result is cached and then
+    stream-copied/looped. Paths must be absolute and safe."""
+    if not 1 <= len(image_paths) <= 50:
+        raise ValidationError("1-50 images required")
+    p = profile
+    _check_path(output_file)
+    args = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "warning"]
+    chain = []
+    for i, path in enumerate(image_paths):
+        _check_path(path)
+        args += ["-loop", "1", "-framerate", str(p.fps), "-t", str(int(seconds)), "-i", path]
+        chain.append("[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,"
+                     "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=%d,format=yuv420p[s%d]"
+                     % (i, p.width, p.height, p.width, p.height, p.fps, i))
+    n = len(image_paths)
+    chain.append("%sconcat=n=%d:v=1:a=0[v]" % ("".join("[s%d]" % i for i in range(n)), n))
+    args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-filter_complex", ";".join(chain),
+             "-map", "[v]", "-map", "%d:a" % n, "-t", str(int(seconds) * n)]
+    return args + _encode_opts(p) + ["-movflags", "+faststart", "-f", "mp4", output_file]
+
+
 def build_copy_args(source, output_url, loop_file=False, ffmpeg="ffmpeg"):
     """Cheap path: stream-copy a compatible source straight onto the Studio bus."""
     _check_bus(output_url)

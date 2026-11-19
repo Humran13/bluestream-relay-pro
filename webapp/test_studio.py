@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 from webapp.studio import ffmpeg as sff
@@ -317,3 +318,27 @@ class SelfSourceTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Project("loop", "relay", "loop").validate()
         Project("loop2", "relay", "loop").validate()
+
+
+class SlideshowModelTests(unittest.TestCase):
+    def test_validation_and_store_roundtrip(self):
+        from webapp.studio import store
+        p = Project("sl", "slideshow", "a.png,b.png", slide_seconds=5, slide_shuffle=True).validate()
+        self.assertEqual(store.from_dict(store.to_dict(p)).slide_seconds, 5)
+        for ref in ("", "../a.png", "a.png,,../x", ",".join("i%d.png" % i for i in range(51))):
+            with self.assertRaises(ValidationError, msg=ref):
+                Project("sl", "slideshow", ref).validate()
+        with self.assertRaises(ValidationError):
+            Project("sl", "slideshow", "a.png", slide_seconds=1).validate()
+
+    def test_shuffle_is_deterministic(self):
+        from webapp.studio import runtime
+        p = Project("sl", "slideshow", ",".join("i%d.png" % i for i in range(10)), slide_shuffle=True)
+        self.assertEqual(runtime.slideshow_order(p), runtime.slideshow_order(p))
+        self.assertNotEqual(runtime.slideshow_order(p), p.slides())
+
+    def test_missing_slide_image_fails_closed(self):
+        from webapp.studio import runtime
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"BLUESTREAM_MEDIA_DIR": d}):
+            with self.assertRaises(ValueError):
+                runtime.resolve_source(Project("sl", "slideshow", "gone.png"))

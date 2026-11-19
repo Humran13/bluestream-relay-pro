@@ -127,14 +127,25 @@ class Project:
     overlays: list = field(default_factory=list)
     profile: OutputProfile = field(default_factory=OutputProfile)
     revision: int = 1
+    slide_seconds: int = 10      # slideshow: seconds per image
+    slide_shuffle: bool = False  # slideshow: deterministic shuffle (seeded by name list)
+
+    def slides(self):
+        return [s for s in self.source_ref.split(",") if s]
 
     def validate(self):
         if not NAME_RE.match(self.name):
             raise ValidationError("invalid project name")
-        if self.source_kind not in ("relay", "playlist", "media"):
+        if self.source_kind not in ("relay", "playlist", "media", "slideshow"):
             raise ValidationError("invalid source kind")
         if not self.source_ref or len(self.source_ref) > 255 or "\x00" in self.source_ref:
             raise ValidationError("invalid source reference")
+        if self.source_kind == "slideshow":
+            names = self.slides()
+            if not 1 <= len(names) <= 50 or not all(ASSET_RE.match(n) for n in names):
+                raise ValidationError("slideshow needs 1-50 valid image names (comma separated)")
+            if not 2 <= self.slide_seconds <= 3600:
+                raise ValidationError("seconds per slide must be 2-3600")
         if self.source_kind == "relay" and self.source_ref == self.name:
             raise ValidationError("a Studio stream cannot read from itself")
         if len(self.overlays) > MAX_OVERLAYS:

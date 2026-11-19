@@ -153,6 +153,32 @@ class RealFfmpegTests(unittest.TestCase):
         v = next(s for s in probe(out)["streams"] if s["codec_type"] == "video")
         self.assertEqual((v["codec_name"], v["width"]), ("h264", 1280))
 
+    def make_png(self, name, color):
+        path = "%s/%s" % (self.assets, name)
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "color=c=%s:size=800x450:duration=1" % color, "-frames:v", "1", path], check=True)
+        return path
+
+    def test_slideshow_clip_matches_profile_and_loops_by_copy(self):
+        from webapp.studio.model import OutputProfile
+        imgs = [self.make_png("a.png", "red"), self.make_png("b.png", "blue"), self.make_png("c.png", "green")]
+        out = self.dir + "/slides.mp4"
+        self.run_ff(sff.build_slideshow_args(imgs, 2, OutputProfile(), out))
+        info = self.assert_target_profile(out, 5.5)
+        self.assertAlmostEqual(float(info["format"]["duration"]), 6.0, delta=0.3)
+        # the cheap path: loop the cached clip by stream copy for 14s (2+ loops)
+        looped = self.dir + "/slides_loop.flv"
+        args = sff.build_copy_args(out, "rtmp://127.0.0.1:1935/bluestream-relay/x", loop_file=True)
+        args.remove("-re")
+        args[-1:-1] = ["-t", "14"]
+        args[-1] = looped
+        self.run_ff(args)
+        dts = [float(x) for x in subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=dts_time",
+             "-of", "csv=p=0", looped], capture_output=True, text=True, check=True).stdout.split() if x]
+        self.assertTrue(all(b >= a for a, b in zip(dts, dts[1:])), "non-monotonic DTS across copy loop")
+        self.assertGreaterEqual(dts[-1], 12.0)
+
 
 if __name__ == "__main__":
     unittest.main()

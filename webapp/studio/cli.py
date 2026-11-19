@@ -32,6 +32,10 @@ def _out_url(relay):
 def make_plan(project):
     src_in, live = runtime.resolve_source(project)
     info = runtime.probe_source(src_in, live)
+    if project.source_kind == "slideshow":
+        # We generated this clip with the exact profile and keyframe interval.
+        import dataclasses
+        info = dataclasses.replace(info, gop_seconds=float(project.profile.gop_seconds))
     return src_in, live, info, planner.plan_output(project, info)
 
 

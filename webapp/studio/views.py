@@ -12,7 +12,12 @@ from flask import current_app, flash, redirect, render_template, request, sessio
 from . import entitlement, feedback, store, templates_lib, widgets
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
 
-SOURCE_KINDS = ("relay", "playlist", "media")
+SOURCE_KINDS = ("relay", "playlist", "media", "slideshow")
+
+# Browser-rendered overlays are deliberately NOT enabled in this release: they need a
+# sandboxed, egress-controlled, resource-capped browser that has not been built or
+# benchmarked. Shown honestly in the UI; use Data overlays instead.
+BROWSER_SOURCE_GATE = "Browser source is disabled in this release (sandbox and resource limits not yet validated). Use a Data overlay."
 
 
 def enabled(app):
@@ -111,7 +116,8 @@ def register(console, find_relay, engine_of):
             except (ValueError, OSError):
                 projects.append({"name": n, "overlays": 0, "broken": True})
         return render_template("studio_home.html", projects=projects, licence=v, licence_ok=ok,
-                               templates=templates_lib.TEMPLATES, source_choices=_source_choices())
+                               templates=templates_lib.TEMPLATES, source_choices=_source_choices(),
+                               browser_gate=BROWSER_SOURCE_GATE)
 
     def _source_choices():
         names = []
@@ -149,7 +155,9 @@ def register(console, find_relay, engine_of):
                 raise ValidationError("a project with that name already exists")
             if kind not in SOURCE_KINDS:
                 raise ValidationError("choose a source type")
-            project = Project(name, kind, ref, templates_lib.build(tpl)).validate()
+            project = Project(name, kind, ref, templates_lib.build(tpl),
+                              slide_seconds=_int(request.form, "slide_seconds", 10),
+                              slide_shuffle=request.form.get("slide_shuffle") == "on").validate()
             store.save_draft(project)
         except ValidationError as exc:
             flash("Could not create project: %s." % exc, "error")

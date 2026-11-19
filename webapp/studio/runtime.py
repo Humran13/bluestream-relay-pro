@@ -32,6 +32,8 @@ def media_dir():
 def resolve_source(project):
     """-> (input string for FFmpeg, is_live). Raises ValueError if unavailable."""
     k, ref = project.source_kind, project.source_ref
+    if k == "slideshow":
+        return ensure_slideshow(project), False
     if k == "relay":
         return "%s/%s/%s" % (BUS, APP_RELAY, ref), True
     if k == "playlist":
@@ -41,6 +43,46 @@ def resolve_source(project):
     if base != ref or not os.path.isfile(path):
         raise ValueError("media file not found: %s" % base)
     return path, False
+
+
+def slideshow_order(project):
+    names = project.slides()
+    if project.slide_shuffle:
+        import random
+        random.Random(",".join(names)).shuffle(names)  # deterministic: same list -> same order
+    return names
+
+
+def ensure_slideshow(project):
+    """Render (once, cached) the slideshow clip and return its path."""
+    import hashlib
+    from . import ffmpeg as sff
+    names = slideshow_order(project)
+    paths = []
+    ident = [str(project.slide_seconds), str(project.profile.__dict__)]
+    for n in names:
+        path = os.path.join(media_dir(), n)
+        if not os.path.isfile(path):
+            raise ValueError("slideshow image not found: %s" % n)
+        st = os.stat(path)
+        ident.append("%s:%d:%d" % (n, st.st_size, int(st.st_mtime)))
+        paths.append(path)
+    final = os.path.join(cache_dir(), "ss-" + hashlib.sha256("|".join(ident).encode()).hexdigest()[:28] + ".mp4")
+    if cache_valid(final):
+        os.utime(final)
+        return final
+    os.makedirs(cache_dir(), exist_ok=True)
+    tmp = final[:-4] + ".tmp"
+    args = sff.build_slideshow_args(paths, project.slide_seconds, project.profile, tmp)
+    r = subprocess.run(args, capture_output=True, text=True, timeout=900)
+    if r.returncode != 0 or not cache_valid(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise ValueError("slideshow render failed")
+    os.replace(tmp, final)
+    return final
 
 
 def probe_source(path_or_url, live, timeout=15):
