@@ -72,7 +72,7 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
             idx = first_extra + extra - 1
             chain.append("[%d:v]scale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
                          % (idx, _px(o.w, p.width), o.opacity, idx))
-            f = "[%s][im%d]overlay=%d:%d:shortest=0[%s]" % (last, idx, x, y, nxt)
+            f = "[%s][im%d]overlay=%d:%d:shortest=1[%s]" % (last, idx, x, y, nxt)
         else:  # text, clock, countdown, ticker: all read an atomically replaced file
             tf = text_file_path(workdir, i)
             xexpr = "w-mod(t*120,w+text_w)" if o.kind == "ticker" else str(x)

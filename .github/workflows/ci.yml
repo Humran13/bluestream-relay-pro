@@ -74,14 +74,14 @@ jobs:
   browser:
     runs-on: ubuntu-24.04
     needs: node
-    timeout-minutes: 15
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
       - name: Install Playwright (locked versions via package-lock.json)
-        timeout-minutes: 10
+        timeout-minutes: 19
         run: |
           # apt mirror downloads can stall indefinitely on hosted runners:
           # bound each apt request and retry the whole install a few times.
@@ -93,11 +93,15 @@ jobs:
           } | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
           npm ci
           for attempt in 1 2 3; do
-            if timeout 240 npx playwright install --with-deps chromium firefox webkit; then
+            if timeout 360 npx playwright install --with-deps chromium firefox webkit; then
               exit 0
             fi
             echo "Playwright install attempt $attempt failed or timed out" >&2
+            # timeout kills npx but not its apt-get child, which would keep the dpkg lock
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
             sleep 5
+            sudo dpkg --configure -a || true
           done
           exit 1
       - name: Run cross-browser player URL tests (bundled engines only in CI)
