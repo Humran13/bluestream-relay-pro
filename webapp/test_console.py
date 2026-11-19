@@ -5524,6 +5524,17 @@ class ContinuousLocalVideoTests(unittest.TestCase):
         self.assertIn('aria-checked="false"', html)
         self.assertEqual(self.client.get("/console/streams/dino/continuous").status_code, 405)
 
+    def test_streams_table_has_no_active_or_boot_columns(self):
+        html = self.client.get("/console/streams").get_data(as_text=True)
+        head = html[html.index("<thead>"):html.index("</thead>")]
+        self.assertNotIn("Active", head)
+        self.assertNotIn("Boot", head)
+        for col in ("Loop", "Health", "Links", "Actions"):
+            self.assertIn("<th>%s</th>" % col, head)
+        self.assertEqual(head.count("<th>"), 7)
+        row = html[html.index("<tbody>"):html.index("</tbody>")]
+        self.assertEqual(row.count("<td"), 7 * 3)  # 7 cells x 3 streams
+
     def test_toggle_on_when_stopped_only_sets_mode(self):
         path = "/console/streams/dino/continuous"
         rv = self.client.post(path, data={"continuous": "yes", "csrf_token": self._csrf("/console/streams")})
