@@ -1,0 +1,153 @@
+"""Studio runtime CLI, called by run-relay.sh for relays of TYPE=studio.
+
+    python3 -m studio.cli argv    <relay> <project>   NUL-separated FFmpeg argv on stdout
+    python3 -m studio.cli widgets <relay> <project>   text-file updater loop (sidecar)
+    python3 -m studio.cli plan    <project>           human-readable plan (diagnostics)
+
+Exit codes for `argv`: 0 ok, 2 invalid/missing project or source, 3 refused by
+admission control (never silently degraded), 4 pre-render failed.
+"""
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+from . import ffmpeg as sff
+from . import planner, runtime, store, widgets
+from .model import NAME_RE, ValidationError
+
+
+def _workdir(relay):
+    d = os.path.join(runtime.run_dir(), "studio-%s.work" % relay)
+    os.makedirs(d, mode=0o750, exist_ok=True)
+    return d
+
+
+def _out_url(relay):
+    return "%s/%s/%s" % (runtime.BUS, runtime.APP_RELAY, relay)
+
+
+def make_plan(project):
+    src_in, live = runtime.resolve_source(project)
+    info = runtime.probe_source(src_in, live)
+    return src_in, live, info, planner.plan_output(project, info)
+
+
+def _render_cache(project, src_in, info, plan, relay):
+    """Build the one-time pre-render cache (atomic: temp file then rename)."""
+    final = runtime.cache_path(plan.cache_key)
+    if runtime.cache_valid(final):
+        os.utime(final)  # LRU touch
+        return final
+    os.makedirs(runtime.cache_dir(), exist_ok=True)
+    need = int((info.duration or 0) * project.profile.video_kbps * 1000 / 8 * 1.3) + 50 * 1024 ** 2
+    runtime.evict_cache(keep=())
+    if runtime.disk_free_bytes(runtime.cache_dir()) < need:
+        raise RuntimeError("not enough free disk for pre-render cache")
+    tmp = final[:-4] + ".tmp"
+    args = sff.build_prerender_args(project, src_in, tmp, _workdir(relay), runtime.media_dir(),
+                                    has_audio=bool(info.acodec))
+    # build_prerender_args pins -f mp4, so the .tmp name does not matter.
+    _write_static_text(project, _workdir(relay))
+    r = subprocess.run(args, capture_output=True, text=True, timeout=max(600, int((info.duration or 0) * 4)))
+    if r.returncode != 0 or not runtime.cache_valid(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError("pre-render failed (ffmpeg exit %d)" % r.returncode)
+    os.replace(tmp, final)
+    return final
+
+
+def _write_static_text(project, workdir, now=None):
+    now = now or datetime.now(timezone.utc)
+    for i, o in enumerate(project.visible_overlays()):
+        if o.kind in ("rect", "image"):
+            continue
+        widgets.atomic_write(sff.text_file_path(workdir, i), widgets.render_text(o, now))
+
+
+def cmd_argv(relay, name):
+    try:
+        project = store.load_published(name)
+        src_in, live, info, plan = make_plan(project)
+    except (ValidationError, OSError, ValueError) as exc:
+        sys.stderr.write("studio: cannot prepare project: %s\n" % exc)
+        return 2
+    ok, why = planner.admit(plan, runtime.running_live_encodes(exclude=relay),
+                            max_live_encodes=int(os.environ.get("BLUESTREAM_STUDIO_MAX_LIVE", "1")),
+                            cpu_cores=os.cpu_count() or 4, load_avg=os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0)
+    if not ok:
+        sys.stderr.write("studio: refused: %s\n" % why)
+        return 3
+    wd = _workdir(relay)
+    out = _out_url(relay)
+    if plan.path == planner.DIRECT:
+        args = sff.build_copy_args(src_in, out, loop_file=not live)
+    elif plan.path == planner.PRERENDER:
+        try:
+            cached = _render_cache(project, src_in, info, plan, relay)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            sys.stderr.write("studio: %s\n" % exc)
+            return 4
+        args = sff.build_copy_args(cached, out, loop_file=True)
+    else:
+        _write_static_text(project, wd)
+        args = sff.build_live_args(project, src_in, out, wd, runtime.media_dir(),
+                                   has_audio=True if live else bool(info.acodec),
+                                   loop_file=not live)
+    sys.stderr.write("studio: plan=%s (%s)\n" % (plan.path, "; ".join(plan.reasons)))
+    sys.stdout.buffer.write(b"\0".join(a.encode() for a in args) + b"\0")
+    return 0
+
+
+def cmd_widgets(relay, name):
+    """Sidecar: refresh dynamic text files ~1/s and hold the live-slot lease."""
+    stop = []
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    project = store.load_published(name)
+    wd = _workdir(relay)
+    dynamic = any(o.dynamic for o in project.visible_overlays())
+    if dynamic:
+        runtime.take_live_lease(relay)
+    try:
+        while not stop:
+            _write_static_text(project, wd)
+            # monotonic sleep aligned to wall-clock seconds so timers don't drift
+            time.sleep(1.0 - (time.time() % 1.0))
+    finally:
+        runtime.release_live_lease(relay)
+    return 0
+
+
+def cmd_plan(name):
+    project = store.load_published(name)
+    src_in, live, info, plan = make_plan(project)
+    print("path=%s live_source=%s" % (plan.path, live))
+    for r in plan.reasons:
+        print("reason: " + r)
+    return 0
+
+
+def main(argv):
+    try:
+        cmd = argv[1]
+        if cmd in ("argv", "widgets"):
+            relay, name = argv[2], argv[3]
+            if not (NAME_RE.match(relay) and NAME_RE.match(name)):
+                return 2
+            return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
+        if cmd == "plan" and NAME_RE.match(argv[2]):
+            return cmd_plan(argv[2])
+    except IndexError:
+        pass
+    sys.stderr.write(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

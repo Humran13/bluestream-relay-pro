@@ -12,6 +12,8 @@ from .model import ValidationError
 
 
 def _zone(tz):
+    if tz == "UTC":
+        return timezone.utc
     try:
         return ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError, OSError):
@@ -67,3 +69,31 @@ def atomic_write(path, text):
         except OSError:
             pass
         raise
+
+
+def format_countup(anchor, tz, now_utc):
+    secs = max(0, int((now_utc - parse_target(anchor, tz)).total_seconds()))
+    days, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    return ("%dd %02d:%02d:%02d" % (days, h, m, s)) if days else ("%02d:%02d:%02d" % (h, m, s))
+
+
+def render_text(overlay, now_utc, now_playing=""):
+    """Current text for any text-backed overlay at `now_utc` (pure function)."""
+    k = overlay.kind
+    if k in ("text", "ticker"):
+        return overlay.text
+    if k == "clock":
+        return format_clock(overlay.tz, now_utc)
+    if k == "countdown":
+        return format_countdown(overlay.target, overlay.tz, now_utc, overlay.finished_text)
+    if k == "countup":
+        return format_countup(overlay.target, overlay.tz, now_utc)
+    if k == "pomodoro":
+        label, left = pomodoro_phase(parse_target(overlay.target, overlay.tz), now_utc,
+                                     overlay.work_min, overlay.break_min)
+        return "%s %02d:%02d" % (label, left // 60, left % 60)
+    if k == "nowplaying":
+        return (overlay.text + " " if overlay.text else "") + now_playing
+    return ""

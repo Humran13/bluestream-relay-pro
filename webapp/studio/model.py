@@ -14,9 +14,9 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-KINDS = ("text", "image", "rect", "clock", "countdown", "ticker")
+KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying")
 # Kinds whose rendered output changes over time -> need live composition.
-DYNAMIC_KINDS = frozenset({"clock", "countdown", "ticker"})
+DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying"})
 MAX_OVERLAYS = 24
 
 
@@ -71,7 +71,10 @@ class Overlay:
     font: str = "DejaVu Sans"
     size: int = 48
     tz: str = "UTC"
-    target: str = ""  # ISO-8601 absolute deadline for countdown
+    target: str = ""  # ISO-8601 absolute deadline/anchor (countdown, countup, pomodoro)
+    work_min: int = 25
+    break_min: int = 5
+    finished_text: str = "LIVE NOW"
 
     @property
     def dynamic(self):
@@ -97,8 +100,12 @@ class Overlay:
             raise ValidationError("text too long")
         if self.kind == "image" and not ASSET_RE.match(self.asset):
             raise ValidationError("invalid asset name")
-        if self.kind == "countdown" and not self.target:
-            raise ValidationError("countdown needs a target")
+        if self.kind in ("countdown", "countup", "pomodoro") and not self.target:
+            raise ValidationError("%s needs a target/anchor time" % self.kind)
+        if not (1 <= self.work_min <= 600 and 1 <= self.break_min <= 600):
+            raise ValidationError("pomodoro minutes out of range")
+        if len(self.finished_text) > 100:
+            raise ValidationError("finished text too long")
         return self
 
 

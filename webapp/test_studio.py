@@ -186,3 +186,120 @@ class WidgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreRuntimeCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = self.tmp.name
+        self.env = {"BLUESTREAM_STUDIO_DIR": d + "/studio", "BLUESTREAM_RUN_DIR": d + "/run",
+                    "BLUESTREAM_MEDIA_DIR": d + "/media", "BLUESTREAM_STUDIO_CACHE": d + "/cache"}
+        for k, v in self.env.items():
+            os.environ[k] = v
+            self.addCleanup(os.environ.pop, k, None)
+        for sub in ("run", "media", "cache"):
+            os.makedirs(d + "/" + sub)
+
+    def test_draft_publish_rollback_and_history(self):
+        from webapp.studio import store
+        p = proj([Overlay("text", text="v1")])
+        store.save_draft(p)
+        self.assertTrue(store.has_unpublished_changes("demo"))
+        self.assertEqual(store.publish("demo"), 1)
+        self.assertFalse(store.has_unpublished_changes("demo"))
+        p.overlays = [Overlay("text", text="v2")]
+        store.save_draft(p)
+        self.assertEqual(store.publish("demo"), 2)
+        self.assertEqual(store.load_published("demo").overlays[0].text, "v2")
+        store.rollback("demo", 1)
+        self.assertEqual(store.load_draft("demo").overlays[0].text, "v1")
+        self.assertEqual(store.load_published("demo").overlays[0].text, "v2")  # live untouched
+        for i in range(12):
+            store.save_draft(proj([Overlay("text", text="r%d" % i)]))
+            store.publish("demo")
+        self.assertLessEqual(len(store.revisions("demo")), store.KEEP_REVISIONS)
+        with self.assertRaises(ValidationError):
+            store.load_draft("../evil")
+        self.assertEqual(store.list_projects(), ["demo"])
+
+    def test_corrupt_project_file_is_rejected_not_crashing(self):
+        from webapp.studio import store
+        os.makedirs(os.environ["BLUESTREAM_STUDIO_DIR"])
+        open(os.environ["BLUESTREAM_STUDIO_DIR"] + "/bad.json", "w").write("{not json")
+        with self.assertRaises(ValueError):
+            store.load_published("bad")
+
+    def test_cache_eviction_lru_and_stale_tmp(self):
+        from webapp.studio import runtime
+        d = os.environ["BLUESTREAM_STUDIO_CACHE"]
+        for i, age in enumerate((300, 200, 100)):
+            f = "%s/k%d.mp4" % (d, i)
+            open(f, "wb").write(b"x" * 1000)
+            os.utime(f, (__import__("time").time() - age,) * 2)
+        removed = runtime.evict_cache(limit=2000)
+        self.assertEqual(removed, ["k0.mp4"])  # least recently used first
+
+    def test_progress_parsing_and_health(self):
+        from webapp.studio import runtime
+        blk = "frame=90\nfps=30.0\ndrop_frames=1\nspeed=1.02x\nprogress=continue\n"
+        cur = runtime.parse_progress(blk)
+        self.assertEqual((cur["frame"], cur["drop_frames"]), (90, 1))
+        self.assertEqual(runtime.health_verdict(None, cur, 0)[0], "HEALTHY")
+        self.assertEqual(runtime.health_verdict(cur, cur, 30)[0], "STALLED")
+        slow = dict(cur, speed=0.8, frame=120)
+        self.assertEqual(runtime.health_verdict(cur, slow, 5)[0], "DEGRADED")
+        self.assertEqual(runtime.health_verdict(None, {}, 0)[0], "STARTING")
+
+    def test_live_lease_counts_and_clears_stale(self):
+        from webapp.studio import runtime
+        runtime.take_live_lease("a")  # this process is alive
+        self.assertEqual(runtime.running_live_encodes(), 1)
+        self.assertEqual(runtime.running_live_encodes(exclude="a"), 0)
+        open(os.environ["BLUESTREAM_RUN_DIR"] + "/studio-dead.live", "w").write("999999")
+        self.assertEqual(runtime.running_live_encodes(), 1)  # dead lease ignored & removed
+        runtime.release_live_lease("a")
+        self.assertEqual(runtime.running_live_encodes(), 0)
+
+    def _argv(self, relay, name):
+        import io
+        from unittest import mock
+        from webapp.studio import cli
+        buf = io.BytesIO()
+        out = mock.Mock(buffer=buf)
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()) as err:
+            rc = cli.cmd_argv(relay, name)
+        return rc, [a.decode() for a in buf.getvalue().split(b"\0") if a], err.getvalue()
+
+    @unittest.skipIf(os.name == "nt", "POSIX paths only (Linux CI covers this)")
+    def test_cli_argv_live_plan_and_admission_refusal(self):
+        from webapp.studio import runtime, store
+        store.save_draft(Project("demo", "relay", "dino", [Overlay("clock")]).validate())
+        store.publish("demo")
+        rc, args, err = self._argv("demo", "demo")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("libx264", args)
+        self.assertEqual(args[-1], "rtmp://127.0.0.1:1935/bluestream-relay/demo")
+        self.assertIn("plan=live-composition", err)
+        # another live encoder holds the only slot -> refused, nothing emitted
+        runtime.take_live_lease("other")
+        rc, args, err = self._argv("demo", "demo")
+        self.assertEqual((rc, args), (3, []))
+        self.assertIn("refused", err)
+
+    def test_cli_missing_project_or_media_fails_closed(self):
+        self.assertEqual(self._argv("demo", "nope")[0], 2)
+        from webapp.studio import store
+        store.save_draft(Project("m", "media", "gone.mp4").validate())
+        store.publish("m")
+        self.assertEqual(self._argv("m", "m")[0], 2)
+
+    def test_render_text_all_kinds(self):
+        now = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        t = (now + timedelta(seconds=90)).isoformat()
+        self.assertEqual(wd.render_text(Overlay("text", text="hi"), now), "hi")
+        self.assertEqual(wd.render_text(Overlay("clock"), now), "12:00:00")
+        self.assertEqual(wd.render_text(Overlay("countdown", target=t), now), "00:01:30")
+        self.assertEqual(wd.render_text(Overlay("countup", target=(now - timedelta(seconds=75)).isoformat()), now), "00:01:15")
+        self.assertEqual(wd.render_text(Overlay("pomodoro", target=now.isoformat(), work_min=25), now + timedelta(minutes=1)), "FOCUS 24:00")
+        self.assertEqual(wd.render_text(Overlay("nowplaying", text="Now:"), now, "Song"), "Now: Song")
