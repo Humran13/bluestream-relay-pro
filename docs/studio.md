@@ -28,8 +28,11 @@ Starting another is **refused with a clear message**, never silently degraded.
 
 ## Using it
 
-1. Enable the feature: set `BLUESTREAM_STUDIO_ENABLED=1` for the web console
-   service (opt-in; off by default) and restart the console only.
+1. Enable the feature (opt-in; off by default) with a systemd drop-in, then restart
+   **only** the console: `systemctl edit bluestream-web` and add
+   `[Service]` / `Environment=BLUESTREAM_STUDIO_ENABLED=1`, then `systemctl restart bluestream-web`.
+   Running streams are not touched. The vendor public key must also be present
+   (see `docs/bluestream/COMMERCIAL.md`) or Studio stays locked.
 2. **Studio -> Licence**: paste your licence key.
 3. **New project**: pick media/relay/playlist, choose a template.
 4. Edit overlays (position as fractions of the canvas, so layouts survive a

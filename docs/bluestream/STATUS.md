@@ -1,23 +1,26 @@
 # STATUS (update after every milestone)
 
-Last verified: branch `feature/bluestream-studio` on top of main `dbfb71b` (CI green on main at 214adf1 + Streams UI commit).
+Branch `feature/bluestream-studio` (draft PR #6, NOT merged, NOT deployed). Base: main `dbfb71b`.
+Label: **implementation complete for the V1 candidate scope below; release gate PENDING.**
+Do NOT call this beta-ready: Gates B (staging), C (benchmarks/72h), D (payments), E (security sign-off) in
+`RELEASE_CHECKLIST.md` are open.
 
-## Works (unit-tested, pure Python, no ffmpeg needed)
-- `webapp/studio/model.py` validated project/overlay/profile model
-- `webapp/studio/planner.py` DIRECT / PRERENDER / LIVE planner, cache key, admission control
-- `webapp/studio/ffmpeg.py` single-chain live-composition argv builder (local-bus only, injection-safe)
-- `webapp/studio/widgets.py` countdown/clock/pomodoro text + atomic file write
-- `webapp/test_studio.py`: 21 pass, 1 skip (tzdata missing on this Windows box)
+## Implemented and tested
+- Core: model, planner (copy / pre-render / live), admission control, argv builders (live, pre-render, copy, slideshow)
+- Widgets: clock, countdown, count-up, Pomodoro (absolute anchors, DST-correct), ticker, Now Playing (file-fed), API data (SSRF-guarded)
+- Runtime: relay TYPE=studio via existing run-relay.sh/supervise.sh; sidecar for live text; cache + eviction; live leases; progress-based health helpers
+- Console (flag-gated): home/licence, create from templates, overlay editor + preview, save draft, Apply to Live (confirmed restart of one stream), rollback, create stream, Help & Feedback
+- Licensing: Ed25519 offline entitlements, grace, revocation, backend enforcement (routes + runtime); payments adapter (NOT live)
+- Ops: installer copies studio/, backup includes projects, soak harness, vendor licence tool
+- Tests: ~140 new Python tests + 3 shell-wiring tests; real-FFmpeg tests run in CI only
 
-## Current task
-Phase 1 core integration: Studio runtime (systemd unit + wrapper reusing local RTMP bus so existing publishers/HLS work unchanged), persisted project store, ownership lease.
+## NOT done (honest)
+- Staging VPS validation, upgrade/rollback rehearsal, failure injection on real systemd, reboot simulation
+- 4-vCPU benchmark and 72-hour soak (harness ready: `tools/studio_soak.py`)
+- Payments provider integration; vendor key issuance; legal docs
+- Browser-capture source (deliberately gated off); Now Playing producer in the Playlist engine; playlist scheduling additions
+- Per-destination exclusivity across *different* streams (design: one publisher unit per (stream,destination); verify on staging)
 
-## Next three actions
-1. Validate generated argv against real FFmpeg on Linux (CI job or WSL): 720p30 output, GOP, loop boundary. (UNTESTED)
-2. `lib/studio.sh` + `config/systemd/bluestream-studio@.service` + `run-studio.sh` (supervise.sh, desired-state persisted, Stop stays stopped).
-3. `web-ctl` ops + `engine.py` allowlist + console Studio tab (behind feature flag).
-
-## Blockers / honesty
-- No ffmpeg, Docker daemon, or tzdata on this dev machine -> media/benchmark tests PENDING.
-- VPS SSH details never provided; no staging box. 72h test and 4-vCPU benchmark PENDING.
-- Payments/licensing: not started; no provider/credentials.
+## Next actions (for the owner)
+1. Review PR #6, run the checklist on a staging VPS, run the 72h soak.
+2. Decide payment provider; generate the vendor key.
