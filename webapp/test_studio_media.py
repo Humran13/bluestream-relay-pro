@@ -27,7 +27,7 @@ def probe(path):
 def keyframe_times(path):
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
-         "-show_entries", "frame=pts_time", "-of", "csv=p=0", path],
+         "-show_entries", "frame=pts_time", "-of", "default=nw=1:nk=1", path],
         capture_output=True, text=True, check=True).stdout.split()
     return [float(x) for x in out if x]
 
@@ -85,7 +85,7 @@ class RealFfmpegTests(unittest.TestCase):
 
     def test_prerender_static_overlays_normalises_to_profile(self):
         proj = self.project([Overlay("rect", x=0.0, y=0.9, w=1.0, h=0.1, color="#000000", opacity=0.6),
-                             Overlay("text", x=0.05, y=0.92, text="BlueStream", size=40),
+                             Overlay("text", x=0.05, y=0.92, h=0.07, text="BlueStream", size=40),
                              Overlay("image", x=0.85, y=0.05, w=0.1, asset="logo.png")])
         wd.atomic_write(sff.text_file_path(self.dir, 1), "BlueStream")
         out = self.dir + "/pre.mp4"
@@ -125,12 +125,12 @@ class RealFfmpegTests(unittest.TestCase):
         args = sff._build(proj, self.src, out, self.dir, self.assets, sff.DEFAULT_FONT,
                           True, True, FFMPEG, "mp4", [])
         args.remove("-re")
-        args[-2:-2] = ["-t", "9"]  # three source loops (4s source -> loops past EOF)
+        args[-3:-3] = ["-t", "9"]  # three source loops (4s source -> loops past EOF)
         self.run_ff(args)
         info = self.assert_target_profile(out, 8.5)
         out_pts = subprocess.run(
             [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=dts_time",
-             "-of", "csv=p=0", out], capture_output=True, text=True, check=True).stdout.split()
+             "-of", "default=nw=1:nk=1", out], capture_output=True, text=True, check=True).stdout.split()
         dts = [float(x) for x in out_pts if x]
         self.assertTrue(all(b >= a for a, b in zip(dts, dts[1:])), "non-monotonic DTS at loop")
         self.assertIn("format", info)
@@ -175,7 +175,7 @@ class RealFfmpegTests(unittest.TestCase):
         self.run_ff(args)
         dts = [float(x) for x in subprocess.run(
             [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=dts_time",
-             "-of", "csv=p=0", looped], capture_output=True, text=True, check=True).stdout.split() if x]
+             "-of", "default=nw=1:nk=1", looped], capture_output=True, text=True, check=True).stdout.split() if x]
         self.assertTrue(all(b >= a for a, b in zip(dts, dts[1:])), "non-monotonic DTS across copy loop")
         self.assertGreaterEqual(dts[-1], 12.0)
 

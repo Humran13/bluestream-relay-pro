@@ -27,6 +27,7 @@ jobs:
           {
             echo 'Acquire::Retries "3";'
             echo 'Acquire::http::Timeout "30";'
+            echo 'DPkg::Lock::Timeout "180";'
           } | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
           for attempt in 1 2 3; do
             if timeout 330 sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core tzdata; then exit 0; fi
@@ -87,6 +88,7 @@ jobs:
           {
             echo 'Acquire::Retries "3";'
             echo 'Acquire::http::Timeout "30";'
+            echo 'DPkg::Lock::Timeout "180";'
             echo 'Acquire::https::Timeout "30";'
           } | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
           npm ci

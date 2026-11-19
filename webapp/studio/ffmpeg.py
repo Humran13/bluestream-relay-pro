@@ -103,6 +103,8 @@ def _build(project, source, output, workdir, assets_dir, fontfile, has_audio,
     amap, ain = _audio_args(has_audio, extra + 1)
     args += ain
     args += ["-filter_complex", graph, "-map", "[%s]" % last] + amap
+    if not has_audio:
+        args += ["-shortest"]  # the synthetic silence is endless; end with the video
     args += _encode_opts(project.profile) + extra_out + ["-f", fmt, output]
     return args
 
