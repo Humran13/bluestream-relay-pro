@@ -21,6 +21,18 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      - name: Install FFmpeg + fonts + tzdata (Studio media tests)
+        timeout-minutes: 8
+        run: |
+          {
+            echo 'Acquire::Retries "3";'
+            echo 'Acquire::http::Timeout "30";'
+          } | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
+          for attempt in 1 2 3; do
+            if timeout 180 sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core tzdata; then exit 0; fi
+            sleep 5
+          done
+          exit 1
       - name: Install pinned dependencies (Flask/Werkzeug + pytest)
         run: pip install -r webapp/requirements-dev.txt
       - name: Compile check
