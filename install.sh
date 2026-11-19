@@ -405,6 +405,13 @@ install_files() {
     # regardless of the source checkout's ownership or mode bits.
     chown root:root "$libdir"/lib/*.sh
     chmod 0644 "$libdir"/lib/*.sh
+    # BlueStream Studio (opt-in; Python package used by run-relay.sh for TYPE=studio
+    # relays). Root-owned and not writable by the unprivileged runtime user.
+    mkdir -p "$libdir/studio" /var/lib/bluestream/studio
+    cp -f "$BS_ROOT"/webapp/studio/*.py "$libdir/studio/"
+    chown -R root:root "$libdir/studio"
+    chmod 0755 "$libdir/studio"
+    chmod 0644 "$libdir"/studio/*.py
     cp -f "$BS_ROOT"/config/nginx/*.template "$libdir/config/nginx/"
     cp -f "$BS_ROOT"/config/nginx/*.conf "$libdir/config/nginx/"
     cp -f "$BS_ROOT"/config/systemd/*.service "$libdir/config/systemd/"

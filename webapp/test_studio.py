@@ -264,7 +264,14 @@ class StoreRuntimeCliTests(unittest.TestCase):
     def _argv(self, relay, name):
         import io
         from unittest import mock
-        from webapp.studio import cli
+        from webapp.studio import cli, ed25519, entitlement
+        sk = bytes(range(32))
+        os.environ["BLUESTREAM_STUDIO_PUBKEY_HEX"] = ed25519.public_key(sk).hex()
+        os.environ["BLUESTREAM_ETC_DIR"] = self.tmp.name
+        entitlement.install_token(entitlement.make_token(sk, {
+            "v": 1, "lic": "L1", "plan": "studio", "exp": 4102444800}))
+        self.addCleanup(os.environ.pop, "BLUESTREAM_STUDIO_PUBKEY_HEX", None)
+        self.addCleanup(os.environ.pop, "BLUESTREAM_ETC_DIR", None)
         buf = io.BytesIO()
         out = mock.Mock(buffer=buf)
         with mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()) as err:

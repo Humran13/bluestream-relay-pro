@@ -177,4 +177,15 @@ if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
     RELAY_RETRY_FOREVER=1
 fi
 
+# Studio relays: an unattended 24/7 output is retried forever (capped backoff),
+# and a sidecar refreshes live text widgets (clock/countdown/ticker/...) and holds
+# the live-encode lease. The sidecar is tied to this unit's lifetime (EXIT trap)
+# so it can never outlive a Stop. A Studio failure only ever affects this relay.
+if [ "$RELAY_TYPE" = "studio" ]; then
+    RELAY_RETRY_FOREVER=1
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         python3 -m studio.cli widgets "$RELAY_NAME" "$RELAY_URL" &
+    STUDIO_WIDGETS_PID=$!
+    trap 'kill "$STUDIO_WIDGETS_PID" 2>/dev/null; wait "$STUDIO_WIDGETS_PID" 2>/dev/null' EXIT
+fi
+
 bs_supervise_run relay "$RELAY_NAME" "$RELAY_FINITE_OK" "$RELAY_RESTART_SEC" _relay_build_for_supervisor "$RELAY_RETRY_FOREVER"

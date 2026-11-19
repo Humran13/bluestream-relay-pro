@@ -77,6 +77,7 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "relay_create_url",
         "relay_create_media",
         "relay_set_continuous",
+        "relay_create_studio",
         "media_import_staged",
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
@@ -578,6 +579,15 @@ class EngineClient:
             if continuous not in ("yes", "no"):
                 raise EngineError("invalid 24/7 mode", code="INVALID_CONTINUOUS")
             return [name, media, continuous]
+        if operation == "relay_create_studio":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, project = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_target_name(project):
+                raise EngineError("invalid project name", code="INVALID_PROJECT")
+            return [name, project]
         if operation == "relay_set_continuous":
             if len(values) != 2:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
@@ -783,6 +793,10 @@ class EngineClient:
 
     def relay_create_media(self, name: str, media: str, continuous: str = "yes"):
         return self._mutation("relay_create_media", name, media, continuous)
+
+    def relay_create_studio(self, name: str, project: str):
+        """Create a Studio-backed stream (relay TYPE=studio) from a published project."""
+        return self._mutation("relay_create_studio", name, project)
 
     def relay_set_continuous(self, name: str, continuous: str):
         """Set explicit 24/7 mode on a stopped local-video stream."""

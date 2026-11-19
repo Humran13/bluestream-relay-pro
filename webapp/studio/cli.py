@@ -5,7 +5,7 @@
     python3 -m studio.cli plan    <project>           human-readable plan (diagnostics)
 
 Exit codes for `argv`: 0 ok, 2 invalid/missing project or source, 3 refused by
-admission control (never silently degraded), 4 pre-render failed.
+admission control (never silently degraded), 4 pre-render failed, 5 no valid licence.
 """
 import os
 import signal
@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import planner, runtime, store, widgets
+from . import entitlement, planner, runtime, store, widgets
 from .model import NAME_RE, ValidationError
 
 
@@ -71,6 +71,12 @@ def _write_static_text(project, workdir, now=None):
 
 
 def cmd_argv(relay, name):
+    # Backend enforcement: a Studio stream cannot start without a valid
+    # entitlement, whatever the UI shows. (Free Relay/Playlist never reach here.)
+    verdict = entitlement.current()
+    if not verdict.ok:
+        sys.stderr.write("studio: premium licence required: %s\n" % verdict.reason)
+        return 5
     try:
         project = store.load_published(name)
         src_in, live, info, plan = make_plan(project)

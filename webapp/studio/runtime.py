@@ -12,7 +12,7 @@ BUS = "rtmp://127.0.0.1:1935"
 APP_RELAY = "bluestream-relay"
 APP_PLAYLIST = "bluestream-playlist"
 DEFAULT_RUN = "/var/lib/bluestream/run"
-DEFAULT_CACHE = "/var/lib/bluestream/studio-cache"
+DEFAULT_CACHE = "/var/lib/bluestream/run/studio-cache"  # inside the relay unit's existing ReadWritePaths
 DEFAULT_MEDIA = "/var/lib/bluestream/media"
 CACHE_LIMIT_BYTES = 5 * 1024 ** 3
 
