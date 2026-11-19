@@ -12,7 +12,7 @@ Do NOT call this beta-ready: Gates B (staging), C (benchmarks/72h), D (payments)
 - Console (flag-gated): home/licence, create from templates, overlay editor + preview, save draft, Apply to Live (confirmed restart of one stream), rollback, create stream, Help & Feedback
 - Licensing: Ed25519 offline entitlements, grace, revocation, backend enforcement (routes + runtime); payments adapter (NOT live)
 - Ops: installer copies studio/, backup includes projects, soak harness, vendor licence tool
-- Tests: ~140 new Python tests + 3 shell-wiring tests; real-FFmpeg tests run in CI only
+- Tests: ~150 new Python tests + 3 shell-wiring tests; **CI fully green** (python incl. real FFmpeg, shell, node, browser) on the latest commit
 
 ## NOT done (honest)
 - Staging VPS validation, upgrade/rollback rehearsal, failure injection on real systemd, reboot simulation
