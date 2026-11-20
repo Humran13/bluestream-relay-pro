@@ -73,6 +73,19 @@ if [ "${BLUESTREAM_PRIV_DROPPED:-0}" != "1" ]; then
     # block the relay itself from starting.
     publisher_sync_target relay "$NAME" 2>/dev/null || true
 
+    # BlueStream Studio: record which project this relay runs, and start the isolated
+    # browser-capture worker ONLY when the operator enabled it and the published project
+    # has a browser overlay. Best-effort: the worker (and its gates) can never block or
+    # fail the stream itself.
+    if [ "$RELAY_TYPE" = "studio" ]; then
+        printf '%s\n' "$RELAY_URL" > "$BLUESTREAM_RUN_DIR/studio-$NAME.project" 2>/dev/null || true
+        chmod 0644 "$BLUESTREAM_RUN_DIR/studio-$NAME.project" 2>/dev/null || true
+        if [ "${BLUESTREAM_STUDIO_BROWSER:-}" = "1" ] \
+            && grep -q '"kind": "browser"' "${BLUESTREAM_STUDIO_DIR:-/var/lib/bluestream/studio}/$RELAY_URL.json" 2>/dev/null; then
+            systemctl start --no-block "bluestream-browser@$NAME.service" 2>/dev/null || true
+        fi
+    fi
+
     # Hand the already-validated config to the unprivileged continuation via
     # the environment, instead of having it re-read the root-only (0600)
     # relay config file as a non-root user (which would simply fail). These

@@ -214,6 +214,49 @@ class RealFfmpegTests(unittest.TestCase):
         info = self.assert_target_profile(out, 3.5)       # 4 s main source, 1 s PiP looped
         self.assertLess(float(info["format"]["duration"]), 5.0)
 
+    def test_browser_overlay_png_is_reloaded_while_ffmpeg_runs(self):
+        """The capture worker atomically replaces a PNG; the encoder must pick up the new image."""
+        import hashlib
+        import threading
+        import time
+        png = "%s/studio-b-br0.png" % self.dir
+        wdir = self.dir + "/studio-b.work"
+        os.makedirs(wdir, exist_ok=True)
+
+        def make(color):
+            tmp = png + ".tmp.png"
+            subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=%s:size=320x180:duration=1" % color,
+                            "-frames:v", "1", tmp], check=True)
+            os.replace(tmp, png)
+
+        make("red")
+        proj = Project("b", "media", self.src, [Overlay("browser", url="https://example.com/", x=0.0, y=0.0,
+                                                        w=0.5, h=0.5, refresh_s=60)]).validate()
+        out = self.dir + "/browser_overlay.mp4"
+        args = sff._build(proj, self.src, out, wdir, self.assets, sff.DEFAULT_FONT, True, True, FFMPEG, "mp4", [])
+        args[args.index("-i") + 1:args.index("-i") + 1] = []
+        args[-3:-3] = ["-t", "8"]
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        def swap():
+            time.sleep(3.0)
+            make("blue")
+        t = threading.Thread(target=swap)
+        t.start()
+        proc.wait(timeout=120)
+        t.join()
+        self.assertEqual(proc.returncode, 0, proc.stderr.read()[-400:] if proc.stderr else "")
+
+        def frame_hash(sec):
+            raw = subprocess.run([FFMPEG, "-v", "error", "-ss", str(sec), "-i", out, "-frames:v", "1", "-vf",
+                                  "crop=100:60:20:20", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                                 capture_output=True, check=True).stdout
+            return hashlib.md5(raw).hexdigest(), raw[:3]
+        early, late = frame_hash(1), frame_hash(7)
+        self.assertNotEqual(early[0], late[0], "overlay image was never reloaded")
+        self.assertGreater(early[1][0], early[1][2])     # red-ish first (R > B)
+        self.assertGreater(late[1][2], late[1][0])       # blue later (B > R)
+
     def test_ffmpeg_reports_real_progress_into_the_health_listener(self):
         import time
         from webapp.studio import health

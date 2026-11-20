@@ -14,9 +14,9 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video")
+KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video", "browser")
 # Kinds whose rendered output changes over time -> need live composition.
-DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video"})
+DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video", "browser"})
 MAX_OVERLAYS = 24
 
 
@@ -83,6 +83,10 @@ class Overlay:
     crop_w: float = 1.0
     crop_h: float = 1.0
     value_format: str = "raw"  # data overlay: raw | int | thousands | decimal1 | percent
+    selector: str = ""         # browser overlay: CSS selector of the element to capture ("" = whole viewport)
+    view_w: int = 1280         # browser overlay: page viewport
+    view_h: int = 720
+    allowed_hosts: str = ""    # browser overlay: extra hosts the page may load from (comma separated)
 
     @property
     def cropped(self):
@@ -123,6 +127,10 @@ class Overlay:
             raise ValidationError("crop area is invalid")
         if self.value_format not in ("raw", "int", "thousands", "decimal1", "percent"):
             raise ValidationError("unknown value format")
+        if self.kind == "browser":
+            from . import browsercap
+            browsercap.validate_spec(self.url, self.selector, self.view_w, self.view_h, self.refresh_s,
+                                     self.allowed_hosts)
         if self.kind == "data":
             if not (self.url.startswith(("http://", "https://")) and len(self.url) <= 500):
                 raise ValidationError("data overlay needs an http(s) URL")

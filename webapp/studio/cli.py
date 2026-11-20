@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import entitlement, health, netguard, nowplaying, planner, runtime, store, widgets
+from . import browsercap, entitlement, health, netguard, nowplaying, planner, runtime, store, widgets
 from .model import NAME_RE, ValidationError
 
 
@@ -125,6 +125,11 @@ def cmd_argv(relay, name):
         return 5
     try:
         project = store.load_published(name)
+        if any(o.kind == "browser" for o in project.overlays):
+            ok_b, why_b = browsercap.usable()
+            if not ok_b:
+                sys.stderr.write("studio: browser source unavailable: %s\n" % why_b)
+                return 2
         src_in, live, info, plan = make_plan(project)
     except (ValidationError, OSError, ValueError) as exc:
         sys.stderr.write("studio: cannot prepare project: %s\n" % exc)
@@ -231,6 +236,35 @@ def cmd_health(relay):
     return 0
 
 
+def cmd_browser(relay, name):
+    """Isolated worker (bluestream-browser@<relay>.service): keeps the capture PNGs fresh."""
+    ok, why = browsercap.usable()
+    if not ok:
+        sys.stderr.write("studio-browser: refusing to run: %s\n" % why)
+        return 3
+    project = store.load_published(name)
+    overlays = [(i, o) for i, o in enumerate(project.visible_overlays()) if o.kind == "browser"]
+    stop = []
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    browsercap.worker(relay, overlays, runtime.run_dir(), lambda: bool(stop))
+    return 0
+
+
+def cmd_browser_unit(relay):
+    """Entry point of bluestream-browser@<relay>.service: the root phase of run-relay.sh
+    recorded which published project this relay runs."""
+    try:
+        with open(os.path.join(runtime.run_dir(), "studio-%s.project" % relay), encoding="utf-8") as fh:
+            name = fh.read().strip()
+    except OSError:
+        sys.stderr.write("studio-browser: no project recorded for relay\n")
+        return 2
+    if not NAME_RE.match(name):
+        return 2
+    return cmd_browser(relay, name)
+
+
 def cmd_plan(name):
     project = store.load_published(name)
     src_in, live, info, plan = make_plan(project)
@@ -250,6 +284,10 @@ def main(argv):
             return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
         if cmd == "plan" and NAME_RE.match(argv[2]):
             return cmd_plan(argv[2])
+        if cmd == "browser-unit" and NAME_RE.match(argv[2]):
+            return cmd_browser_unit(argv[2])
+        if cmd == "browser" and NAME_RE.match(argv[2]) and NAME_RE.match(argv[3]):
+            return cmd_browser(argv[2], argv[3])
         if cmd == "health" and NAME_RE.match(argv[2]):
             return cmd_health(argv[2])
     except IndexError:

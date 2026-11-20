@@ -438,6 +438,7 @@ install_files() {
 
     # systemd unit templates.
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-relay@.service" /etc/systemd/system/bluestream-relay@.service
+    install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-browser@.service" /etc/systemd/system/bluestream-browser@.service
     install -o root -g root -m 0644 "$BS_ROOT/config/systemd/bluestream-playlist@.service" /etc/systemd/system/bluestream-playlist@.service
     # GUI-8A: one-time playlist start oneshot template (triggered only by a
     # generated bluestream-schedule-<name>.timer).

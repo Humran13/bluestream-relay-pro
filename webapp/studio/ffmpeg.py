@@ -21,6 +21,16 @@ def text_file_path(workdir, index):
     return "%s/ov%d.txt" % (workdir, index)
 
 
+def relay_for_browser(workdir):
+    """workdir is <run>/studio-<relay>.work (see cli._workdir)."""
+    base = workdir.rstrip("/").rsplit("/", 1)[-1]
+    return base[len("studio-"):-len(".work")] if base.startswith("studio-") and base.endswith(".work") else "x"
+
+
+def run_dir_for_browser(workdir):
+    return workdir.rstrip("/").rsplit("/", 1)[0]
+
+
 def _check_path(path):
     if not SAFE_PATH_RE.match(path) or ".." in path.split("/"):
         raise ValidationError("unsafe path")
@@ -69,6 +79,15 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
         if o.kind == "rect":
             f = "[%s]drawbox=x=%d:y=%d:w=%d:h=%d:color=%s:t=fill[%s]" % (
                 last, x, y, _px(o.w, p.width), _px(o.h, p.height), _color(o.color, o.opacity), nxt)
+        elif o.kind == "browser":
+            png = "%s/studio-%s-br%d.png" % (run_dir_for_browser(workdir), relay_for_browser(workdir), i)
+            _check_path(png)
+            extra_args += ["-f", "image2", "-loop", "1", "-framerate", "1", "-i", png]
+            extra += 1
+            idx = first_extra + extra - 1
+            chain.append("[%d:v]scale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
+                         % (idx, _px(o.w, p.width), o.opacity, idx))
+            f = "[%s][im%d]overlay=%d:%d:shortest=1[%s]" % (last, idx, x, y, nxt)
         elif o.kind in ("image", "video"):
             if o.kind == "video":  # picture-in-picture: looped, muted (audio never mapped)
                 extra_args += ["-stream_loop", "-1", "-i", "%s/%s" % (assets_dir, o.asset)]

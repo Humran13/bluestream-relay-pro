@@ -110,6 +110,13 @@
     {% if o.kind in ('image','video') %}<label>{{ 'Video' if o.kind == 'video' else 'Image' }} (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>
     <label>Crop X <input name="crop_x_{{ i }}" value="{{ o.crop_x }}" size="4"></label><label>Crop Y <input name="crop_y_{{ i }}" value="{{ o.crop_y }}" size="4"></label>
     <label>Crop W <input name="crop_w_{{ i }}" value="{{ o.crop_w }}" size="4"></label><label>Crop H <input name="crop_h_{{ i }}" value="{{ o.crop_h }}" size="4"></label>{% endif %}
+    {% if o.kind == 'browser' %}
+    <label>Page URL (https) <input name="url_{{ i }}" value="{{ o.url }}" size="40" maxlength="500"></label>
+    <label>CSS selector (optional) <input name="selector_{{ i }}" value="{{ o.selector }}" size="20" maxlength="200"></label>
+    <label>Viewport <input name="view_w_{{ i }}" type="number" min="320" max="1920" value="{{ o.view_w }}" size="5"> x <input name="view_h_{{ i }}" type="number" min="240" max="1080" value="{{ o.view_h }}" size="5"></label>
+    <label>Capture every (s) <input name="refresh_s_{{ i }}" type="number" min="15" max="3600" value="{{ o.refresh_s }}" size="5"></label>
+    <label>Extra allowed hosts <input name="allowed_hosts_{{ i }}" value="{{ o.allowed_hosts }}" size="30" placeholder="cdn.example.com"></label>
+    <span class="muted">Advanced and costly: the whole page still runs in a sandboxed browser on your VPS. Prefer a Data overlay when the value comes from an API. Unlisted hosts cannot load; the last good image stays on error.</span>{% endif %}
     {% if o.kind == 'data' %}
     <label>Data URL (public JSON) <input name="url_{{ i }}" value="{{ o.url }}" size="40" maxlength="500"></label>
     <label>JSON path <input name="json_path_{{ i }}" value="{{ o.json_path }}" placeholder="items.0.count" size="16"></label>
@@ -127,6 +134,7 @@
     </span>
   </details>
   {% endfor %}
+  {% if browser_gate %}<p class="muted">Browser source is off: {{ browser_gate }}.</p>{% endif %}
   <p>Add:
     {% for k in kinds %}<button class="btn btn-sm btn-secondary" name="action" value="add:{{ k }}" type="submit">+ {{ k }}</button> {% endfor %}
   </p>

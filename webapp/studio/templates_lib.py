@@ -31,6 +31,9 @@ def default_overlay(kind):
         "ticker": Overlay("ticker", x=0.0, y=0.92, w=1.0, h=0.07, size=36, text="Welcome - thanks for watching"),
         "data": Overlay("data", x=0.05, y=0.8, w=0.5, h=0.1, size=40, text="Subscribers: {value}",
                         url="https://example.com/stats.json", json_path="subscribers"),
+        "browser": Overlay("browser", x=0.55, y=0.1, w=0.4, h=0.3, url="https://example.com/",
+                           refresh_s=60, view_w=1280, view_h=720),
+        "video": Overlay("video", x=0.7, y=0.05, w=0.25, h=0.25, asset="clip.mp4"),
         "nowplaying": Overlay("nowplaying", x=0.05, y=0.9, w=0.6, h=0.08, size=36, text="Now playing:"),
     }
     if kind not in d:

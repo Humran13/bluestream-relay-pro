@@ -109,5 +109,12 @@ jobs:
             sudo dpkg --configure -a || true
           done
           exit 1
+      - name: Studio browser-source tests against a REAL Chromium (no-sandbox is test-only)
+        run: |
+          pip install pytest
+          CHROME="$(find "$HOME/.cache/ms-playwright" -type f -name chrome -path '*chromium-*' ! -path '*headless*' | head -1)"
+          echo "using: $CHROME"
+          test -n "$CHROME"
+          BLUESTREAM_BROWSER_BIN="$CHROME" python -m pytest webapp/test_studio_browser.py -q -p no:cacheprovider
       - name: Run cross-browser player URL tests (bundled engines only in CI)
         run: npx playwright test -c tests/browser/playwright.config.js --project=chromium --project=firefox --project=webkit

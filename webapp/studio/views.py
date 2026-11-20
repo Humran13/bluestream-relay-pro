@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from flask import Response, abort, current_app, flash, redirect, render_template, request, send_file, session, url_for
 
-from . import entitlement, feedback, preview, store, templates_lib, widgets
+from . import browsercap, entitlement, feedback, preview, store, templates_lib, widgets
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
 
 SOURCE_KINDS = ("relay", "playlist", "media", "slideshow", "audio")
@@ -50,6 +50,8 @@ def overlay_from_form(form, i):
         size=_int(form, "size_%d" % i, 48), tz=g("tz", "UTC") or "UTC", target=g("target"),
         work_min=_int(form, "work_min_%d" % i, 25), break_min=_int(form, "break_min_%d" % i, 5),
         finished_text=g("finished_text", "LIVE NOW"),
+        selector=g("selector"), view_w=_int(form, "view_w_%d" % i, 1280), view_h=_int(form, "view_h_%d" % i, 720),
+        allowed_hosts=g("allowed_hosts"),
         url=g("url"), json_path=g("json_path"), refresh_s=_int(form, "refresh_s_%d" % i, 60),
         crop_x=_float(form, "crop_x_%d" % i, 0.0), crop_y=_float(form, "crop_y_%d" % i, 0.0),
         crop_w=_float(form, "crop_w_%d" % i, 1.0), crop_h=_float(form, "crop_h_%d" % i, 1.0),
@@ -185,6 +187,8 @@ def register(console, find_relay, engine_of):
         relay, unavailable = find_relay(name)
         if relay is not None and relay.get("type") != "studio":
             relay = None  # same name, different stream type: not ours
+        browser_ok, browser_why = browsercap.usable()
+        kinds = [k for k in KINDS if k != "browser" or browser_ok]
         ok, v = licence_ok()
         title, why = plan_hint(project)
         health_doc, publishers = None, []
@@ -195,7 +199,8 @@ def register(console, find_relay, engine_of):
             except Exception as exc:  # panel is informational; never break the editor
                 current_app.logger.warning("studio health unavailable for '%s': %s", name, exc)
         return render_template(
-            "studio_edit.html", project=project, items=preview_items(project), kinds=KINDS,
+            "studio_edit.html", project=project, items=preview_items(project), kinds=kinds,
+            browser_gate=None if browser_ok else browser_why,
             unpublished=store.has_unpublished_changes(name), revisions=store.revisions(name),
             relay=relay, licence=v, licence_ok=ok, plan_title=title, plan_why=why,
             monthly_tb=project.profile.monthly_terabytes(), unavailable=unavailable,
@@ -245,6 +250,10 @@ def register(console, find_relay, engine_of):
                 j = i - 1 if d == "up" else i + 1
                 if 0 <= i < len(overlays) and 0 <= j < len(overlays):
                     overlays[i], overlays[j] = overlays[j], overlays[i]
+            if any(o.kind == "browser" for o in overlays):
+                ok_b, why_b = browsercap.usable()
+                if not ok_b:
+                    raise ValidationError("browser source is not available: %s" % why_b)
             old.overlays = overlays
             old.source_ref = (request.form.get("source_ref") or old.source_ref).strip()
             old.slide_seconds = _int(request.form, "slide_seconds", old.slide_seconds)
