@@ -48,7 +48,10 @@ RestrictRealtime=true
 ProtectProc=invisible
 ProcSubset=pid
 
-# No ReadWritePaths: the publisher reads its source over the loopback RTMP
+# Destination-ownership lock files live in the run dir (already writable for relays).
+ReadWritePaths=/var/lib/bluestream/run
+
+# (Historical note) The publisher touches no media/config: it reads its source over the loopback RTMP
 # bus and writes only to its external destination over the network. It never
 # touches a local file, so ProtectSystem=strict's read-only root is never
 # relaxed for this unit.

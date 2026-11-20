@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import entitlement, netguard, nowplaying, planner, runtime, store, widgets
+from . import entitlement, health, netguard, nowplaying, planner, runtime, store, widgets
 from .model import NAME_RE, ValidationError
 
 
@@ -97,6 +97,25 @@ def _refresh_data(project, data, last):
             sys.stderr.write("studio: data source %d failed (%s); keeping last value\n" % (i, type(exc).__name__))
 
 
+def _attach_progress(args, relay, wait=5.0):
+    """Point FFmpeg's -progress at the sidecar's loopback listener (if it is up).
+    Falls back to the journal (pipe:2) so a missing sidecar never blocks streaming."""
+    path = health.port_path(runtime.run_dir(), relay)
+    deadline = time.monotonic() + wait
+    port = None
+    while time.monotonic() < deadline:
+        try:
+            with open(path) as fh:
+                port = int(fh.read().strip())
+            break
+        except (OSError, ValueError):
+            time.sleep(0.2)
+    if port and "-progress" in args and 1024 <= port <= 65535:
+        args = list(args)
+        args[args.index("-progress") + 1] = "tcp://127.0.0.1:%d" % port
+    return args
+
+
 def cmd_argv(relay, name):
     # Backend enforcement: a Studio stream cannot start without a valid
     # entitlement, whatever the UI shows. (Free Relay/Playlist never reach here.)
@@ -132,30 +151,83 @@ def cmd_argv(relay, name):
         args = sff.build_live_args(project, src_in, out, wd, runtime.media_dir(),
                                    has_audio=True if live else bool(info.acodec),
                                    loop_file=not live)
+    args = _attach_progress(args, relay)
     sys.stderr.write("studio: plan=%s (%s)\n" % (plan.path, "; ".join(plan.reasons)))
     sys.stdout.buffer.write(b"\0".join(a.encode() for a in args) + b"\0")
     return 0
 
 
+def _supervisor_status(relay):
+    try:
+        with open(os.path.join(runtime.run_dir(), "relay-%s.status" % relay), encoding="utf-8") as fh:
+            kv = dict(line.rstrip("\n").split("=", 1) for line in fh if "=" in line)
+    except OSError:
+        return {}
+    return {"state": kv.get("STATE", ""), "detail": kv.get("DETAIL", ""), "attempt": kv.get("ATTEMPT", "")}
+
+
 def cmd_widgets(relay, name):
-    """Sidecar: refresh dynamic text files ~1/s and hold the live-slot lease."""
+    """Sidecar: refresh live text ~1/s, hold the live-slot lease, and publish real
+    health (progress listener + process stats + supervisor state)."""
     stop = []
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     project = store.load_published(name)
     wd = _workdir(relay)
+    run = runtime.run_dir()
     dynamic = any(o.dynamic for o in project.visible_overlays())
     if dynamic:
         runtime.take_live_lease(relay)
+    tracker = health.Tracker()
+    server = health.ProgressServer(tracker)
+    server.start()
+    with open(health.port_path(run, relay), "w") as fh:
+        fh.write(str(server.port))
+    sampler, out_url = health.ProcSampler(), _out_url(relay)
     try:
         data, last = {}, {}
+        tick = 0
         while not stop:
             _refresh_data(project, data, last)
             _write_static_text(project, wd, data=data)
+            if tick % 2 == 0:
+                pid = health.find_ffmpeg_pid(out_url)
+                health.write_health(run, relay, tracker.snapshot(sampler.sample(pid), _supervisor_status(relay)))
+            tick += 1
             # monotonic sleep aligned to wall-clock seconds so timers don't drift
             time.sleep(1.0 - (time.time() % 1.0))
     finally:
+        server.stop()
         runtime.release_live_lease(relay)
+        for p in (health.port_path(run, relay), health.health_path(run, relay)):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    return 0
+
+
+HEALTH_KEYS = ("state", "detail", "speed", "fps", "frames", "dropped_frames", "restarts",
+               "cpu_cores", "rss_mb", "last_failure", "supervisor_attempt", "output_seconds")
+
+
+def health_pairs(relay):
+    """key/value pairs for web-ctl (every value bounded and stripped of control chars)."""
+    doc = health.read_health(runtime.run_dir(), relay)
+    pairs = []
+    for k in HEALTH_KEYS:
+        v = doc.get(k)
+        v = "" if v is None else str(v)
+        pairs.append((k, "".join(ch for ch in v if ch >= " ")[:200]))
+    return pairs
+
+
+def cmd_health(relay):
+    """NUL-separated key/value pairs on stdout, as `wc_json object` expects."""
+    out = b""
+    for k, v in health_pairs(relay):
+        out += k.encode() + bytes([0]) + v.encode() + bytes([0])
+    sys.stdout.buffer.write(out)
     return 0
 
 
@@ -178,6 +250,8 @@ def main(argv):
             return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
         if cmd == "plan" and NAME_RE.match(argv[2]):
             return cmd_plan(argv[2])
+        if cmd == "health" and NAME_RE.match(argv[2]):
+            return cmd_health(argv[2])
     except IndexError:
         pass
     sys.stderr.write(__doc__)

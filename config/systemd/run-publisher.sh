@@ -67,6 +67,17 @@ command -v ffmpeg >/dev/null 2>&1 || exit 1
 
 publisher_build_ffmpeg_args "$PUB_KIND" "$PUB_TARGET" "$PUB_DEST" || exit 1
 
+# Exclusive destination ownership: never publish to a key another publisher is
+# already pushing to. Blocked is a clean exit 0 (no restart loop); the holder is
+# shown in the console and a controlled takeover switches ownership explicitly.
+publisher_acquire_dest_lock "$PUB_DEST" "$INSTANCE"
+case $? in
+    0) ;;
+    1) bs_error "Destination '$PUB_DEST' is already being published by another stream; '$INSTANCE' will not start (use an explicit takeover)."
+       exit 0 ;;
+    *) exit 1 ;;
+esac
+
 if ! publisher_verify_ffmpeg_args; then
     bs_error "Refusing to exec FFmpeg: malformed publisher argument array for '$INSTANCE'."
     publisher_dump_ffmpeg_args

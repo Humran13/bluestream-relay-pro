@@ -30,6 +30,44 @@
   {% endif %}
 </section>
 
+{% if relay %}
+<section class="card" aria-live="polite">
+  <h2>Health</h2>
+  {% if health %}
+  <p><span class="badge badge-{{ {'HEALTHY':'healthy','DEGRADED':'reconnecting','STARTING':'reconnecting','STALLED':'failed','FAILED':'failed','STOPPED':'stopped'}.get(health.get('state'), 'stopped') }}">{{ health.get('state') }}</span> {{ health.get('detail') }}</p>
+  <table><tbody>
+    <tr><th scope="row">Encoder speed</th><td>{{ health.get('speed') or '-' }}{% if health.get('speed') %}x{% endif %} <span class="muted">(1.00x = real time)</span></td></tr>
+    <tr><th scope="row">Frame rate</th><td>{{ health.get('fps') or '-' }}</td></tr>
+    <tr><th scope="row">Encoder CPU</th><td>{{ health.get('cpu_cores') or '-' }} cores</td></tr>
+    <tr><th scope="row">Encoder RAM</th><td>{{ health.get('rss_mb') or '-' }} MB</td></tr>
+    <tr><th scope="row">Dropped frames</th><td>{{ health.get('dropped_frames') or '0' }}</td></tr>
+    <tr><th scope="row">Restarts</th><td>{{ health.get('restarts') or '0' }}</td></tr>
+    <tr><th scope="row">Output (HLS)</th><td><span class="badge badge-{{ relay.get('health')|lower }}">{{ relay.get('health') }}</span> {{ relay.get('health_detail', '') }}</td></tr>
+    {% if health.get('last_failure') %}<tr><th scope="row">Last failure</th><td>{{ health.get('last_failure') }}</td></tr>{% endif %}
+  </tbody></table>
+  <p class="muted">State comes from FFmpeg's own progress reports, not from whether a process exists.</p>
+  {% else %}<p class="muted">Health data is not available yet.</p>{% endif %}
+  {% if publishers %}
+  <h3>Destinations</h3>
+  <table><thead><tr><th>Destination</th><th>State</th><th></th></tr></thead><tbody>
+  {% for p in publishers %}
+    <tr>
+      <td>{{ p.get('display_name') or p.get('id') }}</td>
+      <td><span class="badge badge-{{ {'LIVE':'healthy','STARTING':'reconnecting','RECONNECTING':'reconnecting','BLOCKED':'failed','FAILED':'failed'}.get(p.get('state'), 'stopped') }}">{{ p.get('state') }}</span> <span class="muted">{{ p.get('detail') }}</span></td>
+      <td>{% if p.get('state') == 'BLOCKED' and licence_ok %}
+        <form method="post" action="{{ url_for('console.studio_takeover_post', name=project.name, dest=p.get('id')) }}"
+              onsubmit="return confirm('Switch this destination to this stream? The stream currently using it ({{ p.get('blocked_by') }}) stops publishing to it.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="confirm" value="1">
+          <button class="btn btn-sm" type="submit">Switch to this stream</button>
+        </form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody></table>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if licence_ok %}
 <form method="post" action="{{ url_for('console.studio_save_post', name=project.name) }}" class="card studio-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

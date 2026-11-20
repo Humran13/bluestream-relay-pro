@@ -182,11 +182,19 @@ def register(console, find_relay, engine_of):
             relay = None  # same name, different stream type: not ours
         ok, v = licence_ok()
         title, why = plan_hint(project)
+        health_doc, publishers = None, []
+        if relay is not None:
+            try:
+                health_doc = engine_of().read("studio_health", name)
+                publishers = engine_of().read("relay_publisher_status", name) or []
+            except Exception as exc:  # panel is informational; never break the editor
+                current_app.logger.warning("studio health unavailable for '%s': %s", name, exc)
         return render_template(
             "studio_edit.html", project=project, items=preview_items(project), kinds=KINDS,
             unpublished=store.has_unpublished_changes(name), revisions=store.revisions(name),
             relay=relay, licence=v, licence_ok=ok, plan_title=title, plan_why=why,
-            monthly_tb=project.profile.monthly_terabytes(), unavailable=unavailable)
+            monthly_tb=project.profile.monthly_terabytes(), unavailable=unavailable,
+            health=health_doc, publishers=publishers)
 
     @console.route("/studio/<name>/save", methods=["POST"])
     def studio_save_post(name):
@@ -274,6 +282,27 @@ def register(console, find_relay, engine_of):
             return True
         except (ValueError, OSError):
             return False
+
+    @console.route("/studio/<name>/takeover/<dest>", methods=["POST"])
+    def studio_takeover_post(name, dest):
+        """Controlled switch of ONE destination to this running stream."""
+        bad = guard_write(name)
+        if bad:
+            return bad
+        if not NAME_RE.match(dest):
+            flash("That destination is not valid.", "error")
+            return redirect(url_for("console.studio_edit", name=name))
+        if request.form.get("confirm") != "1":
+            flash("Confirm the switch: the other stream stops publishing to this destination.", "error")
+            return redirect(url_for("console.studio_edit", name=name))
+        try:
+            engine_of().relay_publisher_takeover(name, dest)
+        except Exception as exc:
+            current_app.logger.warning("takeover '%s'/'%s' failed: %s", name, dest, exc)
+            flash("The switch did not complete; the previous stream was kept or reinstated.", "error")
+            return redirect(url_for("console.studio_edit", name=name))
+        flash("Destination switched to '%s'. To go back, use Switch on the other stream." % name, "success")
+        return redirect(url_for("console.studio_edit", name=name))
 
     @console.route("/studio/<name>/delete", methods=["POST"])
     def studio_delete_post(name):

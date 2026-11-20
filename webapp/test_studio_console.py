@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from webapp.studio import ed25519, entitlement, feedback, store
+from webapp.studio.model import Project
 from webapp.test_console import CSRF_RE, FakeEngine, login, make_app
 
 SK = bytes(range(32))
@@ -19,6 +20,9 @@ class StudioEngine(FakeEngine):
 
     def relay_restart(self, name):
         return self._mutation("relay_restart", name)
+
+    def relay_publisher_takeover(self, name, destination):
+        return self._mutation("relay_publisher_takeover", name, destination)
 
 
 class Base(unittest.TestCase):
@@ -195,3 +199,48 @@ class FeedbackUnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthAndOwnershipPanelTests(Base):
+    HEALTH = {"state": "DEGRADED", "detail": "encoder speed 0.82x is below real time", "speed": "0.82",
+              "fps": "24.6", "cpu_cores": "2.4", "rss_mb": "412.5", "dropped_frames": "7",
+              "restarts": "3", "last_failure": "unexpected end (ffmpeg exit=1)"}
+    PUBS = [{"id": "yt1", "display_name": "YouTube main", "state": "BLOCKED",
+             "detail": "destination is in use by another stream", "blocked_by": "relay:old:yt1"},
+            {"id": "yt2", "display_name": "Backup", "state": "LIVE", "detail": "publishing", "blocked_by": ""}]
+
+    def setUp(self):
+        super().setUp()
+
+        def read(op, *values):
+            self.engine.calls.append((op,) + values)
+            return {"studio_health": self.HEALTH, "relay_publisher_status": self.PUBS}[op]
+        self.engine.read = read
+        p = Project("hs", "media", "loop.mp4", []).validate()
+        store.save_draft(p)
+        store.publish("hs")
+        self.payloads["relay_list"] = [{"name": "hs", "type": "studio", "active": "yes",
+                                        "health": "HEALTHY", "health_detail": "hls fresh"}]
+
+    def test_health_panel_shows_real_encoder_numbers(self):
+        html = self.client.get("/console/studio/hs").get_data(as_text=True)
+        for needle in ("DEGRADED", "0.82", "2.4 cores", "412.5 MB", "Dropped frames", "unexpected end",
+                       "Output (HLS)", "not from whether a process exists"):
+            self.assertIn(needle, html)
+
+    def test_blocked_destination_offers_explicit_switch_only(self):
+        html = self.client.get("/console/studio/hs").get_data(as_text=True)
+        self.assertEqual(html.count("Switch to this stream"), 1)   # only the BLOCKED one
+        self.assertIn("relay:old:yt1", html)
+
+    def test_takeover_requires_confirmation_csrf_and_calls_engine_once(self):
+        path = "/console/studio/hs/takeover/yt1"
+        self.assertIn(self.client.post(path, data={"confirm": "1"}).status_code, (400, 403))
+        self.post(path, {}, "/console/studio/hs")                      # no confirm -> refused
+        self.assertEqual(self.engine.mutation_calls, [])
+        self.post(path, {"confirm": "1"}, "/console/studio/hs")
+        self.assertEqual(self.engine.mutation_calls, [("relay_publisher_takeover", "hs", "yt1")])
+
+    def test_takeover_blocked_without_licence_and_for_bad_ids(self):
+        self.post("/console/studio/hs/takeover/..%2Fx", {"confirm": "1"}, "/console/studio/hs")
+        self.assertEqual(self.engine.mutation_calls, [])

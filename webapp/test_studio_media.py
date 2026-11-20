@@ -179,6 +179,28 @@ class RealFfmpegTests(unittest.TestCase):
         self.assertTrue(all(b >= a for a, b in zip(dts, dts[1:])), "non-monotonic DTS across copy loop")
         self.assertGreaterEqual(dts[-1], 12.0)
 
+    def test_ffmpeg_reports_real_progress_into_the_health_listener(self):
+        import time
+        from webapp.studio import health
+        tr = health.Tracker()
+        srv = health.ProgressServer(tr)
+        srv.start()
+        self.addCleanup(srv.stop)
+        out = self.dir + "/health.mp4"
+        args = [FFMPEG, "-v", "error", "-y", "-progress", "tcp://127.0.0.1:%d" % srv.port, "-re",
+                "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=4",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out]
+        self.run_ff(args)
+        for _ in range(40):
+            if tr.snapshot()["frames"]:
+                break
+            time.sleep(0.1)
+        snap = tr.snapshot()
+        self.assertGreaterEqual(snap["frames"] or 0, 60)
+        self.assertIsNotNone(snap["speed"])
+        self.assertEqual(tr.connections, 1)
+        self.assertGreater(snap["output_seconds"] or 0, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

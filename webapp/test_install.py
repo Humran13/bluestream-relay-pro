@@ -529,7 +529,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     "relay_start", "relay_stop", "relay_restart",
                     "playlist_start", "playlist_stop", "playlist_restart",
                     "relay_create_url", "relay_create_media", "media_import_staged",
-                    "relay_set_continuous", "relay_create_studio",
+                    "relay_set_continuous", "relay_create_studio", "relay_publisher_takeover",
                     # GUI-1D.1: fixed-argv playlist creation
                     "playlist_create",
                     # GUI-3A: manual playlist-cache cleanup (no arguments)
@@ -572,6 +572,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 # destination server URL).
                 "relay_publisher_status",
                 "playlist_publisher_status",
+                "studio_health",
             }),
         )
         client = EngineClient(production=True)

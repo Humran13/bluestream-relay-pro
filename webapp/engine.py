@@ -49,6 +49,8 @@ ALLOWED_READ_OPERATIONS = frozenset(
         # URL - only destination id/display/platform and derived state).
         "relay_publisher_status",
         "playlist_publisher_status",
+        # BlueStream Studio: real encoder health for one Studio stream.
+        "studio_health",
     }
 )
 
@@ -78,6 +80,7 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "relay_create_media",
         "relay_set_continuous",
         "relay_create_studio",
+        "relay_publisher_takeover",
         "media_import_staged",
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
@@ -469,6 +472,7 @@ class EngineClient:
             "playlist_schedule_get",
             "relay_publisher_status",
             "playlist_publisher_status",
+            "studio_health",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
@@ -579,6 +583,15 @@ class EngineClient:
             if continuous not in ("yes", "no"):
                 raise EngineError("invalid 24/7 mode", code="INVALID_CONTINUOUS")
             return [name, media, continuous]
+        if operation == "relay_publisher_takeover":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, dest = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_target_name(dest):
+                raise EngineError("invalid destination id", code="INVALID_DESTINATION")
+            return [name, dest]
         if operation == "relay_create_studio":
             if len(values) != 2:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
@@ -793,6 +806,10 @@ class EngineClient:
 
     def relay_create_media(self, name: str, media: str, continuous: str = "yes"):
         return self._mutation("relay_create_media", name, media, continuous)
+
+    def relay_publisher_takeover(self, name: str, destination: str):
+        """Switch ONE destination to this running stream (previous owner stopped, recoverable)."""
+        return self._mutation("relay_publisher_takeover", name, destination)
 
     def relay_create_studio(self, name: str, project: str):
         """Create a Studio-backed stream (relay TYPE=studio) from a published project."""
