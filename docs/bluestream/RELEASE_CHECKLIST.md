@@ -14,6 +14,8 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [x] Browser source refuses to run unless `BLUESTREAM_STUDIO_BROWSER=1` + Chromium + working sandbox (also enforced in the runtime against crafted project files)
 
 ## Gate B - staging VPS (NOT DONE: no staging machine/credentials available)
+- [x] Offline: preflight guard written and tested (`tools/staging_preflight.sh`)
+- [ ] Preflight passes on the real staging VPS (marker, non-production, Ubuntu 24.04, 4 CPU, 8 GB, 20 GB free, snapshot id)
 - [ ] Clean install on Ubuntu 24.04, then upgrade-in-place from the previous release
 - [ ] Backup -> restore -> rollback rehearsal (backup includes `/var/lib/bluestream/studio`)
 - [ ] Start/stop/reboot: deliberate Stop stays stopped after reboot; Start survives reboot

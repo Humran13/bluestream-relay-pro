@@ -19,6 +19,13 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
+## Staging status: BLOCKED (no staging VPS accessible)
+No staging host, SSH config or credentials exist in this environment. The only VPS ever mentioned (`vmi2980718`) is PRODUCTION and
+was deliberately not used. No staging test has run; every `U` item in TASKS.md and every `[ ]` in RELEASE_CHECKLIST.md Gates B/C/E stays open.
+Prepared offline: `tools/staging_preflight.sh` (+ tests) that refuses production-like/under-spec hosts, hardened failure-injection steps
+in STAGING.md. **Exact next action for the owner:** provision a separate Ubuntu 24.04 / 4 vCPU / 8 GB VPS, give Claude SSH access to it
+(host, user, key path), run the preflight; then `proceed` continues at STAGING.md section 0.
+
 ## Readiness
 Code is **ready for staging validation** (commit `5cc56bd`, CI green, local 783 passed). It is NOT validated on a VPS and NOT beta-ready.
 Follow `docs/bluestream/STAGING.md`; browser capture stays disabled by default.

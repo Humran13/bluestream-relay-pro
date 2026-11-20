@@ -6,6 +6,11 @@ RTMP sink; never a production key. Record every result (command output, timestam
 a gate is "passed" only with that evidence. Nothing in this file has been executed yet.
 
 ## 0. Prepare
+0. **Preflight guard** (refuses production-like or under-spec hosts): on the staging VPS only,
+   `echo STAGING-OK | sudo tee /etc/bluestream-staging`, take a provider snapshot, then
+   `sudo tools/staging_preflight.sh --snapshot-id "<snapshot id>"`. Continue only if it ends with `ALL CHECKS PASSED`.
+   It checks: explicit staging marker, hostname not a production host, no CloudPanel, Ubuntu 24.04, >= 4 CPUs, ~8 GB RAM,
+   >= 20 GB free, snapshot id recorded, SSH service up. It changes nothing on the host.
 1. Provision the VPS; `apt update && apt -y upgrade`; snapshot the VM (rollback point).
 2. `git clone` the repo, `git checkout feature/bluestream-studio`, note `git rev-parse HEAD`.
 3. Install normally: `sudo ./install.sh` (and the web-console step). Confirm `systemctl is-active nginx bluestream-web`.
@@ -46,9 +51,17 @@ Record any case where the preview falls back to the neutral background.
 6. Close the browser and shut the editing PC: the stream continues.
 
 ## 4. Failure injection (gate B)
-`kill -9 <studio ffmpeg>` (auto-recovers), corrupt a media file, delete media mid-run, fill the cache disk (`fallocate`),
-drop the destination network (`iptables -A OUTPUT -d <dest> -j DROP`, then remove), `systemctl reboot` (Start-ed streams
-return, Stop-ped streams stay stopped). Watch the Health panel in each case; record the state it shows.
+Every injection must be reversible and must not endanger the host:
+- `kill -9 <studio ffmpeg>`: it auto-recovers; nothing to undo.
+- Corrupt / delete media: only copies of TEST media (`cp` first); restore the copy afterwards.
+- Disk pressure: NEVER fill `/`. Mount a small dedicated tmpfs over the Studio cache only
+  (`sudo mount -t tmpfs -o size=64m tmpfs /var/lib/bluestream/run/studio-cache`), fill THAT, observe the refusal, `sudo umount` it.
+  Keep `df -h /` visible and stop if `/` drops below 10 GB free.
+- Destination outage: block only the destination's IP and port, with automatic expiry so a forgotten rule cannot persist
+  (`sudo iptables -I OUTPUT -d <dest-ip> -p tcp --dport 1935 -j DROP; sleep 90; sudo iptables -D OUTPUT -d <dest-ip> -p tcp --dport 1935 -j DROP`
+  in one command line). Never touch rules for port 22 and never use `iptables -F` or `ufw reset`.
+- Reboot: `sudo systemctl reboot` from the provider console session open in a second window; confirm SSH returns.
+Watch the Health panel in each case; record the state it shows.
 
 ## 5. Performance (gate C)
 ```

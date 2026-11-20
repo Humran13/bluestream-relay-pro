@@ -34,6 +34,11 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 - Browser spec: an IP-literal rejection was swallowed by an over-broad except; allowed-host list accepted embedded spaces.
 - Image/video/audio/slideshow names were not type-checked.
 
+## Staging attempt (round 5)
+Not started: no staging VPS is accessible from this environment (the only known VPS is production and was not touched).
+Offline preparation only: `test_studio_preflight.py` (7 tests) proves the preflight refuses a missing marker, the production hostname, CloudPanel,
+<4 CPUs, <8 GB, Ubuntu != 24.04, low disk, and a missing snapshot id, and that it never edits SSH/firewall/services.
+
 ## NOT run (PENDING - need a real staging VPS) - no claim is made
 - Clean install / upgrade / rollback; reboot and `kill -9 ffmpeg` on real systemd; disk full; real destination outage.
 - Browser source: Chromium sandbox under Ubuntu 24.04 AppArmor, cgroup limits, `IPAddressDeny` behaviour, real-page CPU/RAM.
