@@ -254,7 +254,7 @@ class RealFfmpegTests(unittest.TestCase):
                 return tuple(raw[:3])
             early, late = px(1), px(6)
             outcomes[label] = "reloads" if (early[0] > early[2] and late[2] > late[0]) else "static %s->%s" % (early, late)
-        self.assertEqual(outcomes["B stream_loop"], "reloads", repr(outcomes))
+        self.assertEqual(outcomes["D loop1 re"], "reloads", repr(outcomes))   # the variant production uses
 
     def test_browser_overlay_png_is_reloaded_while_ffmpeg_runs(self):
         """The capture worker atomically replaces a PNG; the encoder must pick up the new image."""

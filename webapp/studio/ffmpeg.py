@@ -82,9 +82,10 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
         elif o.kind == "browser":
             png = "%s/studio-%s-br%d.png" % (run_dir_for_browser(workdir), relay_for_browser(workdir), i)
             _check_path(png)
-            # `-loop 1` keeps showing the FIRST decoded frame; `-stream_loop -1` re-opens the file
-            # at every loop, so the worker's atomically replaced PNG is picked up each second.
-            extra_args += ["-f", "image2", "-framerate", "1", "-stream_loop", "-1", "-i", png]
+            # Measured with real FFmpeg (test_png_reload_input_variants_report): image2 re-reads the
+            # file on every loop ONLY when it is consumed in real time. Without `-re` it reads ahead and
+            # keeps showing a stale frame, and `-stream_loop -1` does not help. So: -re + -loop 1.
+            extra_args += ["-re", "-f", "image2", "-framerate", "2", "-loop", "1", "-i", png]
             extra += 1
             idx = first_extra + extra - 1
             chain.append("[%d:v]scale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"

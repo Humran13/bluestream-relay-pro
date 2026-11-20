@@ -52,6 +52,8 @@ const box = (page, i) => page.evaluate((n) => window.studioEditor.getBox(n), i);
 const item = (page, i) => page.locator('.studio-item[data-i="' + i + '"]');
 
 test.describe("Studio visual editor", () => {
+  // WebKit on shared CI runners is slow at login + project creation; this is not a product timeout.
+  test.describe.configure({ timeout: 90000 });
   test("drag moves a layer and stays inside the canvas", async ({ page }) => {
     await project(page, ["text"]);
     const before = await box(page, 0);
