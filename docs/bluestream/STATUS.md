@@ -19,7 +19,17 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
-## Pre-staging verification (latest commit `97969dc`)
+## Media-preview access (round 4)
+- Problem confirmed from the code: media is `root:bluestream-relay 0640` in a `0750` dir and HLS is nginx `0750`; the console user
+  `bluestream-web` can read neither, so real editor previews could not work on a hardened VPS.
+- Fix (no permission changes at all): two READ-ONLY bridge operations, `studio_frame` and `studio_thumb`. web-ctl runs the Studio
+  CLI as root, which immediately drops to the account that owns the data (HLS -> nginx user, media -> bluestream-relay), runs
+  FFmpeg, and returns a small scaled JPEG/PNG. No new group membership, ACLs, chmod or sudoers entries.
+- Because nothing about ownership/modes changed, fresh install, upgrade, new uploads, imports and backup/restore cannot regress it;
+  static tests pin the existing modes and forbid loosening.
+- NOT yet verified on a VPS: that the bridge path works end to end (STAGING.md section 1).
+
+## Pre-staging verification (functional commit `97969dc`)
 - Full local suite 760 passed / 39 skipped; CI python, shell, node, browser all green (python after one infra re-run).
 - Pre-staging blockers found by owner review, both fixed: browser unit account mismatch; soak harness init order.
 - Static checks of unit installation/permissions pass (root-owned 0644 unit, run dir `bluestream-relay:bluestream-relay` 0750).

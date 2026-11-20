@@ -22,9 +22,12 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [ ] Studio stream end to end with nginx-rtmp, HLS and a TEST destination
 - [ ] Ownership: attach one destination to a Relay and a Studio stream; second shows BLOCKED; takeover switches and can be reversed; `kill -9` of the owner frees it
 - [ ] Now Playing against a real playlist (title changes as items advance; restart resets)
-- [ ] Web console can read media for editor previews (media dir is `root:bluestream-relay` 0750); if not, previews degrade to a neutral background - decide whether to grant read access
+- [x] Preview design: read-only bridge ops, no permission change (tests pin modes; see STATUS.md)
+- [ ] Previews verified on the VPS for video, image overlay, slideshow, Relay and Playlist, and after upgrade/upload/import/backup-restore (STAGING.md section 1)
 - [ ] `systemctl start bluestream-browser@<relay>` as `bluestream-relay`: unit active, Chromium sandbox starts, capture PNG appears in the run dir
 - [ ] Web unit regenerated with `-/var/lib/bluestream/studio` in `ReadWritePaths`; licence activation works from the console
+
+Full step-by-step procedure for Ubuntu 24.04 / 4 vCPU / 8 GB: `docs/bluestream/STAGING.md`.
 
 ## Gate C - performance (NOT DONE)
 - [ ] `python3 tools/studio_soak.py --minutes 10 --out /var/tmp/studio-quick` on the target 4 vCPU / 8 GB VPS; record in TESTS.md

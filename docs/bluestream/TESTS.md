@@ -17,6 +17,7 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 | Now Playing | test_studio_nowplaying.py + test_install.py::test_27 | title tracks playlist advance/restart; unknown -> empty |
 | Ownership | test_studio_ownership.py | real flock: second publisher blocked, released on kill -9, takeover order + rollback |
 | Health | test_studio_health.py | verdicts (stalled/degraded/healthy), loopback listener, proc sampler |
+| Preview access | test_studio_preview.py | identity choice (HLS->nginx, media->relay), root refuses unmanaged paths, bridge image transport + strict decode, routes fall back to the bridge, permission-regression static guards (modes pinned, no chmod 777, web user in no groups, sudoers single command, bridge ops read-only), real FFmpeg frames for every source kind + alpha-preserving thumbnails (CI) |
 | Units / accounts | test_studio_units.py | unit account == installer account, run-dir ownership, isolation + caps present, Chromium-breaking directives absent, systemd-analyze syntax check, browser off by default |
 | Soak harness | test_studio_soak.py | text files exist before FFmpeg, missing files really break init, short real run reports frames/CPU/RAM, never claims 72 h |
 | Browser source | test_studio_browser.py | gate, spec validation, egress policy, resolver pinning, worker backoff/cache/last-good, orphan kill, REAL Chromium captures (CI) |

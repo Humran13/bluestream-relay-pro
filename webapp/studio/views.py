@@ -213,9 +213,14 @@ def register(console, find_relay, engine_of):
             return need_login()
         if not NAME_RE.match(name) or not store.exists(name):
             abort(404)
+        data = None
         try:
-            data = preview.frame_jpeg(store.load_draft(name))
-        except (ValueError, OSError):
+            project = store.load_draft(name)
+            data = preview.frame_jpeg(project)             # works wherever this user can read the source
+            if not data:                                   # hardened VPS: ask the read-only bridge instead
+                data = engine_of().studio_frame(name)
+        except Exception as exc:  # unreadable/damaged/bridge down: neutral background, never an error page
+            current_app.logger.info("studio frame unavailable for '%s': %s", name, exc)
             data = None
         if not data:
             abort(404)
@@ -227,9 +232,18 @@ def register(console, find_relay, engine_of):
         if not auth():
             return need_login()
         found = preview.asset_image(asset)
-        if not found:
+        if found:
+            return send_file(found[0], mimetype=found[1], max_age=30)
+        if not preview.ASSET_RE.match(asset or ""):
             abort(404)
-        return send_file(found[0], mimetype=found[1], max_age=30)
+        try:                                               # hardened VPS: scaled PNG via the read-only bridge
+            data = engine_of().studio_thumb(asset)
+        except Exception as exc:
+            current_app.logger.info("studio thumbnail unavailable for '%s': %s", asset, exc)
+            data = None
+        if not data:
+            abort(404)
+        return Response(data, mimetype="image/png", headers={"Cache-Control": "private, max-age=30"})
 
     @console.route("/studio/<name>/save", methods=["POST"])
     def studio_save_post(name):

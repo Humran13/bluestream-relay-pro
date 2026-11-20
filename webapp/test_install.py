@@ -573,6 +573,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 "relay_publisher_status",
                 "playlist_publisher_status",
                 "studio_health",
+                "studio_frame",
+                "studio_thumb",
             }),
         )
         client = EngineClient(production=True)

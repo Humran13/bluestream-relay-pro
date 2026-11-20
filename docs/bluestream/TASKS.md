@@ -10,6 +10,7 @@
 | Widgets | timers survive restarts (absolute anchors), DST, atomic text files, data overlay formatting | I,V |
 | Data | API overlay: URL, JSON path, refresh, format; SSRF-guarded; last good value | I,V |
 | Now Playing | real title from the Playlist engine, updates on advance/restart, empty when unknown | I,V (unit + shell) U(real playlist) |
+| Previews | real source frame + overlay image thumbnails on a hardened host via read-only bridge ops (no permission widening) | I,V (unit + CI ffmpeg) U(real VPS) |
 | Editor | drag, resize, 8 handles, snap, keyboard, touch, crop, layer order, visibility, real source frame, mobile | I,V (Playwright x3 engines) |
 | Editor | Save draft, Apply to Live (confirmed single-stream restart), revision rollback (10) | I,V |
 | Ownership | one publisher per destination (flock), BLOCKED state, explicit takeover with rollback | I,V (real flock in CI) U(real systemd) |

@@ -15,7 +15,8 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import browsercap, entitlement, health, netguard, nowplaying, planner, runtime, store, widgets
+from . import browsercap, entitlement, health, preview, netguard, nowplaying, planner, runtime, store, widgets
+from . import model
 from .model import NAME_RE, ValidationError
 
 
@@ -265,6 +266,33 @@ def cmd_browser_unit(relay):
     return cmd_browser(relay, name)
 
 
+def _emit_image(mime, data):
+    import base64
+    out = b"mime" + bytes([0]) + mime.encode() + bytes([0]) + b"data" + bytes([0]) + base64.b64encode(data) + bytes([0])
+    sys.stdout.buffer.write(out)
+    return 0
+
+
+def cmd_frame(name):
+    """Real frame of the project's source as base64 JPEG (for the console, via web-ctl)."""
+    try:
+        data = preview.frame_jpeg(store.load_draft(name))
+    except (ValidationError, OSError, ValueError):
+        data = None
+    if not data:
+        sys.stderr.write("studio: no preview frame available\n")
+        return 1
+    return _emit_image("image/jpeg", data)
+
+
+def cmd_thumb(asset):
+    data = preview.thumb_png(asset)
+    if not data:
+        sys.stderr.write("studio: no thumbnail available\n")
+        return 1
+    return _emit_image("image/png", data)
+
+
 def cmd_plan(name):
     project = store.load_published(name)
     src_in, live, info, plan = make_plan(project)
@@ -284,6 +312,10 @@ def main(argv):
             return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
         if cmd == "plan" and NAME_RE.match(argv[2]):
             return cmd_plan(argv[2])
+        if cmd == "frame" and NAME_RE.match(argv[2]):
+            return cmd_frame(argv[2])
+        if cmd == "thumb" and model.ASSET_RE.match(argv[2]):
+            return cmd_thumb(argv[2])
         if cmd == "install-id":
             print(entitlement.get_install_id(create=True))
             return 0

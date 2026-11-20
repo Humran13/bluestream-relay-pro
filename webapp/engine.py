@@ -51,6 +51,9 @@ ALLOWED_READ_OPERATIONS = frozenset(
         "playlist_publisher_status",
         # BlueStream Studio: real encoder health for one Studio stream.
         "studio_health",
+        # read-only preview images (JPEG frame of a project source / PNG thumbnail of a media image)
+        "studio_frame",
+        "studio_thumb",
     }
 )
 
@@ -473,11 +476,35 @@ class EngineClient:
             "relay_publisher_status",
             "playlist_publisher_status",
             "studio_health",
+            "studio_frame",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
             return list(values)
+        if operation == "studio_thumb":
+            if len(values) != 1 or not valid_media_name(values[0]):
+                raise EngineError("invalid media name", code="INVALID_MEDIA")
+            return list(values)
         raise EngineError("unsupported operation: %r" % operation)
+
+    def studio_frame(self, project: str):
+        """JPEG bytes of the project's source (None when unavailable)."""
+        return self._decode_image(self.read("studio_frame", project, timeout=25), "image/jpeg")
+
+    def studio_thumb(self, media: str):
+        """PNG bytes of a Media Library image (None when unavailable)."""
+        return self._decode_image(self.read("studio_thumb", media, timeout=25), "image/png")
+
+    @staticmethod
+    def _decode_image(doc, mime):
+        import base64
+        if not isinstance(doc, dict) or doc.get("mime") != mime:
+            return None
+        try:
+            data = base64.b64decode(doc.get("data", ""), validate=True)
+        except ValueError:
+            return None
+        return data if 0 < len(data) <= 4 * 1024 * 1024 else None
 
     def _mutation(
         self,
