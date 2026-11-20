@@ -93,7 +93,9 @@ def check(token, pk, now=None, revoked=frozenset(), install_id=""):
     if lic in revoked:
         return Verdict(False, "revoked", "licence has been revoked", exp, lic)
     inst = doc.get("inst")
-    if inst and install_id and inst != install_id:
+    if inst and inst != install_id:
+        # A bound licence is only valid where the matching install id is configured; a missing
+        # local id must NOT bypass the binding.
         return Verdict(False, "invalid", "licence belongs to a different installation", exp, lic)
     if now < nbf:
         return Verdict(False, "not-yet-valid", "licence is not valid yet", exp, lic)
@@ -109,7 +111,29 @@ def check(token, pk, now=None, revoked=frozenset(), install_id=""):
 # file-backed helpers used by the console and the runtime
 # ---------------------------------------------------------------------------
 def etc_dir():
-    return os.environ.get("BLUESTREAM_ETC_DIR", DEFAULT_ETC)
+    """Where the (non-secret, signed) licence files live. The hardened web unit can only
+    write the Studio store, so that is the default; BLUESTREAM_ETC_DIR overrides (tests)."""
+    explicit = os.environ.get("BLUESTREAM_ETC_DIR")
+    if explicit:
+        return explicit
+    return os.environ.get("BLUESTREAM_STUDIO_DIR", "/var/lib/bluestream/studio")
+
+
+def get_install_id(create=False):
+    """Random id vendors may bind a licence to (`inst`). Created on demand, never changes."""
+    path = os.path.join(etc_dir(), "install-id")
+    cur = _read(path, 100)
+    if cur or not create:
+        return cur
+    import secrets
+    new = secrets.token_hex(8)
+    os.makedirs(etc_dir(), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(new + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return new
 
 
 def _read(path, limit=8192):

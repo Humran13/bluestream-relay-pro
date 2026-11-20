@@ -50,7 +50,7 @@ def _render_cache(project, src_in, info, plan, relay):
     runtime.evict_cache(keep=())
     if runtime.disk_free_bytes(runtime.cache_dir()) < need:
         raise RuntimeError("not enough free disk for pre-render cache")
-    tmp = final[:-4] + ".tmp"
+    tmp = "%s.%d.tmp" % (final[:-4], os.getpid())  # unique: two starts never share a temp file
     args = sff.build_prerender_args(project, src_in, tmp, _workdir(relay), runtime.media_dir(),
                                     has_audio=bool(info.acodec))
     # build_prerender_args pins -f mp4, so the .tmp name does not matter.
@@ -284,6 +284,9 @@ def main(argv):
             return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
         if cmd == "plan" and NAME_RE.match(argv[2]):
             return cmd_plan(argv[2])
+        if cmd == "install-id":
+            print(entitlement.get_install_id(create=True))
+            return 0
         if cmd == "browser-unit" and NAME_RE.match(argv[2]):
             return cmd_browser_unit(argv[2])
         if cmd == "browser" and NAME_RE.match(argv[2]) and NAME_RE.match(argv[3]):

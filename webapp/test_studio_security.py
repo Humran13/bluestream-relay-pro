@@ -197,3 +197,63 @@ class SourceHygieneTests(unittest.TestCase):
         files += list((root / "lib").glob("*.sh")) + list((root / "config" / "systemd").glob("*.sh"))
         for f in files:
             self.assertIsNone(bad_re.search(f.read_bytes()), "control byte in %s" % f.name)
+
+
+class StoreHardeningTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict("os.environ", {"BLUESTREAM_STUDIO_DIR": self.tmp.name + "/s"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @unittest.skipIf(__import__("os").name == "nt", "symlinks need privileges on Windows")
+    def test_symlinked_project_file_is_refused(self):
+        import os
+        from webapp.studio import store
+        os.makedirs(self.tmp.name + "/s")
+        secret = self.tmp.name + "/other-service.json"
+        open(secret, "w").write("{}")
+        os.symlink(secret, self.tmp.name + "/s/evil.json")
+        with self.assertRaises(ValidationError):
+            store.load_published("evil")
+
+    def test_oversized_project_file_is_refused(self):
+        import os
+        from webapp.studio import store
+        os.makedirs(self.tmp.name + "/s")
+        open(self.tmp.name + "/s/big.json", "w").write(" " * (600 * 1024))
+        with self.assertRaises(ValidationError):
+            store.load_published("big")
+
+    @unittest.skipIf(__import__("os").name == "nt", "needs flock (POSIX); Linux CI covers it")
+    def test_concurrent_publishes_get_distinct_revisions(self):
+        import threading
+        from webapp.studio import store
+        store.save_draft(Project("race", "media", "a.mp4").validate())
+        results = []
+
+        def go():
+            results.append(store.publish("race"))
+        threads = [threading.Thread(target=go) for _ in range(6)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual(len(results), 6)
+        self.assertEqual(sorted(results), list(range(1, 7)))      # flock serialises the writers
+        self.assertEqual(store.load_published("race").revision, max(results))
+
+
+class AssetTypeTests(unittest.TestCase):
+    def test_assets_must_have_the_right_kind_of_extension(self):
+        bad = [Overlay("image", asset="notes.txt"), Overlay("image", asset="clip.mp4"), Overlay("video", asset="pic.png"),
+               Overlay("video", asset="script.sh")]
+        for o in bad:
+            with self.assertRaises(ValidationError, msg=o.asset):
+                Project("p", "media", "a.mp4", [o]).validate()
+        for ref in ("a.txt", "a.mp4"):
+            with self.assertRaises(ValidationError):
+                Project("p", "audio", ref).validate()
+        with self.assertRaises(ValidationError):
+            Project("p", "slideshow", "a.png,b.txt").validate()
+        Project("p", "media", "a.mp4", [Overlay("image", asset="logo.PNG"), Overlay("video", asset="x.webm")]).validate()

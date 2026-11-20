@@ -123,3 +123,33 @@ class PaymentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LicenceHardeningTests(unittest.TestCase):
+    NOW = 1_900_000_000
+
+    def tok(self, **kw):
+        doc = {"v": 1, "lic": "L1", "plan": "studio", "exp": self.NOW + 1000}
+        doc.update(kw)
+        return entitlement.make_token(SK, doc)
+
+    def test_bound_licence_is_not_bypassed_by_a_missing_local_install_id(self):
+        bound = self.tok(inst="abc123")
+        self.assertFalse(entitlement.check(bound, PK, self.NOW, install_id="").ok)       # was a bypass
+        self.assertFalse(entitlement.check(bound, PK, self.NOW, install_id="other").ok)
+        self.assertTrue(entitlement.check(bound, PK, self.NOW, install_id="abc123").ok)
+        self.assertTrue(entitlement.check(self.tok(), PK, self.NOW, install_id="").ok)   # unbound still fine
+
+    def test_install_id_is_created_once_and_stable(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"BLUESTREAM_ETC_DIR": d}):
+            self.assertEqual(entitlement.get_install_id(), "")
+            first = entitlement.get_install_id(create=True)
+            self.assertRegex(first, r"^[0-9a-f]{16}$")
+            self.assertEqual(entitlement.get_install_id(create=True), first)
+
+    def test_default_licence_dir_is_the_web_writable_studio_store(self):
+        """The hardened web unit cannot write /etc/bluestream; activation must land in the Studio store."""
+        env = {k: v for k, v in os.environ.items() if k != "BLUESTREAM_ETC_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            os.environ["BLUESTREAM_STUDIO_DIR"] = "/var/lib/bluestream/studio"
+            self.assertEqual(entitlement.etc_dir(), "/var/lib/bluestream/studio")

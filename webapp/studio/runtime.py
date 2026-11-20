@@ -77,7 +77,7 @@ def ensure_slideshow(project):
         os.utime(final)
         return final
     os.makedirs(cache_dir(), exist_ok=True)
-    tmp = final[:-4] + ".tmp"
+    tmp = "%s.%d.tmp" % (final[:-4], os.getpid())
     args = sff.build_slideshow_args(paths, project.slide_seconds, project.profile, tmp)
     r = subprocess.run(args, capture_output=True, text=True, timeout=900)
     if r.returncode != 0 or not cache_valid(tmp):

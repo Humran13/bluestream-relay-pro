@@ -79,8 +79,37 @@ def _atomic_json(path, doc):
 
 
 def _read(path):
+    # The console user can write this directory and the runtime reads it: never follow a symlink
+    # (e.g. one pointing at another service's file) and bound the size.
+    if os.path.islink(path):
+        raise ValidationError("refusing to read a symbolic link")
     with open(path, encoding="utf-8") as fh:
-        return from_dict(json.load(fh))
+        raw = fh.read(512 * 1024 + 1)
+    if len(raw) > 512 * 1024:
+        raise ValidationError("project file too large")
+    return from_dict(json.loads(raw))
+
+
+class _locked:
+    """Serialise writers (two console workers publishing at once). No-op where fcntl is absent."""
+
+    def __init__(self, name):
+        self.path = os.path.join(studio_dir(), ".%s.lock" % name)
+        self.fh = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        os.makedirs(studio_dir(), exist_ok=True)
+        self.fh = open(self.path, "a")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fh:
+            self.fh.close()
 
 
 def exists(name):
@@ -89,7 +118,8 @@ def exists(name):
 
 def save_draft(project):
     project.validate()
-    _atomic_json(_path(project.name, ".draft.json"), to_dict(project))
+    with _locked(project.name):
+        _atomic_json(_path(project.name, ".draft.json"), to_dict(project))
 
 
 def load_draft(name):
@@ -114,6 +144,12 @@ def has_unpublished_changes(name):
 
 def publish(name):
     """Promote the draft to the published revision (what a restart will use)."""
+    _path(name, ".json")  # validates the name before the lock file is derived from it
+    with _locked(name):
+        return _publish_locked(name)
+
+
+def _publish_locked(name):
     draft = load_draft(name)
     try:
         draft.revision = load_published(name).revision + 1

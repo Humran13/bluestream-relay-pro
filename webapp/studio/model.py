@@ -13,6 +13,9 @@ NAME_RE = re.compile(r"^[a-z0-9_-]{1,48}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".webm", ".m4v", ".ts", ".avi")
+AUDIO_EXTS = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus")
 
 KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video", "browser")
 # Kinds whose rendered output changes over time -> need live composition.
@@ -116,6 +119,10 @@ class Overlay:
             raise ValidationError("text too long")
         if self.kind in ("image", "video") and not ASSET_RE.match(self.asset):
             raise ValidationError("invalid asset name")
+        if self.kind == "image" and not self.asset.lower().endswith(IMAGE_EXTS):
+            raise ValidationError("image overlays need an image file (png/jpg/webp/gif)")
+        if self.kind == "video" and not self.asset.lower().endswith(VIDEO_EXTS):
+            raise ValidationError("video overlays need a video file")
         if self.kind in ("countdown", "countup", "pomodoro") and not self.target:
             raise ValidationError("%s needs a target/anchor time" % self.kind)
         if not (1 <= self.work_min <= 600 and 1 <= self.break_min <= 600):
@@ -167,16 +174,17 @@ class Project:
         if not self.source_ref or len(self.source_ref) > 255 or "\x00" in self.source_ref:
             raise ValidationError("invalid source reference")
         if self.source_kind == "audio":
-            if not ASSET_RE.match(self.source_ref):
-                raise ValidationError("audio source must be a Media Library file name")
+            if not ASSET_RE.match(self.source_ref) or not self.source_ref.lower().endswith(AUDIO_EXTS):
+                raise ValidationError("audio source must be an audio file from the Media Library")
             if not (COLOR_RE.match(self.background) or (
                     ASSET_RE.match(self.background)
                     and self.background.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))):
                 raise ValidationError("background must be a #rrggbb colour or an image name")
         if self.source_kind == "slideshow":
             names = self.slides()
-            if not 1 <= len(names) <= 50 or not all(ASSET_RE.match(n) for n in names):
-                raise ValidationError("slideshow needs 1-50 valid image names (comma separated)")
+            if not 1 <= len(names) <= 50 or not all(
+                    ASSET_RE.match(n) and n.lower().endswith(IMAGE_EXTS) for n in names):
+                raise ValidationError("slideshow needs 1-50 image file names (comma separated)")
             if not 2 <= self.slide_seconds <= 3600:
                 raise ValidationError("seconds per slide must be 2-3600")
         if self.source_kind == "relay" and self.source_ref == self.name:
