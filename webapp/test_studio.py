@@ -313,6 +313,40 @@ class StoreRuntimeCliTests(unittest.TestCase):
         self.assertEqual(wd.render_text(Overlay("nowplaying", text="Now:"), now, "Song"), "Now: Song")
 
 
+class AudioAndVideoOverlayModelTests(unittest.TestCase):
+    def test_audio_source_validation_and_planning(self):
+        Project("a", "audio", "song.mp3", background="#101010").validate()
+        Project("a", "audio", "song.mp3", background="bg.png", visualizer=True).validate()
+        for kw in ({"source_ref": "../x.mp3"}, {"background": "red"}, {"background": "../bg.png"}):
+            args = dict(name="a", source_kind="audio", source_ref="song.mp3", background="#101010")
+            args.update(kw)
+            with self.assertRaises(ValidationError, msg=str(kw)):
+                Project(**args).validate()
+        audio_src = pl.SourceInfo(acodec="mp3", duration=200.0, content_id="x")
+        still = Project("a", "audio", "song.mp3").validate()
+        self.assertEqual(pl.plan_output(still, audio_src).path, pl.PRERENDER)       # static bg: render once, copy forever
+        viz = Project("a", "audio", "song.mp3", visualizer=True).validate()
+        self.assertEqual(pl.plan_output(viz, audio_src).path, pl.LIVE)              # waveform needs a live encode
+        self.assertNotEqual(pl.plan_output(still, audio_src).cache_key, pl.plan_output(
+            Project("a", "audio", "song.mp3", background="#222222").validate(), audio_src).cache_key)
+
+    def test_video_overlay_is_dynamic_and_validated(self):
+        o = Overlay("video", asset="clip.mp4", w=0.3, h=0.3)
+        self.assertTrue(o.dynamic)
+        self.assertEqual(pl.plan_output(proj([o]), GOOD).path, pl.LIVE)
+        with self.assertRaises(ValidationError):
+            proj([Overlay("video", asset="../x.mp4")])
+
+    def test_argv_for_audio_visualizer_and_pip(self):
+        p = Project("a", "audio", "song.wav", [Overlay("video", asset="c.mp4", w=0.2, h=0.2)],
+                    visualizer=True).validate()
+        a = sff.build_live_args(p, "/var/lib/m/song.wav", BUS_OUT, "/run/w", "/var/lib/m", loop_file=True)
+        text = " ".join(a)
+        for need in ("showwaves", "asplit", "-shortest", "-stream_loop -1 -i /var/lib/m/c.mp4", "lavfi"):
+            self.assertIn(need, text)
+        self.assertEqual(a.count("-filter_complex"), 1)
+
+
 class SelfSourceTests(unittest.TestCase):
     def test_stream_cannot_read_itself(self):
         with self.assertRaises(ValidationError):

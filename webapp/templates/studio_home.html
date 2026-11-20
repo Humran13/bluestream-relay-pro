@@ -49,6 +49,7 @@
       <option value="relay">Existing Relay stream</option>
       <option value="playlist">Existing Playlist</option>
       <option value="slideshow">Image slideshow (Media Library images, comma separated)</option>
+      <option value="audio">Audio file (music/radio, with background and optional waveform)</option>
     </select>
     <label for="sr">Source name</label>
     <input id="sr" name="source_ref" required list="sources" placeholder="file name or stream name">
@@ -56,6 +57,7 @@
     <label for="ss">Slideshow: seconds per image</label>
     <input id="ss" name="slide_seconds" type="number" min="2" max="3600" value="10">
     <label><input type="checkbox" name="slide_shuffle"> Shuffle slideshow order</label>
+    <label><input type="checkbox" name="visualizer"> Audio: show a live waveform (uses a live encode)</label>
     <label for="tp">Template</label>
     <select id="tp" name="template">{% for k, v in templates.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
     <button type="submit" class="btn">Create project</button>

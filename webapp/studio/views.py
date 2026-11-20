@@ -12,7 +12,7 @@ from flask import Response, abort, current_app, flash, redirect, render_template
 from . import entitlement, feedback, preview, store, templates_lib, widgets
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
 
-SOURCE_KINDS = ("relay", "playlist", "media", "slideshow")
+SOURCE_KINDS = ("relay", "playlist", "media", "slideshow", "audio")
 
 # Browser-rendered overlays are deliberately NOT enabled in this release: they need a
 # sandboxed, egress-controlled, resource-capped browser that has not been built or
@@ -161,7 +161,8 @@ def register(console, find_relay, engine_of):
                 raise ValidationError("choose a source type")
             project = Project(name, kind, ref, templates_lib.build(tpl),
                               slide_seconds=_int(request.form, "slide_seconds", 10),
-                              slide_shuffle=request.form.get("slide_shuffle") == "on").validate()
+                              slide_shuffle=request.form.get("slide_shuffle") == "on",
+                              visualizer=request.form.get("visualizer") == "on").validate()
             store.save_draft(project)
         except ValidationError as exc:
             flash("Could not create project: %s." % exc, "error")
@@ -246,6 +247,11 @@ def register(console, find_relay, engine_of):
                     overlays[i], overlays[j] = overlays[j], overlays[i]
             old.overlays = overlays
             old.source_ref = (request.form.get("source_ref") or old.source_ref).strip()
+            old.slide_seconds = _int(request.form, "slide_seconds", old.slide_seconds)
+            old.slide_shuffle = request.form.get("slide_shuffle") == "on"
+            if old.source_kind == "audio":
+                old.background = (request.form.get("background") or old.background).strip()
+                old.visualizer = request.form.get("visualizer") == "on"
             store.save_draft(old.validate())
         except (ValidationError, ValueError, OSError) as exc:
             flash("Not saved: %s." % exc, "error")

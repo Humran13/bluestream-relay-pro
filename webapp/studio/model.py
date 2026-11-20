@@ -14,9 +14,9 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data")
+KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video")
 # Kinds whose rendered output changes over time -> need live composition.
-DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data"})
+DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video"})
 MAX_OVERLAYS = 24
 
 
@@ -110,7 +110,7 @@ class Overlay:
             raise ValidationError("font size out of range")
         if len(self.text) > 500:
             raise ValidationError("text too long")
-        if self.kind == "image" and not ASSET_RE.match(self.asset):
+        if self.kind in ("image", "video") and not ASSET_RE.match(self.asset):
             raise ValidationError("invalid asset name")
         if self.kind in ("countdown", "countup", "pomodoro") and not self.target:
             raise ValidationError("%s needs a target/anchor time" % self.kind)
@@ -145,6 +145,8 @@ class Project:
     revision: int = 1
     slide_seconds: int = 10      # slideshow: seconds per image
     slide_shuffle: bool = False  # slideshow: deterministic shuffle (seeded by name list)
+    background: str = "#0b1220"  # audio source: "#rrggbb" or a Media Library image name
+    visualizer: bool = False     # audio source: live waveform strip (needs a live encode)
 
     def slides(self):
         return [s for s in self.source_ref.split(",") if s]
@@ -152,10 +154,17 @@ class Project:
     def validate(self):
         if not NAME_RE.match(self.name):
             raise ValidationError("invalid project name")
-        if self.source_kind not in ("relay", "playlist", "media", "slideshow"):
+        if self.source_kind not in ("relay", "playlist", "media", "slideshow", "audio"):
             raise ValidationError("invalid source kind")
         if not self.source_ref or len(self.source_ref) > 255 or "\x00" in self.source_ref:
             raise ValidationError("invalid source reference")
+        if self.source_kind == "audio":
+            if not ASSET_RE.match(self.source_ref):
+                raise ValidationError("audio source must be a Media Library file name")
+            if not (COLOR_RE.match(self.background) or (
+                    ASSET_RE.match(self.background)
+                    and self.background.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))):
+                raise ValidationError("background must be a #rrggbb colour or an image name")
         if self.source_kind == "slideshow":
             names = self.slides()
             if not 1 <= len(names) <= 50 or not all(ASSET_RE.match(n) for n in names):
@@ -171,6 +180,11 @@ class Project:
             o.validate()
         return self
 
+    @property
+    def dynamic_source(self):
+        """True when the SOURCE itself changes every frame (needs a live encode)."""
+        return self.source_kind == "audio" and self.visualizer
+
     def visible_overlays(self):
         return [o for o in self.overlays if o.visible]
 
@@ -178,6 +192,7 @@ class Project:
         """Canonical digest of the overlay stack + profile (cache identity)."""
         doc = {
             "p": self.profile.__dict__,
+            "s": [self.source_kind, self.background, self.visualizer],
             "o": [o.__dict__ for o in self.visible_overlays()],
         }
         blob = json.dumps(doc, sort_keys=True, separators=(",", ":"))

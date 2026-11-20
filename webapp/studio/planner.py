@@ -67,6 +67,8 @@ def plan_output(project, src):
     dynamic = [o for o in overlays if o.dynamic]
     incompat = copy_incompatibilities(src, profile)
 
+    if project.dynamic_source and not dynamic:
+        return Plan(LIVE, ("audio visualizer changes every frame and needs one live encode",))
     if dynamic:
         kinds = sorted({o.kind for o in dynamic})
         return Plan(LIVE, ("changing overlays (%s) require one live encode" % ", ".join(kinds),))

@@ -179,6 +179,41 @@ class RealFfmpegTests(unittest.TestCase):
         self.assertTrue(all(b >= a for a, b in zip(dts, dts[1:])), "non-monotonic DTS across copy loop")
         self.assertGreaterEqual(dts[-1], 12.0)
 
+    def test_audio_source_static_background_prerenders_to_profile(self):
+        audio = self.dir + "/tone.wav"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=3", audio], check=True)
+        proj = Project("au", "audio", audio, [Overlay("text", text="On air")], background="#102040").validate()
+        wd.atomic_write(sff.text_file_path(self.dir, 0), "On air")
+        out = self.dir + "/audio_pre.mp4"
+        self.run_ff(sff.build_prerender_args(proj, audio, out, self.dir, self.assets))
+        info = self.assert_target_profile(out, 2.5)
+        self.assertAlmostEqual(float(info["format"]["duration"]), 3.0, delta=0.4)   # ends with the audio
+
+    def test_audio_source_with_image_background_and_visualizer(self):
+        audio = self.dir + "/tone2.wav"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", audio], check=True)
+        self.make_png("bg.png", "purple")
+        proj = Project("au2", "audio", audio, [], background="bg.png", visualizer=True).validate()
+        out = self.dir + "/audio_vis.mp4"
+        args = sff._build(proj, audio, out, self.dir, self.assets, sff.DEFAULT_FONT, True, False, FFMPEG, "mp4", [])
+        args.remove("-re")
+        self.assertIn("showwaves", " ".join(args))
+        self.run_ff(args)
+        self.assert_target_profile(out, 2.5)
+
+    def test_video_picture_in_picture_overlay_loops_and_ends_with_main(self):
+        pip = self.dir + "/pip.mp4"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", pip], check=True)
+        os.replace(pip, self.assets + "/pip.mp4")
+        proj = self.project([Overlay("video", x=0.7, y=0.05, w=0.25, h=0.25, asset="pip.mp4", crop_w=0.5)])
+        out = self.dir + "/pip_out.mp4"
+        args = sff._build(proj, self.src, out, self.dir, self.assets, sff.DEFAULT_FONT, True, False, FFMPEG, "mp4", [])
+        args.remove("-re")
+        self.run_ff(args)
+        info = self.assert_target_profile(out, 3.5)       # 4 s main source, 1 s PiP looped
+        self.assertLess(float(info["format"]["duration"]), 5.0)
+
     def test_ffmpeg_reports_real_progress_into_the_health_listener(self):
         import time
         from webapp.studio import health

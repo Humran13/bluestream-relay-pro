@@ -85,6 +85,13 @@
   <h2>Sources &amp; overlays</h2>
   <label for="sref">{{ project.source_kind|capitalize }} source</label>
   <input id="sref" name="source_ref" value="{{ project.source_ref }}">
+  {% if project.source_kind == 'slideshow' %}
+  <label for="ss">Seconds per image</label><input id="ss" name="slide_seconds" type="number" min="2" max="3600" value="{{ project.slide_seconds }}">
+  <label><input type="checkbox" name="slide_shuffle" {% if project.slide_shuffle %}checked{% endif %}> Shuffle order (same list always gives the same order)</label>
+  {% elif project.source_kind == 'audio' %}
+  <label for="bg">Background (#rrggbb or Media Library image)</label><input id="bg" name="background" value="{{ project.background }}">
+  <label><input type="checkbox" name="visualizer" {% if project.visualizer %}checked{% endif %}> Live waveform (needs a live encode)</label>
+  {% endif %}
   {% for o in project.overlays %}{% set i = loop.index0 %}
   <details class="overlay-box" data-i="{{ i }}">
     <summary><span class="layer-no">{{ loop.index }}.</span> {{ o.kind }}
@@ -100,7 +107,7 @@
     <label>Font <input name="font_{{ i }}" value="{{ o.font }}"></label>{% endif %}
     <label>Colour <input name="color_{{ i }}" value="{{ o.color }}" size="8"></label>
     {% if o.kind in ('text','ticker','nowplaying','data') %}<label>Text <input name="text_{{ i }}" value="{{ o.text }}" maxlength="500"></label>{% endif %}
-    {% if o.kind == 'image' %}<label>Image (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>
+    {% if o.kind in ('image','video') %}<label>{{ 'Video' if o.kind == 'video' else 'Image' }} (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>
     <label>Crop X <input name="crop_x_{{ i }}" value="{{ o.crop_x }}" size="4"></label><label>Crop Y <input name="crop_y_{{ i }}" value="{{ o.crop_y }}" size="4"></label>
     <label>Crop W <input name="crop_w_{{ i }}" value="{{ o.crop_w }}" size="4"></label><label>Crop H <input name="crop_h_{{ i }}" value="{{ o.crop_h }}" size="4"></label>{% endif %}
     {% if o.kind == 'data' %}

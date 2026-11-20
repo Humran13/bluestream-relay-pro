@@ -50,7 +50,7 @@ def _source_input(project, source, loop_file):
     return pre + ["-i", source]
 
 
-def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, first_extra):
+def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, first_extra, pre_chain=None):
     """Shared filter graph. Returns (extra_input_args, filter_graph, last_label,
     extra_input_count)."""
     p = project.profile
@@ -60,14 +60,20 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
              "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=%d,format=yuv420p[b0]"
              % (p.width, p.height, p.width, p.height, p.fps)]
     last = "b0"
+    chain += pre_chain or []
+    if pre_chain:
+        last = "bv"
     for i, o in enumerate(project.visible_overlays()):
         nxt = "b%d" % (i + 1)
         x, y = _px(o.x, p.width), _px(o.y, p.height)
         if o.kind == "rect":
             f = "[%s]drawbox=x=%d:y=%d:w=%d:h=%d:color=%s:t=fill[%s]" % (
                 last, x, y, _px(o.w, p.width), _px(o.h, p.height), _color(o.color, o.opacity), nxt)
-        elif o.kind == "image":
-            extra_args += ["-loop", "1", "-i", "%s/%s" % (assets_dir, o.asset)]
+        elif o.kind in ("image", "video"):
+            if o.kind == "video":  # picture-in-picture: looped, muted (audio never mapped)
+                extra_args += ["-stream_loop", "-1", "-i", "%s/%s" % (assets_dir, o.asset)]
+            else:
+                extra_args += ["-loop", "1", "-i", "%s/%s" % (assets_dir, o.asset)]
             extra += 1
             idx = first_extra + extra - 1
             crop = ""
@@ -99,15 +105,41 @@ def _build(project, source, output, workdir, assets_dir, fontfile, has_audio,
         _check_path(path)
     args = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "warning",
             "-nostats", "-progress", "pipe:2"]
-    args += _source_input(project, source, loop_file)
+    p = project.profile
+    pre_chain, audio_label = None, None
+    if project.source_kind == "audio":
+        # Input 0 = synthetic background (colour or still image), input 1 = the audio file.
+        if project.background.startswith("#"):
+            args += ["-f", "lavfi", "-i", "color=c=0x%s:s=%dx%d:r=%d" % (project.background[1:], p.width, p.height, p.fps)]
+        else:
+            bg = "%s/%s" % (assets_dir, project.background)
+            _check_path(bg)
+            args += ["-loop", "1", "-framerate", str(p.fps), "-i", bg]
+        args += _source_input(project, source, loop_file)
+        n_src, has_audio = 2, True
+        if project.visualizer:
+            wave_h = _px(0.25, p.height)
+            pre_chain = [
+                "[1:a]asplit[aviz][aout0]",
+                "[aviz]showwaves=s=%dx%d:mode=cline:rate=%d:colors=0x4da3ff,format=rgba[wave]" % (p.width, wave_h, p.fps),
+                "[b0][wave]overlay=0:%d:shortest=1[bv]" % (p.height - wave_h),
+                "[aout0]aresample=async=1:first_pts=0[aout]",
+            ]
+            audio_label = "[aout]"
+    else:
+        args += _source_input(project, source, loop_file)
+        n_src = 1
     extra_args, graph, last, extra = _compose(project, workdir, assets_dir, fontfile,
-                                              has_audio, 1, 1)
+                                              has_audio, n_src, n_src, pre_chain)
     args += extra_args
-    amap, ain = _audio_args(has_audio, extra + 1)
+    if project.source_kind == "audio":
+        amap, ain = (["-map", audio_label] if audio_label else ["-map", "1:a:0", "-af", "aresample=async=1:first_pts=0"]), []
+    else:
+        amap, ain = _audio_args(has_audio, extra + n_src)
     args += ain
     args += ["-filter_complex", graph, "-map", "[%s]" % last] + amap
-    if not has_audio:
-        args += ["-shortest"]  # the synthetic silence is endless; end with the video
+    if not has_audio or project.source_kind == "audio":
+        args += ["-shortest"]  # synthetic silence / background are endless; end with the real stream
     args += _encode_opts(project.profile) + extra_out + ["-f", fmt, output]
     return args
 

@@ -34,6 +34,11 @@ def resolve_source(project):
     k, ref = project.source_kind, project.source_ref
     if k == "slideshow":
         return ensure_slideshow(project), False
+    if k == "audio":
+        path = os.path.join(media_dir(), os.path.basename(ref))
+        if os.path.basename(ref) != ref or not os.path.isfile(path):
+            raise ValueError("audio file not found: %s" % os.path.basename(ref))
+        return path, False
     if k == "relay":
         return "%s/%s/%s" % (BUS, APP_RELAY, ref), True
     if k == "playlist":
