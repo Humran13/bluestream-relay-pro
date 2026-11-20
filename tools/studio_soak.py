@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -82,12 +83,15 @@ def main(argv=None):
     ap.add_argument("--kbps", type=int, default=4000)
     ap.add_argument("--preset", default="veryfast")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--workdir", default="", help="scratch dir for ffmpeg inputs/progress; default: a fresh dir on the LOCAL temp filesystem")
     a = ap.parse_args(argv)
     total = a.hours * 3600 + a.minutes * 60 + a.seconds
     if total <= 0:
         ap.error("give --hours, --minutes or --seconds")
     os.makedirs(a.out, exist_ok=True)
-    work = tempfile.mkdtemp(prefix="soak", dir=a.out)
+    # The scratch dir must be on a real POSIX filesystem: drawtext re-reads its text files and relies on an atomic
+    # rename-over (ext4 yes; Windows bind mounts / some network FS no -> brief ENOENT -> ffmpeg dies). Keep only results in --out.
+    work = tempfile.mkdtemp(prefix="soak", dir=a.workdir or None)
     media = os.path.join(work, "src.mp4")
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                     "testsrc2=size=1280x720:rate=30:duration=60", "-f", "lavfi", "-i",
@@ -111,6 +115,7 @@ def main(argv=None):
     start = time.monotonic()
     p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(os.path.join(work, "ffmpeg.log"), "w"))
     rows, restarts, last_frame, stalls = [], 0, -1, 0
+    frames_carry, restart_reasons, seen_frames = 0, [], 0
     prev_cpu, prev_t = proc_cpu_seconds(p.pid), time.monotonic()
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
@@ -122,6 +127,13 @@ def main(argv=None):
             alive = p.poll() is None
             if not alive:
                 restarts += 1
+                frames_carry += seen_frames             # keep the running total across restarts
+                seen_frames = 0
+                try:
+                    with open(os.path.join(work, "ffmpeg.log"), errors="replace") as lg:
+                        restart_reasons.append(lg.read()[-300:].strip().splitlines()[-1])
+                except (OSError, IndexError):
+                    restart_reasons.append("unknown")
                 p = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                      stderr=open(os.path.join(work, "ffmpeg.log"), "a"))
                 prev_cpu, prev_t = proc_cpu_seconds(p.pid), now
@@ -131,12 +143,13 @@ def main(argv=None):
             prev_cpu, prev_t = cpu, now
             pr = parse_progress(os.path.join(work, "progress.txt"))
             frames = int(pr.get("frame", "0") or 0)
+            seen_frames = frames
             if frames == last_frame:
                 stalls += 1
             last_frame = frames
-            sp = pr.get("speed", "0x").rstrip("x")
+            m = re.match(r"\s*([0-9]+(?:\.[0-9]+)?)x?\s*$", pr.get("speed", ""))   # "1.01x", "   1x"; "N/A" -> not measured
             row = [int(now - start), round(cores, 2), round(proc_rss_mb(p.pid), 1),
-                   float(sp) if sp.replace(".", "", 1).isdigit() else 0.0, frames,
+                   float(m.group(1)) if m else 0.0, frames,
                    int(pr.get("drop_frames", "0") or 0), round(os.getloadavg()[0], 2), int(alive)]
             w.writerow(row)
             fh.flush()
@@ -153,8 +166,9 @@ def main(argv=None):
         "cpu_cores_max": cores[-1], "rss_mb_max": max([r[2] for r in rows] or [0]),
         "speed_min": min(speeds), "dropped_frames_last": rows[-1][5] if rows else None,
         "hours_target": total / 3600.0,
-        "frames_last": rows[-1][4] if rows else 0,
-        "encoded_video_seconds": round((rows[-1][4] if rows else 0) / 30.0, 1),
+        "frames_total": frames_carry + (rows[-1][4] if rows else 0),
+        "encoded_video_seconds": round((frames_carry + (rows[-1][4] if rows else 0)) / 30.0, 1),
+        "restart_reasons": restart_reasons,
         "gate": "FAILED-TO-START (no frames were ever encoded)" if not rows or rows[-1][4] == 0 else "72h-PASS-CANDIDATE" if (done >= 72 * 3600 and restarts == 0 and stalls == 0 and min(speeds) >= 1.0)
                 else ("72h-FAIL" if done >= 72 * 3600 else "PARTIAL (not a 72h result)"),
         "note": "speed>=1.0 sustained, 0 restarts, 0 stalls required; cpu budget target ~2-2.5 cores",

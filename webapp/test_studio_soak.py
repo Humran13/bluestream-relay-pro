@@ -70,7 +70,7 @@ class RealSoakTests(unittest.TestCase):
             rows = open(out + "/soak.csv").read().strip().splitlines()
             self.assertGreaterEqual(len(rows), 3)                        # header + >= 2 samples
             self.assertEqual(verdict["restarts"], 0)
-            self.assertGreater(verdict["frames_last"], 100)               # real frames were encoded
+            self.assertGreater(verdict["frames_total"], 100)              # real frames were encoded
             self.assertGreater(verdict["encoded_video_seconds"], 3)
             self.assertGreater(verdict["speed_min"], 0)
             self.assertGreater(verdict["cpu_cores_max"], 0)               # a real encode burns CPU
@@ -81,3 +81,20 @@ class RealSoakTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpeedParsingTests(unittest.TestCase):
+    """The first 10-minute Docker benchmark logged padded integer speeds ('speed=   1x') as 0.0."""
+
+    def test_speed_formats_ffmpeg_really_emits(self):
+        import re
+        pat = r"\s*([0-9]+(?:\.[0-9]+)?)x?\s*$"
+        for text, want in (("1.01x", 1.01), ("   1x", 1.0), ("0.97x", 0.97), ("2x", 2.0)):
+            self.assertEqual(float(re.match(pat, text).group(1)), want)
+        self.assertIsNone(re.match(pat, "N/A"))
+        self.assertIsNone(re.match(pat, ""))
+
+    def test_source_uses_the_robust_parser_and_a_local_scratch_dir(self):
+        src = (REPO / "tools" / "studio_soak.py").read_text()
+        self.assertIn("([0-9]+(?:\.[0-9]+)?)x?", src)
+        self.assertIn("tempfile.mkdtemp(prefix=\"soak\", dir=a.workdir or None)", src)       # not under --out (bind mounts)
