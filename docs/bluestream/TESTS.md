@@ -40,3 +40,9 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 - Studio only: `cd webapp && python -m pytest test_studio*.py -q`
 - Editor E2E locally: `PYTHON="python studio_server.py" npx playwright test -c tests/browser/playwright.config.js --project=chromium studio-editor`
 - Everything: `cd webapp && python -m pytest -q`
+
+## Latest CI result
+Commit `a21f5e1` on `feature/bluestream-studio` (draft PR #6), CI run 44808318901: **python, shell, node, browser all passed**
+(python includes the real-FFmpeg media tests, ownership flock tests and the PNG-reload variant test; browser includes the
+Studio editor spec in Chromium, Firefox and WebKit and the real-Chromium browser-source tests).
+This is automated CI evidence only. It is not a staging, benchmark, reboot or 72-hour result.
