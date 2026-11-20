@@ -47,6 +47,11 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 - Everything: `cd webapp && python -m pytest -q`
 
 ## Latest CI result
+Final pre-staging commit `5cc56bd`, CI run 44816632783: **python, shell, node, browser all passed**.
+Full local run at this commit: **783 passed, 42 skipped** (skips need Linux/FFmpeg/flock/Chromium and run in CI).
+A guard test (no `mktemp` in web-ctl) caught my first version of the preview bridge; it now streams to the JSON helper.
+Earlier records follow.
+
 Commit `97969dc` on `feature/bluestream-studio` (draft PR #6), CI run 44810021256: **python, shell, node, browser all passed**
 (python needed one re-run: the first attempt never reached the tests because the runner's apt mirror stalled while installing FFmpeg).
 Full local run on the dev box at this commit: **760 passed, 39 skipped** (skips = Linux/FFmpeg/flock/Chromium tests that run in CI).

@@ -19,6 +19,10 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
+## Readiness
+Code is **ready for staging validation** (commit `5cc56bd`, CI green, local 783 passed). It is NOT validated on a VPS and NOT beta-ready.
+Follow `docs/bluestream/STAGING.md`; browser capture stays disabled by default.
+
 ## Media-preview access (round 4)
 - Problem confirmed from the code: media is `root:bluestream-relay 0640` in a `0750` dir and HLS is nginx `0750`; the console user
   `bluestream-web` can read neither, so real editor previews could not work on a hardened VPS.
