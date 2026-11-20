@@ -182,3 +182,18 @@ class InjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceHygieneTests(unittest.TestCase):
+    """Guards against control characters/NUL bytes sneaking into shell sources
+    (bash silently drops NUL, which once corrupted a printf format)."""
+
+    def test_no_control_bytes_in_shell_sources(self):
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).resolve().parent.parent
+        bad_re = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+        files = [root / "web-ctl", root / "install.sh", root / "uninstall.sh"]
+        files += list((root / "lib").glob("*.sh")) + list((root / "config" / "systemd").glob("*.sh"))
+        for f in files:
+            self.assertIsNone(bad_re.search(f.read_bytes()), "control byte in %s" % f.name)

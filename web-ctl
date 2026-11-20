@@ -469,7 +469,7 @@ wc_op_relay_create_studio() {
     ( relay_create "$name" "studio" "$project" "no" ) >/dev/null 2>&1
     rc=$?
     [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
-    printf 'operation %s name %s type studio ' "relay_create_studio" "$name" | wc_json object
+    printf 'operation\0%s\0name\0%s\0type\0studio\0' "relay_create_studio" "$name" | wc_json object
 }
 
 wc_op_media_import_staged() {
