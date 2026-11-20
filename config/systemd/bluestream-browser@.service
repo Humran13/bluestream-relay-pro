@@ -27,11 +27,14 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=bluestream
-Group=bluestream
+# The unprivileged service account the installer creates (BLUESTREAM_USER/GROUP in lib/common.sh,
+# useradd in install.sh). It owns /var/lib/bluestream/run (0750), where the capture PNGs are written
+# and where the relay's FFmpeg reads them. A unit test keeps this in sync with the installer.
+User=bluestream-relay
+Group=bluestream-relay
 Environment=PYTHONPATH=/usr/local/lib/bluestream
 Environment=BLUESTREAM_STUDIO_BROWSER=1
-Environment=HOME=/var/lib/bluestream/run/studio-browser-home
+Environment=HOME=/tmp
 ExecStart=/usr/bin/python3 -m studio.cli browser-unit %i
 Restart=on-failure
 RestartSec=15

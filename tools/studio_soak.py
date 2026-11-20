@@ -62,18 +62,30 @@ def parse_progress(path):
     return last
 
 
-def main():
+def init_text_files(proj, work, now=None):
+    """Create EVERY text-backed overlay file before FFmpeg starts (drawtext textfile= must exist
+    at filter-init time) and refresh them later. Covers clock, countdown, ticker, text, ..."""
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    for i, o in enumerate(proj.visible_overlays()):
+        if o.kind in ("rect", "image", "video", "browser"):
+            continue
+        widgets.atomic_write(sff.text_file_path(work, i), widgets.render_text(o, now))
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
+    ap.add_argument("--seconds", type=float, default=0, help="short runs (used by the automated tests)")
     ap.add_argument("--hours", type=float, default=0)
     ap.add_argument("--minutes", type=float, default=0)
     ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--kbps", type=int, default=4000)
     ap.add_argument("--preset", default="veryfast")
     ap.add_argument("--out", required=True)
-    a = ap.parse_args()
-    total = a.hours * 3600 + a.minutes * 60
+    a = ap.parse_args(argv)
+    total = a.hours * 3600 + a.minutes * 60 + a.seconds
     if total <= 0:
-        ap.error("give --hours or --minutes")
+        ap.error("give --hours, --minutes or --seconds")
     os.makedirs(a.out, exist_ok=True)
     work = tempfile.mkdtemp(prefix="soak", dir=a.out)
     media = os.path.join(work, "src.mp4")
@@ -95,6 +107,7 @@ def main():
     args[args.index("-progress") + 1] = os.path.join(work, "progress.txt")
     args[-1] = "-"
     csv_path = os.path.join(a.out, "soak.csv")
+    init_text_files(proj, work)          # must exist BEFORE ffmpeg initialises its filter graph
     start = time.monotonic()
     p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(os.path.join(work, "ffmpeg.log"), "w"))
     rows, restarts, last_frame, stalls = [], 0, -1, 0
@@ -105,10 +118,7 @@ def main():
         while time.monotonic() - start < total:
             time.sleep(a.interval)
             now = time.monotonic()
-            for i, o in enumerate(proj.visible_overlays()):  # keep dynamic text moving like the real sidecar
-                if o.kind in ("clock", "countdown"):
-                    from datetime import datetime, timezone
-                    widgets.atomic_write(sff.text_file_path(work, i), widgets.render_text(o, datetime.now(timezone.utc)))
+            init_text_files(proj, work)      # keep dynamic text moving like the real sidecar
             alive = p.poll() is None
             if not alive:
                 restarts += 1
@@ -142,8 +152,10 @@ def main():
         "cpu_cores_p50": cores[len(cores) // 2], "cpu_cores_p95": cores[int(len(cores) * 0.95) - 1],
         "cpu_cores_max": cores[-1], "rss_mb_max": max([r[2] for r in rows] or [0]),
         "speed_min": min(speeds), "dropped_frames_last": rows[-1][5] if rows else None,
-        "hours_target": a.hours or a.minutes / 60.0,
-        "gate": "72h-PASS-CANDIDATE" if (done >= 72 * 3600 and restarts == 0 and stalls == 0 and min(speeds) >= 1.0)
+        "hours_target": total / 3600.0,
+        "frames_last": rows[-1][4] if rows else 0,
+        "encoded_video_seconds": round((rows[-1][4] if rows else 0) / 30.0, 1),
+        "gate": "FAILED-TO-START (no frames were ever encoded)" if not rows or rows[-1][4] == 0 else "72h-PASS-CANDIDATE" if (done >= 72 * 3600 and restarts == 0 and stalls == 0 and min(speeds) >= 1.0)
                 else ("72h-FAIL" if done >= 72 * 3600 else "PARTIAL (not a 72h result)"),
         "note": "speed>=1.0 sustained, 0 restarts, 0 stalls required; cpu budget target ~2-2.5 cores",
         "host_cpus": os.cpu_count(),
