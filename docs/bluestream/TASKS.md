@@ -1,32 +1,25 @@
-# TASKS  (I=implemented, V=verified by automated test, U=untested/needs real VPS, B=blocked, -=not started)
+# TASKS  (I=implemented, V=verified by automated test, U=untested on a real VPS, G=gated off, B=blocked, -=not started)
 
 | Area | Item | State |
 |---|---|---|
-| Phase 0 | CLAUDE.md + checkpoints | I,V |
-| Phase 0 | Baseline suite green on main (CI) | V |
-| Phase 0 | CPU/codec microbenchmark | harness I; run on VPS = B |
-| Planner | direct / pre-render / live choice with reasons | I,V |
-| Planner | cache key, LRU eviction, stale temp cleanup, disk-free check | I,V(unit) |
-| Planner | admission control (live slots, host load) | I,V |
-| FFmpeg | live single-chain argv (text/image/rect/ticker/clock/countdown/data) | I,V(CI real ffmpeg) |
-| FFmpeg | pre-render, copy, slideshow, silence insertion, loop-boundary DTS | I,V(CI real ffmpeg) |
-| Widgets | clock/countdown/count-up/Pomodoro/DST/atomic write/restart-safe | I,V (tz tests need tzdata: run in CI) |
-| Widgets | API data overlay (SSRF-guarded, last-good-value) | I,V(mocked network) |
-| Widgets | Now Playing | I (file-fed); producer in Playlist engine - |
-| Runtime | relay TYPE=studio via run-relay.sh, sidecar, retry-forever | I,V(shell wiring tests) U(real systemd) |
-| Runtime | Stop stays stopped after reboot; Start enables boot | I,V(shell tests) U(real reboot) |
-| Runtime | one publisher per stream (no second publish path) | I (by design) U(staging) |
-| Runtime | health from FFmpeg progress | helper I,V; surfaced in UI - |
-| UI | Studio tab, templates, overlay editor, preview, Apply to Live, rollback | I,V(console tests) U(browser E2E) |
-| UI | confirmed single-stream restart on Apply | I,V |
-| UI | undo/redo | rollback to last 10 revisions only |
-| Inputs | image slideshow | I,V(CI) |
-| Inputs | browser-capture source | gated OFF by design (not implemented) |
-| Playlist automation | loop/random/schedule | existing Playlist feature (unchanged); Studio adds none |
-| Help & Feedback | local redacted queue, consent, rate limit, diagnostics opt-in | I,V; central endpoint - |
-| Commercial | entitlement, grace, revocation, backend enforcement, activation UI | I,V |
-| Commercial | payment adapter / webhook verifier / idempotency | I,V; provider live = B |
-| Security | argv-only, path traversal, injection, SSRF connect-time | I,V |
-| Security | upload parser safety for images/video | existing media-import checks; extra - |
-| Ops | installer copies studio/, backup includes projects, vendor tool, soak tool | I; U(staging install) |
-| Release | regression, failure injection on VPS, 4-vCPU bench, 72h | B/PENDING |
+| Phase 0 | CLAUDE.md + checkpoints; baseline suite green | I,V |
+| Planner | direct / pre-render / live with reasons; cache key; LRU eviction; admission control | I,V |
+| FFmpeg | live single chain: text, image(+crop), rect, ticker, clock, countdown, count-up, Pomodoro, data, now-playing, video PiP | I,V (real ffmpeg, CI) |
+| FFmpeg | pre-render, stream-copy loop, slideshow, silence insertion, loop-boundary DTS | I,V (real ffmpeg, CI) |
+| Sources | media loop, relay, playlist, image slideshow (seconds, shuffle), audio file + colour/image background + waveform | I,V |
+| Widgets | timers survive restarts (absolute anchors), DST, atomic text files, data overlay formatting | I,V |
+| Data | API overlay: URL, JSON path, refresh, format; SSRF-guarded; last good value | I,V |
+| Now Playing | real title from the Playlist engine, updates on advance/restart, empty when unknown | I,V (unit + shell) U(real playlist) |
+| Editor | drag, resize, 8 handles, snap, keyboard, touch, crop, layer order, visibility, real source frame, mobile | I,V (Playwright x3 engines) |
+| Editor | Save draft, Apply to Live (confirmed single-stream restart), revision rollback (10) | I,V |
+| Ownership | one publisher per destination (flock), BLOCKED state, explicit takeover with rollback | I,V (real flock in CI) U(real systemd) |
+| Health | FFmpeg progress listener, speed/fps/drops, encoder CPU/RAM, restarts, last failure, HLS state, console panel | I,V U(real VPS numbers) |
+| Browser source | CDP capture, selector/region, interval, caching, last-good image, host pinning, per-request egress policy, limits, orphan kill | I,V (real Chromium, CI) **G** |
+| Browser source | systemd isolation (cgroup caps, IP deny, sandbox required) | I; U - needs staging; **G** |
+| Runtime | relay TYPE=studio, sidecar, retry-forever, boot persistence, Stop stays stopped | I,V (shell) U(real reboot) |
+| Commercial | entitlement, grace, revocation, install binding, backend enforcement, activation UI | I,V |
+| Commercial | payment provider integration | B (needs provider + credentials); adapter + webhook verifier I,V |
+| Support | Help & Feedback local queue (redacted, consented, rate limited) | I,V; central endpoint - |
+| Security | review round 2; fixes listed in TESTS.md | I,V; independent review - |
+| Ops | installer copies studio/ + browser unit, backup includes projects, soak + licence tools | I; U(staging install) |
+| Release | staging, failure injection on systemd, 4-vCPU benchmark, 72 h soak | B/PENDING |
