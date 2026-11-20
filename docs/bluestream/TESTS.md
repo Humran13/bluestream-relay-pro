@@ -17,9 +17,13 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 | Now Playing | test_studio_nowplaying.py + test_install.py::test_27 | title tracks playlist advance/restart; unknown -> empty |
 | Ownership | test_studio_ownership.py | real flock: second publisher blocked, released on kill -9, takeover order + rollback |
 | Health | test_studio_health.py | verdicts (stalled/degraded/healthy), loopback listener, proc sampler |
+| Units / accounts | test_studio_units.py | unit account == installer account, run-dir ownership, isolation + caps present, Chromium-breaking directives absent, systemd-analyze syntax check, browser off by default |
+| Soak harness | test_studio_soak.py | text files exist before FFmpeg, missing files really break init, short real run reports frames/CPU/RAM, never claims 72 h |
 | Browser source | test_studio_browser.py | gate, spec validation, egress policy, resolver pinning, worker backoff/cache/last-good, orphan kill, REAL Chromium captures (CI) |
 
 ## Defects found by this round's testing and fixed
+- Browser unit named an account (`bluestream`) the installer never creates; now `bluestream-relay`, guarded by test_studio_units.py.
+- Soak harness started FFmpeg before its text files existed (and never wrote the ticker file); fixed, proven by test_studio_soak.py (real run in CI).
 - web-ctl response line contained NUL bytes (bash drops them) - guard test added.
 - Click on a layer scrolled the page away from the canvas mid-drag; summary click re-closed the panel.
 - Audio-less source and looped image overlay made renders never end (earlier round) ; browser overlay PNG was not reloaded by `-loop 1` (now `-stream_loop -1`).
@@ -42,7 +46,10 @@ Chromium/Firefox/WebKit + real-Chromium Studio browser-source tests). Latest CI 
 - Everything: `cd webapp && python -m pytest -q`
 
 ## Latest CI result
-Commit `a21f5e1` on `feature/bluestream-studio` (draft PR #6), CI run 44808318901: **python, shell, node, browser all passed**
+Commit `97969dc` on `feature/bluestream-studio` (draft PR #6), CI run 44810021256: **python, shell, node, browser all passed**
+(python needed one re-run: the first attempt never reached the tests because the runner's apt mirror stalled while installing FFmpeg).
+Full local run on the dev box at this commit: **760 passed, 39 skipped** (skips = Linux/FFmpeg/flock/Chromium tests that run in CI).
+Previous record: `a21f5e1`, run 44808318901, all four passed.
 (python includes the real-FFmpeg media tests, ownership flock tests and the PNG-reload variant test; browser includes the
 Studio editor spec in Chromium, Firefox and WebKit and the real-Chromium browser-source tests).
 This is automated CI evidence only. It is not a staging, benchmark, reboot or 72-hour result.

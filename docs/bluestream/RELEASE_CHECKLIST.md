@@ -10,6 +10,7 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [x] Real-Chromium browser-source tests in CI (test-only `--no-sandbox`)
 - [x] Existing Relay/Playlist/Publisher regression suite unchanged and green
 - [x] Studio endpoints do not exist unless `BLUESTREAM_STUDIO_ENABLED=1`; backend refuses Studio start/mutations without a valid licence
+- [x] Browser unit account matches the installer's (`bluestream-relay`); soak harness initialisation proven by test
 - [x] Browser source refuses to run unless `BLUESTREAM_STUDIO_BROWSER=1` + Chromium + working sandbox (also enforced in the runtime against crafted project files)
 
 ## Gate B - staging VPS (NOT DONE: no staging machine/credentials available)
@@ -21,6 +22,8 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [ ] Studio stream end to end with nginx-rtmp, HLS and a TEST destination
 - [ ] Ownership: attach one destination to a Relay and a Studio stream; second shows BLOCKED; takeover switches and can be reversed; `kill -9` of the owner frees it
 - [ ] Now Playing against a real playlist (title changes as items advance; restart resets)
+- [ ] Web console can read media for editor previews (media dir is `root:bluestream-relay` 0750); if not, previews degrade to a neutral background - decide whether to grant read access
+- [ ] `systemctl start bluestream-browser@<relay>` as `bluestream-relay`: unit active, Chromium sandbox starts, capture PNG appears in the run dir
 - [ ] Web unit regenerated with `-/var/lib/bluestream/studio` in `ReadWritePaths`; licence activation works from the console
 
 ## Gate C - performance (NOT DONE)

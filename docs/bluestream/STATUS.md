@@ -19,6 +19,13 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
+## Pre-staging verification (latest commit `97969dc`)
+- Full local suite 760 passed / 39 skipped; CI python, shell, node, browser all green (python after one infra re-run).
+- Pre-staging blockers found by owner review, both fixed: browser unit account mismatch; soak harness init order.
+- Static checks of unit installation/permissions pass (root-owned 0644 unit, run dir `bluestream-relay:bluestream-relay` 0750).
+- Browser source remains disabled by default (flag unset in every shipped unit/script; gate tested).
+- Still NOT validated on a VPS: unit start-up, Chromium sandbox under the unit, IPAddressDeny/cgroup behaviour, media readability by the web console for editor previews.
+
 ## Browser source: what is and is not proven
 - Proven by tests (CI, real Chromium, test-only `--no-sandbox`): element and viewport capture sizes, per-request egress policy
   blocks an unlisted internal address, identical captures are not rewritten, hung page times out and leaves no browser
