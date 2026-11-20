@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import entitlement, netguard, planner, runtime, store, widgets
+from . import entitlement, netguard, nowplaying, planner, runtime, store, widgets
 from .model import NAME_RE, ValidationError
 
 
@@ -67,14 +67,10 @@ def _render_cache(project, src_in, info, plan, relay):
 
 
 def _now_playing(project):
-    """Best effort: `<run>/<playlist>.nowplaying` written by the playlist engine, if present."""
+    """Current playlist item title ("" when it cannot be known honestly)."""
     if project.source_kind != "playlist":
         return ""
-    try:
-        with open(os.path.join(runtime.run_dir(), project.source_ref + ".nowplaying"), encoding="utf-8") as fh:
-            return fh.read(200).strip()
-    except OSError:
-        return ""
+    return nowplaying.current_title(runtime.run_dir(), project.source_ref)
 
 
 def _write_static_text(project, workdir, now=None, data=None):

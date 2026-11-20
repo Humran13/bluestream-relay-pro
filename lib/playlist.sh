@@ -628,6 +628,21 @@ playlist_write_concat_file() {
     mv -f "$tmp" "$concat_file" || { rm -f "$tmp"; return 1; }
     chown "${BLUESTREAM_USER}:${BLUESTREAM_GROUP}" "$concat_file" 2>/dev/null || true
     chmod 0640 "$concat_file" || { rm -f "$concat_file"; return 1; }
+    # Display titles in concat order (one per line, extension stripped, control
+    # characters removed) so Studio's Now Playing can name the current item.
+    # Best-effort and additive: failure never affects the playlist itself.
+    local titles="$BLUESTREAM_RUN_DIR/$PLAYLIST_NAME.titles" ttmp t
+    ttmp="$BLUESTREAM_RUN_DIR/.$PLAYLIST_NAME.titles.tmp.$$"
+    if : > "$ttmp" 2>/dev/null; then
+        for i in "${!PLAYLIST_FILES[@]}"; do
+            t="${PLAYLIST_FILES[$i]##*/}"
+            t="${t%.*}"
+            printf '%s\n' "$(printf '%s' "$t" | tr -d '[:cntrl:]')" >> "$ttmp"
+        done
+        mv -f "$ttmp" "$titles" 2>/dev/null || rm -f "$ttmp"
+        chown "${BLUESTREAM_USER}:${BLUESTREAM_GROUP}" "$titles" 2>/dev/null || true
+        chmod 0640 "$titles" 2>/dev/null || true
+    fi
     return 0
 }
 

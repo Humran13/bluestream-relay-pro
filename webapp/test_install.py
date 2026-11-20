@@ -1704,6 +1704,19 @@ export PATH="$tmp/bin:$PATH"
         self.assertIn("SYSTEMCTL:disable bluestream-relay@st.service", out)
         self.assertIn("AFTER_STOP=no", out)
 
+    def test_27_playlist_concat_also_writes_titles_for_now_playing(self):
+        out = self._run(
+            ". \"$repo/lib/playlist.sh\"\n"
+            "BLUESTREAM_RUN_DIR=\"$tmp/run\"; mkdir -p \"$BLUESTREAM_RUN_DIR\"\n"
+            "printf x > \"$tmp/a.mp4\"; printf x > \"$tmp/b.mp4\"\n"
+            "PLAYLIST_NAME=pl; PLAYLIST_FILES=( 'Intro Clip.mp4' 'show-two.mkv' )\n"
+            "PLAYLIST_ARTIFACTS=( \"$tmp/a.mp4\" \"$tmp/b.mp4\" )\n"
+            "playlist_write_concat_file; echo RC=$?\n"
+            "cat \"$BLUESTREAM_RUN_DIR/pl.titles\"\n"
+            "grep -c \"^file '\" \"$BLUESTREAM_RUN_DIR/pl.concat.txt\"\n"
+        )
+        self.assertEqual(out, ["RC=0", "Intro Clip", "show-two", "2"])
+
     def test_26_verifier_allows_studio_encode_only_when_flagged(self):
         base = (
             "FFMPEG_ARGS=( -nostdin -y -loglevel warning -i rtmp://127.0.0.1:1935/bluestream-relay/src "
