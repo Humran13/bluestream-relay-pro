@@ -1,26 +1,29 @@
 # STATUS (update after every milestone)
 
 Branch `feature/bluestream-studio` (draft PR #6, NOT merged, NOT deployed). Base: main `dbfb71b`.
-Label: **implementation complete for the V1 candidate scope below; release gate PENDING.**
-Do NOT call this beta-ready: Gates B (staging), C (benchmarks/72h), D (payments), E (security sign-off) in
-`RELEASE_CHECKLIST.md` are open.
+Label: **implementation in progress (round 2); release gate PENDING. Not beta-ready.**
 
-## Implemented and tested
-- Core: model, planner (copy / pre-render / live), admission control, argv builders (live, pre-render, copy, slideshow)
-- Widgets: clock, countdown, count-up, Pomodoro (absolute anchors, DST-correct), ticker, Now Playing (file-fed), API data (SSRF-guarded)
-- Runtime: relay TYPE=studio via existing run-relay.sh/supervise.sh; sidecar for live text; cache + eviction; live leases; progress-based health helpers
-- Console (flag-gated): home/licence, create from templates, overlay editor + preview, save draft, Apply to Live (confirmed restart of one stream), rollback, create stream, Help & Feedback
-- Licensing: Ed25519 offline entitlements, grace, revocation, backend enforcement (routes + runtime); payments adapter (NOT live)
-- Ops: installer copies studio/, backup includes projects, soak harness, vendor licence tool
-- Tests: ~150 new Python tests + 3 shell-wiring tests; **CI fully green** (python incl. real FFmpeg, shell, node, browser) on the latest commit
+## Round 2 (owner review) - progress
+| # | Item | State |
+|---|---|---|
+| 3 | Now Playing from Playlist engine | DONE (titles file + supervisor start time + durations; unit + shell tests) |
+| 6 | Stream ownership / safe switching | DONE (flock per destination, BLOCKED state, controlled takeover with rollback; real-flock tests run in CI only) |
+| 7 | Health & resource monitoring | DONE (loopback FFmpeg progress listener, CPU/RAM, restarts, drops, failure; console panel; real-ffmpeg test in CI) |
+| 1 | OBS-like visual editor (drag/resize/crop/layers + real preview + browser tests) | **NEXT** |
+| 4 | Data overlay GUI (URL/path/refresh/format) | NEXT (backend validated; GUI fields + formatting + test pending) |
+| 5 | Media sources: audio/video sources, video overlay, slideshow controls | NEXT |
+| 2 | Browser source (CDP over pipe, systemd egress filter, limits) | NEXT - stays gated OFF until its tests pass |
+| 8 | Security/reliability review | partial: found+fixed NUL bytes in web-ctl; more after items above |
+| 9/10 | Tests + docs | ongoing |
 
-## NOT done (honest)
-- Staging VPS validation, upgrade/rollback rehearsal, failure injection on real systemd, reboot simulation
-- 4-vCPU benchmark and 72-hour soak (harness ready: `tools/studio_soak.py`)
-- Payments provider integration; vendor key issuance; legal docs
-- Browser-capture source (deliberately gated off); Now Playing producer in the Playlist engine; playlist scheduling additions
-- Per-destination exclusivity across *different* streams (design: one publisher unit per (stream,destination); verify on staging)
+## Exact next task
+Build the interactive editor: `webapp/static/js/studio_editor.js` (pointer-event drag/resize/handles, layer list with
+reorder + visibility, writes the same hidden form fields the server already validates), real source preview frame
+(`/console/studio/<name>/frame.jpg`), crop fields (Overlay.crop_*), and Playwright tests under `tests/browser/`
+(needs a Flask test server script like `tests/browser/studio-server.py`).
 
-## Next actions (for the owner)
-1. Review PR #6, run the checklist on a staging VPS, run the 72h soak.
-2. Decide payment provider; generate the vendor key.
+## Known facts / decisions
+- Studio stream = relay TYPE=studio (reuses publishers/HLS/boot logic); one publisher per destination enforced by flock.
+- Dev box has no ffmpeg/flock/tzdata: those tests skip locally and run in CI (ubuntu-24.04).
+- Pushing cancels in-flight CI (concurrency); batch pushes.
+- Payments remain NOT LIVE (pending provider + credentials). Manual licence tool unchanged.
