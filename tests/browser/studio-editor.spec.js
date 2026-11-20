@@ -10,7 +10,8 @@ async function login(page) {
   await page.goto(BASE + "/console/login");
   await page.fill('input[name="username"]', "admin");
   await page.fill('input[name="password"]', PASSWORD);
-  await Promise.all([page.waitForURL(/\/console(\/|$)/), page.click('button[type="submit"]')]);
+  // NOTE: /console/login itself matches /console/..., so wait until we have LEFT the login page.
+  await Promise.all([page.waitForURL((u) => !u.pathname.includes("/login")), page.click('button[type="submit"]')]);
 }
 
 /** Create a blank project and add the given overlay kinds via the real UI. */
