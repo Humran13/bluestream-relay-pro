@@ -214,6 +214,48 @@ class RealFfmpegTests(unittest.TestCase):
         info = self.assert_target_profile(out, 3.5)       # 4 s main source, 1 s PiP looped
         self.assertLess(float(info["format"]["duration"]), 5.0)
 
+    def test_png_reload_input_variants_report(self):
+        """Learn which ffmpeg input options really re-read a replaced image (outcomes in the message)."""
+        import hashlib
+        import threading
+        import time
+        variants = {
+            "A loop1": ["-f", "image2", "-framerate", "1", "-loop", "1"],
+            "B stream_loop": ["-f", "image2", "-framerate", "1", "-stream_loop", "-1"],
+            "C loop1 fps5": ["-f", "image2", "-framerate", "5", "-loop", "1"],
+            "D loop1 re": ["-re", "-f", "image2", "-framerate", "2", "-loop", "1"],
+            "E loop1 update-none": ["-f", "image2", "-pattern_type", "none", "-framerate", "2", "-loop", "1"],
+        }
+        outcomes = {}
+        for label, opts in variants.items():
+            png = "%s/v_%s.png" % (self.dir, abs(hash(label)))
+
+            def make(color):
+                tmp = png + ".tmp.png"
+                subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=%s:size=320x180:duration=1" % color,
+                                "-frames:v", "1", tmp], check=True)
+                os.replace(tmp, png)
+            make("red")
+            out = "%s/v_%s.mp4" % (self.dir, abs(hash(label)))
+            cmd = [FFMPEG, "-v", "error", "-y", "-re", "-f", "lavfi", "-i", "color=c=gray:size=640x360:rate=30:duration=7"] + opts +                   ["-i", png, "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v]", "-map", "[v]", "-t", "7",
+                   "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out]
+            t = threading.Timer(2.5, make, args=("blue",))
+            t.start()
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            t.join()
+            if r.returncode != 0:
+                outcomes[label] = "ffmpeg failed: " + r.stderr[-120:]
+                continue
+
+            def px(sec):
+                raw = subprocess.run([FFMPEG, "-v", "error", "-ss", str(sec), "-i", out, "-frames:v", "1", "-vf",
+                                      "crop=2:2:10:10", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                                     capture_output=True, check=True).stdout
+                return tuple(raw[:3])
+            early, late = px(1), px(6)
+            outcomes[label] = "reloads" if (early[0] > early[2] and late[2] > late[0]) else "static %s->%s" % (early, late)
+        self.assertEqual(outcomes["B stream_loop"], "reloads", repr(outcomes))
+
     def test_browser_overlay_png_is_reloaded_while_ffmpeg_runs(self):
         """The capture worker atomically replaces a PNG; the encoder must pick up the new image."""
         import hashlib
