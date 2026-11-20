@@ -1,0 +1,24 @@
+# Isolated local test image for BlueStream Studio (Docker Desktop + WSL2). Ubuntu 24.04 like production.
+# Build:  docker build -t bs-studio-test:local -f tools/docker/Dockerfile.studio-test tools/docker
+# Nothing here is published or exposed; the container is run with explicit CPU/RAM limits.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive PLAYWRIGHT_BROWSERS_PATH=/opt/pw LANG=C.UTF-8
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' > /etc/apt/apt.conf.d/99retry \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget jq procps psmisc iproute2 util-linux sudo acl file less \
+      ffmpeg fonts-dejavu-core tzdata \
+      python3 python3-venv python3-pip python3-flask python3-werkzeug \
+      nginx libnginx-mod-rtmp \
+      nodejs npm \
+      shellcheck systemd \
+ && rm -rf /var/lib/apt/lists/*
+# Python test tooling (Flask/Werkzeug come from apt = exactly what production installs).
+RUN python3 -m pip install --break-system-packages --no-cache-dir pytest==9.1.1
+# Playwright (locked version) + its browsers, installed once into the image.
+WORKDIR /opt/pwdeps
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund \
+ && npx playwright install --with-deps chromium firefox webkit \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

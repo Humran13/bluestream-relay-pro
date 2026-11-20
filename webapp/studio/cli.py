@@ -159,7 +159,9 @@ def cmd_argv(relay, name):
                                    loop_file=not live)
     args = _attach_progress(args, relay)
     sys.stderr.write("studio: plan=%s (%s)\n" % (plan.path, "; ".join(plan.reasons)))
-    sys.stdout.buffer.write(b"\0".join(a.encode() for a in args) + b"\0")
+    # The supervisor runs `ffmpeg "${FFMPEG_ARGS[@]}"`, so emit ARGUMENTS only (no executable name).
+    # (Emitting argv[0] made a real relay exec `ffmpeg ffmpeg ...`; found by the Docker end-to-end run.)
+    sys.stdout.buffer.write(b"\0".join(a.encode() for a in args[1:]) + b"\0")
     return 0
 
 

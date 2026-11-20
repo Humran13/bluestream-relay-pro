@@ -257,3 +257,33 @@ class AssetTypeTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Project("p", "slideshow", "a.png,b.txt").validate()
         Project("p", "media", "a.mp4", [Overlay("image", asset="logo.PNG"), Overlay("video", asset="x.webm")]).validate()
+
+
+class StoreRoundTripTests(unittest.TestCase):
+    """Found by the Docker end-to-end run: a published audio project lost its background + waveform."""
+
+    def test_every_project_field_survives_save_and_load(self):
+        import dataclasses
+        import tempfile
+        from webapp.studio import store
+        from webapp.studio.model import Project as P
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"BLUESTREAM_STUDIO_DIR": d + "/s"}):
+            p = P("rt", "audio", "song.mp3", [Overlay("text", text="x")], background="bg.png", visualizer=True,
+                  slide_seconds=7, slide_shuffle=True)
+            store.save_draft(p.validate())
+            store.publish("rt")
+            q = store.load_published("rt")
+            for f in dataclasses.fields(P):
+                if f.name in ("revision",):
+                    continue
+                self.assertEqual(getattr(q, f.name), getattr(p, f.name), f.name)
+            # and the planner therefore still needs a live encode after the round trip
+            from webapp.studio import planner as pl
+            info = pl.SourceInfo(acodec="mp3", duration=200.0, content_id="x")
+            self.assertEqual(pl.plan_output(q, info).path, pl.LIVE)
+
+    def test_new_project_fields_cannot_be_forgotten(self):
+        from webapp.studio import store
+        from webapp.studio.model import Project as P
+        self.assertEqual(set(store.to_dict(P("a", "media", "a.mp4"))) - {"profile", "overlays"},
+                         set(P.__dataclass_fields__) - {"profile", "overlays"})

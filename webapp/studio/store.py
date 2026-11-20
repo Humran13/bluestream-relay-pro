@@ -17,6 +17,7 @@ from .model import NAME_RE, OutputProfile, Overlay, Project, ValidationError
 DEFAULT_DIR = "/var/lib/bluestream/studio"
 KEEP_REVISIONS = 10
 _FIELDS = set(Overlay.__dataclass_fields__)
+_PROJECT_SCALARS = tuple(f for f in Project.__dataclass_fields__ if f not in ("overlays", "profile"))
 _PFIELDS = set(OutputProfile.__dataclass_fields__)
 
 
@@ -25,13 +26,12 @@ def studio_dir():
 
 
 def to_dict(project):
-    return {
-        "name": project.name, "source_kind": project.source_kind,
-        "source_ref": project.source_ref, "revision": project.revision,
-        "slide_seconds": project.slide_seconds, "slide_shuffle": project.slide_shuffle,
-        "profile": dict(project.profile.__dict__),
-        "overlays": [dict(o.__dict__) for o in project.overlays],
-    }
+    # Every scalar Project field is persisted automatically (a hand-written list once silently dropped
+    # an audio project's background + visualizer); see test_every_project_field_survives_save_and_load.
+    doc = {f: getattr(project, f) for f in _PROJECT_SCALARS}
+    doc["profile"] = dict(project.profile.__dict__)
+    doc["overlays"] = [dict(o.__dict__) for o in project.overlays]
+    return doc
 
 
 def from_dict(doc):
@@ -44,11 +44,12 @@ def from_dict(doc):
             if not isinstance(o, dict):
                 raise ValidationError("overlay must be an object")
             overlays.append(Overlay(**{k: v for k, v in o.items() if k in _FIELDS}))
-        p = Project(name=doc["name"], source_kind=doc["source_kind"],
-                    source_ref=doc["source_ref"], overlays=overlays,
-                    profile=OutputProfile(**prof), revision=int(doc.get("revision", 1)),
-                    slide_seconds=int(doc.get("slide_seconds", 10)),
-                    slide_shuffle=bool(doc.get("slide_shuffle", False)))
+        scalars = {f: doc[f] for f in _PROJECT_SCALARS if f in doc}
+        p = Project(overlays=overlays, profile=OutputProfile(**prof), **scalars)
+        p.revision = int(p.revision)
+        p.slide_seconds = int(p.slide_seconds)
+        p.slide_shuffle = bool(p.slide_shuffle)
+        p.visualizer = bool(p.visualizer)
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, ValidationError):
             raise

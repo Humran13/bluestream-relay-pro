@@ -288,6 +288,9 @@ class StoreRuntimeCliTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("libx264", args)
         self.assertEqual(args[-1], "rtmp://127.0.0.1:1935/bluestream-relay/demo")
+        # the supervisor runs `ffmpeg "${FFMPEG_ARGS[@]}"`: the emitted list must be ARGUMENTS ONLY
+        self.assertNotEqual(args[0], "ffmpeg")
+        self.assertTrue(args[0].startswith("-"), args[0])
         self.assertIn("plan=live-composition", err)
         # another live encoder holds the only slot -> refused, nothing emitted
         runtime.take_live_lease("other")
