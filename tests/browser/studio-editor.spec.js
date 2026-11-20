@@ -200,6 +200,7 @@ test.describe("Studio visual editor", () => {
   });
 
   test("mobile viewport: no horizontal scroll and the canvas fits", async ({ browser }) => {
+    test.setTimeout(120000);   // WebKit on CI is slow to log in and create a project
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await ctx.newPage();
     await project(page, ["rect", "ticker"]);

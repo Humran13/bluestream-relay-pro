@@ -182,7 +182,7 @@ class RealFfmpegTests(unittest.TestCase):
     def test_audio_source_static_background_prerenders_to_profile(self):
         audio = self.dir + "/tone.wav"
         subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=3", audio], check=True)
-        proj = Project("au", "audio", audio, [Overlay("text", text="On air")], background="#102040").validate()
+        proj = Project("au", "audio", "tone.wav", [Overlay("text", text="On air")], background="#102040").validate()
         wd.atomic_write(sff.text_file_path(self.dir, 0), "On air")
         out = self.dir + "/audio_pre.mp4"
         self.run_ff(sff.build_prerender_args(proj, audio, out, self.dir, self.assets))
@@ -193,7 +193,7 @@ class RealFfmpegTests(unittest.TestCase):
         audio = self.dir + "/tone2.wav"
         subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", audio], check=True)
         self.make_png("bg.png", "purple")
-        proj = Project("au2", "audio", audio, [], background="bg.png", visualizer=True).validate()
+        proj = Project("au2", "audio", "tone2.wav", [], background="bg.png", visualizer=True).validate()
         out = self.dir + "/audio_vis.mp4"
         args = sff._build(proj, audio, out, self.dir, self.assets, sff.DEFAULT_FONT, True, False, FFMPEG, "mp4", [])
         args.remove("-re")
