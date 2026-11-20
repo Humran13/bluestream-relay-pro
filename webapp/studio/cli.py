@@ -266,11 +266,11 @@ def cmd_browser_unit(relay):
     return cmd_browser(relay, name)
 
 
-def _emit_image(mime, data):
+def _emit_image(mime, data, rc=0):
     import base64
     out = b"mime" + bytes([0]) + mime.encode() + bytes([0]) + b"data" + bytes([0]) + base64.b64encode(data) + bytes([0])
     sys.stdout.buffer.write(out)
-    return 0
+    return rc
 
 
 def cmd_frame(name):
@@ -281,7 +281,7 @@ def cmd_frame(name):
         data = None
     if not data:
         sys.stderr.write("studio: no preview frame available\n")
-        return 1
+        return _emit_image("", b"", 1)
     return _emit_image("image/jpeg", data)
 
 
@@ -289,7 +289,7 @@ def cmd_thumb(asset):
     data = preview.thumb_png(asset)
     if not data:
         sys.stderr.write("studio: no thumbnail available\n")
-        return 1
+        return _emit_image("", b"", 1)
     return _emit_image("image/png", data)
 
 

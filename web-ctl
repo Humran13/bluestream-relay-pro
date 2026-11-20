@@ -812,23 +812,14 @@ wc_op_studio_health() {
 # able to) read managed media or HLS output, so the bridge produces a small scaled image
 # instead; the Studio CLI drops root to the owning service account before touching any file.
 wc_op_studio_preview() {
-    local kind="$1" name="${2:-}" tmp rc
+    local kind="$1" name="${2:-}"
     case "$kind" in
         frame) bs_valid_name "$name" || wc_fail "invalid project name" "INVALID_NAME" ;;
         thumb) bs_valid_media_name "$name" || wc_fail "invalid media name" "INVALID_MEDIA" ;;
     esac
-    tmp="$(mktemp)" || wc_fail "preview unavailable" "NOT_AVAILABLE"
-    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}" \
-        "$BS_PYTHON" -m studio.cli "$kind" "$name" > "$tmp" 2>/dev/null
-    rc=$?
-    if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
-        rm -f "$tmp"
-        wc_fail "preview unavailable" "NOT_AVAILABLE"
-    fi
-    wc_json object < "$tmp"
-    rc=$?
-    rm -f "$tmp"
-    return "$rc"
+    # Streamed straight into the JSON helper (no temp files). When no preview exists the CLI emits
+    # empty mime/data values, which the console treats as "no preview" (HTTP 404, neutral background).
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         "$BS_PYTHON" -m studio.cli "$kind" "$name" 2>/dev/null | wc_json object
 }
 
 wc_op_destination_create() {

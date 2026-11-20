@@ -98,8 +98,9 @@ class CliImageTests(unittest.TestCase):
         self.assertEqual(raw.split(bytes([0]))[1], b"image/png")
 
     def test_nothing_available_is_a_clean_failure(self):
-        self.assertEqual(self.run_cmd("frame", "p", None), (1, b""))
-        self.assertEqual(self.run_cmd("thumb", "logo.png", None), (1, b""))
+        empty = b"mime" + bytes([0, 0]) + b"data" + bytes([0, 0])      # empty values: "no preview"
+        self.assertEqual(self.run_cmd("frame", "p", None), (1, empty))
+        self.assertEqual(self.run_cmd("thumb", "logo.png", None), (1, empty))
 
     def test_cli_rejects_bad_names_before_touching_files(self):
         for argv in (["x", "thumb", "../etc/passwd"], ["x", "thumb", "a/b.png"], ["x", "frame", "../p"], ["x", "frame", "A B"]):
@@ -238,7 +239,7 @@ class PermissionRegressionTests(unittest.TestCase):
         body = re.search(r"wc_op_studio_preview\(\) \{.*?\n\}\n", self.webctl, re.S).group(0)
         for forbidden in ("chmod", "chown", "systemctl", "install ", "mv ", "cp ", "tee ", ">> "):
             self.assertNotIn(forbidden, body, forbidden)
-        self.assertEqual(re.findall(r"\brm -f ([^\s;]+)", body), ['"$tmp"'] * 2)      # only its own temp file
+        self.assertNotIn("mktemp", body)                                             # no temp files in web-ctl
         self.assertIn("studio_frame|studio_thumb)", self.webctl)
 
     def test_backup_restore_does_not_widen_modes_and_restore_allowlist_is_unchanged(self):
