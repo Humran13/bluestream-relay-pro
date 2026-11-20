@@ -70,8 +70,11 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
             extra_args += ["-loop", "1", "-i", "%s/%s" % (assets_dir, o.asset)]
             extra += 1
             idx = first_extra + extra - 1
-            chain.append("[%d:v]scale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
-                         % (idx, _px(o.w, p.width), o.opacity, idx))
+            crop = ""
+            if o.cropped:
+                crop = "crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f," % (o.crop_w, o.crop_h, o.crop_x, o.crop_y)
+            chain.append("[%d:v]%sscale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
+                         % (idx, crop, _px(o.w, p.width), o.opacity, idx))
             f = "[%s][im%d]overlay=%d:%d:shortest=1[%s]" % (last, idx, x, y, nxt)
         else:  # text, clock, countdown, ticker: all read an atomically replaced file
             tf = text_file_path(workdir, i)

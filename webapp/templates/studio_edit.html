@@ -6,12 +6,22 @@
 {% if not licence_ok %}<p class="error">Studio editing needs an active Premium licence ({{ licence.reason }}). Your existing stream is not affected.</p>{% endif %}
 
 <section class="card">
-  <h2>Preview <span class="muted">(snapshot; live widgets update every second on the stream)</span></h2>
-  <div class="studio-canvas" role="img" aria-label="Layout preview of 16:9 output">
+  <h2>Editor <span class="muted">(drag to move, drag handles to resize, arrow keys nudge, Alt+arrows resize, Shift = coarse)</span></h2>
+  <div id="studio-canvas" class="studio-canvas" role="group" aria-label="16:9 output canvas. Layers can be moved with the arrow keys.">
+    <img class="studio-bg" src="{{ url_for('console.studio_frame', name=project.name) }}" alt="" onerror="this.remove()">
     {% for it in items %}{% set o = it.o %}
-    <div class="studio-item studio-{{ o.kind }}" style="left:{{ (o.x*100)|round(2) }}%;top:{{ (o.y*100)|round(2) }}%;width:{{ (o.w*100)|round(2) }}%;height:{{ (o.h*100)|round(2) }}%;opacity:{{ o.opacity }};color:{{ o.color }};{% if o.kind == 'rect' %}background:{{ o.color }};{% endif %}font-size:{{ (o.size/7.2)|round(1) }}cqh">{% if o.kind == 'image' %}[{{ o.asset }}]{% else %}{{ it.text }}{% endif %}</div>
+    <div class="studio-item studio-{{ o.kind }}{% if not o.visible %} studio-hidden{% endif %}" data-i="{{ it.i }}"{% if o.kind not in ('image','rect') %} data-static="{{ 1 if o.kind in ('text',) else 0 }}"{% endif %}
+         tabindex="0" role="button" aria-label="Layer {{ it.i + 1 }}: {{ o.kind }}"
+         style="left:{{ (o.x*100)|round(2) }}%;top:{{ (o.y*100)|round(2) }}%;width:{{ (o.w*100)|round(2) }}%;height:{{ (o.h*100)|round(2) }}%;opacity:{{ o.opacity }};color:{{ o.color }};{% if o.kind == 'rect' %}background:{{ o.color }};{% endif %}font-size:{{ (o.size/7.2)|round(1) }}cqh;z-index:{{ it.i + 1 }}">
+      {% if o.kind == 'image' %}<img class="studio-asset" src="{{ url_for('console.studio_asset', asset=o.asset) }}" alt="" draggable="false" onerror="this.replaceWith(document.createTextNode('[{{ o.asset }}]'))">
+      {% elif o.kind != 'rect' %}<span class="studio-label">{{ it.text }}</span>{% endif %}
+      {% for h in ('nw','n','ne','e','se','s','sw','w') %}<i class="studio-handle h-{{ h }}" data-h="{{ h }}" aria-hidden="true"></i>{% endfor %}
+    </div>
     {% endfor %}
   </div>
+  <div id="studio-live" class="visually-hidden" aria-live="polite"></div>
+  {% if licence_ok %}<p><button class="btn" type="submit" form="studio-form" name="action" value="save">Save draft</button>
+     <span class="muted">Layers stack in list order: the last one is on top.</span></p>{% endif %}
   <p><strong>Pipeline:</strong> {{ plan_title }}. {{ plan_why }} Estimated transfer for one destination: about {{ monthly_tb }} TB / 30 days.</p>
 </section>
 
@@ -69,17 +79,17 @@
 {% endif %}
 
 {% if licence_ok %}
-<form method="post" action="{{ url_for('console.studio_save_post', name=project.name) }}" class="card studio-form">
+<form id="studio-form" method="post" action="{{ url_for('console.studio_save_post', name=project.name) }}" class="card studio-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="count" value="{{ project.overlays|length }}">
   <h2>Sources &amp; overlays</h2>
   <label for="sref">{{ project.source_kind|capitalize }} source</label>
   <input id="sref" name="source_ref" value="{{ project.source_ref }}">
   {% for o in project.overlays %}{% set i = loop.index0 %}
-  <fieldset class="overlay-box">
-    <legend>{{ loop.index }}. {{ o.kind }}</legend>
+  <details class="overlay-box" data-i="{{ i }}">
+    <summary><span class="layer-no">{{ loop.index }}.</span> {{ o.kind }}
+      <label class="layer-vis" title="Show or hide this layer"><input type="checkbox" name="visible_{{ i }}" {% if o.visible %}checked{% endif %}> visible</label></summary>
     <input type="hidden" name="kind_{{ i }}" value="{{ o.kind }}">
-    <label><input type="checkbox" name="visible_{{ i }}" {% if o.visible %}checked{% endif %}> Visible</label>
     <label>X <input name="x_{{ i }}" value="{{ o.x }}" size="5"></label>
     <label>Y <input name="y_{{ i }}" value="{{ o.y }}" size="5"></label>
     <label>W <input name="w_{{ i }}" value="{{ o.w }}" size="5"></label>
@@ -89,8 +99,16 @@
     <label>Size <input name="size_{{ i }}" value="{{ o.size }}" size="4"></label>
     <label>Font <input name="font_{{ i }}" value="{{ o.font }}"></label>{% endif %}
     <label>Colour <input name="color_{{ i }}" value="{{ o.color }}" size="8"></label>
-    {% if o.kind in ('text','ticker','nowplaying') %}<label>Text <input name="text_{{ i }}" value="{{ o.text }}" maxlength="500"></label>{% endif %}
-    {% if o.kind == 'image' %}<label>Image (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>{% endif %}
+    {% if o.kind in ('text','ticker','nowplaying','data') %}<label>Text <input name="text_{{ i }}" value="{{ o.text }}" maxlength="500"></label>{% endif %}
+    {% if o.kind == 'image' %}<label>Image (Media Library name) <input name="asset_{{ i }}" value="{{ o.asset }}"></label>
+    <label>Crop X <input name="crop_x_{{ i }}" value="{{ o.crop_x }}" size="4"></label><label>Crop Y <input name="crop_y_{{ i }}" value="{{ o.crop_y }}" size="4"></label>
+    <label>Crop W <input name="crop_w_{{ i }}" value="{{ o.crop_w }}" size="4"></label><label>Crop H <input name="crop_h_{{ i }}" value="{{ o.crop_h }}" size="4"></label>{% endif %}
+    {% if o.kind == 'data' %}
+    <label>Data URL (public JSON) <input name="url_{{ i }}" value="{{ o.url }}" size="40" maxlength="500"></label>
+    <label>JSON path <input name="json_path_{{ i }}" value="{{ o.json_path }}" placeholder="items.0.count" size="16"></label>
+    <label>Refresh (s) <input name="refresh_s_{{ i }}" type="number" min="30" max="86400" value="{{ o.refresh_s }}" size="5"></label>
+    <label>Format <select name="value_format_{{ i }}">{% for f, lab in (('raw','as is'),('int','whole number'),('thousands','1,234'),('decimal1','1 decimal'),('percent','percent')) %}<option value="{{ f }}"{% if o.value_format == f %} selected{% endif %}>{{ lab }}</option>{% endfor %}</select></label>
+    <span class="muted">Use {value} in Text, e.g. "Subscribers: {value}". Only public internet URLs are fetched; the last good value is kept on errors.</span>{% endif %}
     {% if o.kind in ('clock','countdown','countup','pomodoro') %}<label>Timezone <input name="tz_{{ i }}" value="{{ o.tz }}"></label>{% endif %}
     {% if o.kind in ('countdown','countup','pomodoro') %}<label>{{ 'Anchor' if o.kind == 'pomodoro' else 'Date/time' }} (YYYY-MM-DDTHH:MM:SS) <input name="target_{{ i }}" value="{{ o.target }}"></label>{% endif %}
     {% if o.kind == 'countdown' %}<label>When finished <input name="finished_text_{{ i }}" value="{{ o.finished_text }}"></label>{% endif %}
@@ -100,7 +118,7 @@
       <button class="btn btn-sm btn-secondary" name="action" value="down:{{ i }}" type="submit" aria-label="Move overlay {{ loop.index }} down">&darr;</button>
       <label><input type="checkbox" name="delete_{{ i }}"> Remove</label>
     </span>
-  </fieldset>
+  </details>
   {% endfor %}
   <p>Add:
     {% for k in kinds %}<button class="btn btn-sm btn-secondary" name="action" value="add:{{ k }}" type="submit">+ {{ k }}</button> {% endfor %}
@@ -131,13 +149,5 @@
   </form>{% endif %}
 </section>
 {% endif %}
-<style>
-.studio-canvas{position:relative;width:100%;max-width:760px;aspect-ratio:16/9;background:#10151c;border:1px solid var(--border);overflow:hidden;container-type:size}
-.studio-item{position:absolute;overflow:hidden;white-space:nowrap;line-height:1.1;display:flex;align-items:center}
-.studio-rect{border-radius:2px}
-.overlay-box{margin:.6rem 0;padding:.5rem;border:1px solid var(--border)}
-.overlay-box label{margin-right:.6rem;display:inline-block}
-.studio-form input,.studio-form select{max-width:100%}
-@media(max-width:640px){.overlay-box label{display:block;margin:.3rem 0}}
-</style>
+<script src="{{ url_for('static', filename='js/studio_editor.js') }}" defer></script>
 {% endblock %}

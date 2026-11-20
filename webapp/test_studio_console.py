@@ -244,3 +244,90 @@ class HealthAndOwnershipPanelTests(Base):
     def test_takeover_blocked_without_licence_and_for_bad_ids(self):
         self.post("/console/studio/hs/takeover/..%2Fx", {"confirm": "1"}, "/console/studio/hs")
         self.assertEqual(self.engine.mutation_calls, [])
+
+
+class EditorServerSideTests(Base):
+    def make(self, name="ed"):
+        self.post("/console/studio/new", {"name": name, "source_kind": "media", "source_ref": "loop.mp4",
+                                          "template": "blank"}, "/console/studio")
+
+    def test_editor_page_renders_all_layers_with_handles_and_data_fields(self):
+        self.make()
+        p = store.load_draft("ed")
+        from webapp.studio.model import Overlay
+        p.overlays = [Overlay("rect", y=0.8, h=0.2, w=1.0, visible=False), Overlay("data", text="S: {value}",
+                      url="https://example.com/a.json", json_path="a.b", refresh_s=90, value_format="thousands"),
+                      Overlay("image", asset="logo.png", crop_w=0.5)]
+        store.save_draft(p.validate())
+        html = self.client.get("/console/studio/ed").get_data(as_text=True)
+        self.assertEqual(html.count('class="studio-item'), 3)           # hidden layers are still editable
+        self.assertEqual(html.count('<i class="studio-handle'), 3 * 8)   # 8 resize handles per layer
+        self.assertIn('data-i="2"', html)
+        self.assertIn("studio-hidden", html)
+        for needle in ('name="url_1"', 'name="json_path_1"', 'name="refresh_s_1"', 'name="value_format_1"',
+                       'name="crop_w_2"', "studio_editor.js"):
+            self.assertIn(needle, html)
+
+    def test_data_and_crop_fields_round_trip_through_the_same_validated_model(self):
+        self.make()
+        form = {"count": "2", "kind_0": "data", "x_0": "0.1", "y_0": "0.1", "w_0": "0.4", "h_0": "0.1",
+                "visible_0": "on", "text_0": "Subs {value}", "url_0": "https://example.com/s.json",
+                "json_path_0": "c.subs", "refresh_s_0": "120", "value_format_0": "int", "size_0": "40",
+                "kind_1": "image", "x_1": "0.6", "y_1": "0.1", "w_1": "0.2", "h_1": "0.2", "visible_1": "on",
+                "asset_1": "logo.png", "crop_x_1": "0.25", "crop_y_1": "0", "crop_w_1": "0.5", "crop_h_1": "1"}
+        self.post("/console/studio/ed/save", form, "/console/studio/ed")
+        o = store.load_draft("ed").overlays
+        self.assertEqual((o[0].url, o[0].json_path, o[0].refresh_s, o[0].value_format),
+                         ("https://example.com/s.json", "c.subs", 120, "int"))
+        self.assertEqual((o[1].crop_x, o[1].crop_w), (0.25, 0.5))
+        # invalid crop / format / refresh rejected as a whole, draft unchanged
+        for key, val in (("crop_w_1", "0.01"), ("crop_x_1", "0.9"), ("value_format_0", "evil"), ("refresh_s_0", "5"),
+                         ("url_0", "ftp://x/y")):
+            bad = dict(form)
+            bad[key] = val
+            self.post("/console/studio/ed/save", bad, "/console/studio/ed")
+            self.assertEqual(store.load_draft("ed").overlays[0].refresh_s, 120, key)
+            self.assertEqual(store.load_draft("ed").overlays[1].crop_w, 0.5, key)
+
+    def test_asset_route_serves_only_media_library_images(self):
+        import pathlib
+        media = pathlib.Path(os.environ["BLUESTREAM_MEDIA_DIR"]) if "BLUESTREAM_MEDIA_DIR" in os.environ else None
+        d = self._tmp.name + "/media"
+        os.makedirs(d, exist_ok=True)
+        with mock.patch.dict(os.environ, {"BLUESTREAM_MEDIA_DIR": d}):
+            open(d + "/logo.png", "wb").write(b"\x89PNG\r\n\x1a\nxx")
+            open(d + "/notes.txt", "wb").write(b"secret")
+            ok = self.client.get("/console/studio/asset/logo.png")
+            self.assertEqual((ok.status_code, ok.mimetype), (200, "image/png"))
+            ok.close()  # release the file handle (Windows dev boxes)
+            for bad in ("notes.txt", "missing.png", "..%2F..%2Fetc%2Fpasswd", ".hidden.png"):
+                self.assertEqual(self.client.get("/console/studio/asset/" + bad).status_code, 404, bad)
+        anon = self.app.test_client()
+        self.assertEqual(anon.get("/console/studio/asset/logo.png").status_code, 302)
+        del media
+
+    def test_frame_route_404_without_source_and_requires_login(self):
+        self.make()
+        self.assertEqual(self.client.get("/console/studio/ed/frame.jpg").status_code, 404)
+        self.assertEqual(self.app.test_client().get("/console/studio/ed/frame.jpg").status_code, 302)
+        self.assertEqual(self.client.get("/console/studio/nope/frame.jpg").status_code, 404)
+
+
+class PreviewUnitTests(unittest.TestCase):
+    def test_source_path_resolution_and_traversal_refusal(self):
+        from webapp.studio import preview
+        from webapp.studio.model import Project
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "BLUESTREAM_MEDIA_DIR": d + "/m", "BLUESTREAM_HLS_ROOT": d + "/hls"}):
+            os.makedirs(d + "/m")
+            os.makedirs(d + "/hls/relay/cam")
+            open(d + "/m/a.mp4", "wb").write(b"x")
+            open(d + "/hls/relay/cam/1.ts", "wb").write(b"x")
+            open(d + "/hls/relay/cam/2.ts", "wb").write(b"x")
+            os.utime(d + "/hls/relay/cam/1.ts", (1, 1))
+            self.assertTrue(preview.source_path(Project("p", "media", "a.mp4")).endswith("a.mp4"))
+            self.assertTrue(preview.source_path(Project("p", "relay", "cam")).endswith("2.ts"))  # newest segment
+            self.assertIsNone(preview.source_path(Project("p", "media", "../x.mp4")))
+            self.assertIsNone(preview.source_path(Project("p", "relay", "../cam")))
+            self.assertIsNone(preview.source_path(Project("p", "media", "nope.mp4")))
+            self.assertIsNone(preview.frame_jpeg(Project("p", "media", "nope.mp4")))

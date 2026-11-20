@@ -8,13 +8,23 @@ module.exports = defineConfig({
   testDir: __dirname,
   fullyParallel: true,
   reporter: [["list"]],
-  webServer: {
-    command: "node static-server.js",
-    cwd: __dirname,
-    port: 4873,
-    reuseExistingServer: true,
-    timeout: 15000,
-  },
+  webServer: [
+    {
+      command: "node static-server.js",
+      cwd: __dirname,
+      port: 4873,
+      reuseExistingServer: true,
+      timeout: 15000,
+    },
+    {
+      // Real console app (fake engine bridge, temp state, test licence) for the Studio editor.
+      command: process.env.PYTHON || "python3 studio_server.py",
+      cwd: __dirname,
+      port: 4874,
+      reuseExistingServer: true,
+      timeout: 30000,
+    },
+  ],
   use: {
     baseURL: "http://127.0.0.1:4873",
   },

@@ -7,9 +7,9 @@ the app-wide hook, and (c) requires a valid entitlement on the BACKEND.
 """
 from datetime import datetime, timezone
 
-from flask import current_app, flash, redirect, render_template, request, session, url_for
+from flask import Response, abort, current_app, flash, redirect, render_template, request, send_file, session, url_for
 
-from . import entitlement, feedback, store, templates_lib, widgets
+from . import entitlement, feedback, preview, store, templates_lib, widgets
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
 
 SOURCE_KINDS = ("relay", "playlist", "media", "slideshow")
@@ -49,18 +49,22 @@ def overlay_from_form(form, i):
         text=g("text"), asset=g("asset"), color=g("color", "#ffffff"), font=g("font", "DejaVu Sans"),
         size=_int(form, "size_%d" % i, 48), tz=g("tz", "UTC") or "UTC", target=g("target"),
         work_min=_int(form, "work_min_%d" % i, 25), break_min=_int(form, "break_min_%d" % i, 5),
-        finished_text=g("finished_text", "LIVE NOW"))
+        finished_text=g("finished_text", "LIVE NOW"),
+        url=g("url"), json_path=g("json_path"), refresh_s=_int(form, "refresh_s_%d" % i, 60),
+        crop_x=_float(form, "crop_x_%d" % i, 0.0), crop_y=_float(form, "crop_y_%d" % i, 0.0),
+        crop_w=_float(form, "crop_w_%d" % i, 1.0), crop_h=_float(form, "crop_h_%d" % i, 1.0),
+        value_format=g("value_format", "raw") or "raw")
 
 
 def preview_items(project, now=None):
     now = now or datetime.now(timezone.utc)
     items = []
-    for o in project.visible_overlays():
+    for i, o in enumerate(project.overlays):  # ALL overlays; index == form field index == layer order
         try:
             text = "" if o.kind in ("rect", "image") else widgets.render_text(o, now)
         except ValidationError:
             text = "(invalid time)"
-        items.append({"o": o, "text": text})
+        items.append({"i": i, "o": o, "text": text})
     return items
 
 
@@ -195,6 +199,31 @@ def register(console, find_relay, engine_of):
             relay=relay, licence=v, licence_ok=ok, plan_title=title, plan_why=why,
             monthly_tb=project.profile.monthly_terabytes(), unavailable=unavailable,
             health=health_doc, publishers=publishers)
+
+    @console.route("/studio/<name>/frame.jpg", methods=["GET"])
+    def studio_frame(name):
+        """Real frame of the selected source for the editor background."""
+        if not auth():
+            return need_login()
+        if not NAME_RE.match(name) or not store.exists(name):
+            abort(404)
+        try:
+            data = preview.frame_jpeg(store.load_draft(name))
+        except (ValueError, OSError):
+            data = None
+        if not data:
+            abort(404)
+        return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "private, max-age=10"})
+
+    @console.route("/studio/asset/<asset>", methods=["GET"])
+    def studio_asset(asset):
+        """Media Library image used by an image overlay (preview only)."""
+        if not auth():
+            return need_login()
+        found = preview.asset_image(asset)
+        if not found:
+            abort(404)
+        return send_file(found[0], mimetype=found[1], max_age=30)
 
     @console.route("/studio/<name>/save", methods=["POST"])
     def studio_save_post(name):

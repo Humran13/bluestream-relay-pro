@@ -79,6 +79,25 @@ def format_countup(anchor, tz, now_utc):
     return ("%dd %02d:%02d:%02d" % (days, h, m, s)) if days else ("%02d:%02d:%02d" % (h, m, s))
 
 
+def format_value(raw, fmt):
+    """Presentation of a fetched value. Non-numeric input is returned unchanged."""
+    if fmt == "raw":
+        return raw
+    try:
+        num = float(str(raw).replace(",", ""))
+    except ValueError:
+        return raw
+    if fmt == "int":
+        return "%d" % round(num)
+    if fmt == "thousands":
+        return "{:,}".format(int(round(num)))
+    if fmt == "decimal1":
+        return "%.1f" % num
+    if fmt == "percent":
+        return "%.1f%%" % num
+    return raw
+
+
 def render_text(overlay, now_utc, now_playing="", data_value=""):
     """Current text for any text-backed overlay at `now_utc` (pure function)."""
     k = overlay.kind
@@ -95,7 +114,8 @@ def render_text(overlay, now_utc, now_playing="", data_value=""):
                                      overlay.work_min, overlay.break_min)
         return "%s %02d:%02d" % (label, left // 60, left % 60)
     if k == "data":
-        return (overlay.text or "{value}").replace("{value}", data_value or "--")
+        return (overlay.text or "{value}").replace(
+            "{value}", format_value(data_value, overlay.value_format) if data_value else "--")
     if k == "nowplaying":
         return (overlay.text + " " if overlay.text else "") + now_playing
     return ""

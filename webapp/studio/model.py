@@ -78,6 +78,15 @@ class Overlay:
     url: str = ""        # data overlay: public http(s) JSON endpoint (SSRF-guarded fetch)
     json_path: str = ""  # data overlay: dotted path to a scalar, e.g. "items.0.subscribers"
     refresh_s: int = 60
+    crop_x: float = 0.0  # image/video/browser overlays: visible part of the source (fractions)
+    crop_y: float = 0.0
+    crop_w: float = 1.0
+    crop_h: float = 1.0
+    value_format: str = "raw"  # data overlay: raw | int | thousands | decimal1 | percent
+
+    @property
+    def cropped(self):
+        return (self.crop_x, self.crop_y, self.crop_w, self.crop_h) != (0.0, 0.0, 1.0, 1.0)
 
     @property
     def dynamic(self):
@@ -107,6 +116,13 @@ class Overlay:
             raise ValidationError("%s needs a target/anchor time" % self.kind)
         if not (1 <= self.work_min <= 600 and 1 <= self.break_min <= 600):
             raise ValidationError("pomodoro minutes out of range")
+        for v in (self.crop_x, self.crop_y, self.crop_w, self.crop_h):
+            if not 0.0 <= v <= 1.0:
+                raise ValidationError("crop outside 0-1")
+        if self.crop_w < 0.05 or self.crop_h < 0.05 or self.crop_x + self.crop_w > 1.0001                 or self.crop_y + self.crop_h > 1.0001:
+            raise ValidationError("crop area is invalid")
+        if self.value_format not in ("raw", "int", "thousands", "decimal1", "percent"):
+            raise ValidationError("unknown value format")
         if self.kind == "data":
             if not (self.url.startswith(("http://", "https://")) and len(self.url) <= 500):
                 raise ValidationError("data overlay needs an http(s) URL")
