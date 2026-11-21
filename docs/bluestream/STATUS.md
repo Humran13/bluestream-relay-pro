@@ -22,7 +22,11 @@ sandbox/isolation on a real host.
 ## Docker validation (local, Windows 11 + Docker Desktop/WSL2)
 Done: full suite 838 passed, real nginx-rtmp/FFmpeg end-to-end, real-account permission tests, editor 27/27 in 3 browsers, 10-minute benchmark
 (CPU 0.79 median / 0.99 max cores, speed >=1.00x, 0 drops/restarts), container-restart recovery. Details and defects fixed: TESTS.md.
-**72-hour soak:** started in Docker only after all other Docker tests (see below for start time); it is NOT a pass until 72 real hours have elapsed.
+**72-hour Docker soak: RUNNING, NOT A PASS.** Started 2026-11-21T06:07:35Z at commit `d79098d` in container `bs-studio-soak72` (4 CPU / 8 GB cap,
+restart policy none, results on D:). It finishes about 2026-11-24T06:08Z if Docker Desktop and the PC stay awake and running; any interruption (sleep, Windows
+update, Docker restart) invalidates it and it must be restarted. Check progress read-only: `bash tools/docker/soak-status.sh`. The verdict is only valid when
+`D:luestream-studio-docker\soak72esulterdict.json` exists and says `72h-PASS-CANDIDATE` with restarts 0, stalls 0, speed_min >= 1.0.
+This is a Docker-on-workstation result; it does not replace the VPS soak (Gate C). On `proceed`: run soak-status.sh, record the numbers in TESTS.md honestly.
 Still VPS-only: systemd units, sandbox under the unit, IP deny/cgroups, reboot, real playlist, real destinations.
 
 ## Staging status: BLOCKED (no staging VPS accessible)
