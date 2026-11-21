@@ -457,6 +457,21 @@ wc_op_relay_set_continuous() {
     printf 'operation\0%s\0name\0%s\0continuous\0%s\0' "relay_set_continuous" "$name" "$continuous" | wc_json object
 }
 
+# Create a Studio-backed stream: a relay of TYPE=studio whose source field is
+# the (already published) Studio project name. Everything else (destinations,
+# Start/Stop, boot persistence, HLS) is the existing relay machinery.
+wc_op_relay_create_studio() {
+    local name="${1:-}" project="${2:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    bs_valid_name "$project" || wc_fail "invalid project name" "INVALID_PROJECT"
+    relay_exists "$name" && wc_fail "stream already exists: $name" "ALREADY_EXISTS"
+    [ -f "${BLUESTREAM_STUDIO_DIR:-/var/lib/bluestream/studio}/$project.json" ]         || wc_fail "publish the Studio project first" "PROJECT_NOT_PUBLISHED"
+    ( relay_create "$name" "studio" "$project" "no" ) >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || wc_fail "stream creation failed" "CREATION_FAILED"
+    printf 'operation\0%s\0name\0%s\0type\0studio\0' "relay_create_studio" "$name" | wc_json object
+}
+
 wc_op_media_import_staged() {
     local stagingfile="${1:-}" rc
     [ -n "$stagingfile" ] || wc_fail "missing upload id" "MISSING_STAGING"
@@ -752,6 +767,7 @@ wc_op_target_publisher_status() {
             printf 'restarts\0%s\0'         "$PUBLISHER_RESTARTS"
             printf 'uptime_seconds\0%s\0'   "$PUBLISHER_UPTIME"
             printf 'last_connected\0%s\0'   "$PUBLISHER_LAST_CONNECTED"
+            printf 'blocked_by\0%s\0'       "${PUBLISHER_BLOCKED_BY:-}"
         done < <(
             if [ "$kind" = "relay" ]; then
                 relay_get_destinations "$name" 2>/dev/null
@@ -760,6 +776,50 @@ wc_op_target_publisher_status() {
             fi
         )
     } | wc_json array
+}
+
+# Controlled, recoverable switch of ONE destination to ONE running stream. The
+# previous owner's publisher is stopped first; if the new one cannot start, the
+# previous owner is reinstated (see publisher_takeover in lib/publisher.sh).
+wc_op_relay_publisher_takeover() {
+    local name="${1:-}" destid="${2:-}" rc
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    bs_valid_name "$destid" || wc_fail "invalid destination id" "INVALID_DESTINATION"
+    relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    ( publisher_takeover relay "$name" "$destid" ) >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) ;;
+        2) wc_fail "the stream must be running with that destination attached" "NOT_ELIGIBLE" ;;
+        3) wc_fail "the current owner could not be stopped" "RELEASE_FAILED" ;;
+        4) wc_fail "takeover failed; the previous owner was reinstated" "TAKEOVER_FAILED" ;;
+        *) wc_fail "takeover could not be performed" "OPERATION_FAILED" ;;
+    esac
+    printf 'operation\0%s\0name\0%s\0destination\0%s\0' "relay_publisher_takeover" "$name" "$destid" | wc_json object
+}
+
+# Real Studio health (encoder speed, CPU/RAM, restarts, failure) for one Studio
+# stream, read from the sidecar's health file by the Studio CLI. Values are
+# bounded/stripped of control characters before they reach the console.
+wc_op_studio_health() {
+    local name="${1:-}"
+    bs_valid_name "$name" || wc_fail "invalid stream name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "stream not found: $name" "NOT_FOUND"
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         "$BS_PYTHON" -m studio.cli health "$name" 2>/dev/null | wc_json object
+}
+
+# Read-only preview images for the Studio editor. The console user cannot (and must not be
+# able to) read managed media or HLS output, so the bridge produces a small scaled image
+# instead; the Studio CLI drops root to the owning service account before touching any file.
+wc_op_studio_preview() {
+    local kind="$1" name="${2:-}"
+    case "$kind" in
+        frame) bs_valid_name "$name" || wc_fail "invalid project name" "INVALID_NAME" ;;
+        thumb) bs_valid_media_name "$name" || wc_fail "invalid media name" "INVALID_MEDIA" ;;
+    esac
+    # Streamed straight into the JSON helper (no temp files). When no preview exists the CLI emits
+    # empty mime/data values, which the console treats as "no preview" (HTTP 404, neutral background).
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         "$BS_PYTHON" -m studio.cli "$kind" "$name" 2>/dev/null | wc_json object
 }
 
 wc_op_destination_create() {
@@ -1099,6 +1159,16 @@ wc_dispatch() {
             [ "$argcount" -le 4 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
             wc_op_relay_create_media "$name" "$value2" "${4:-}"
             ;;
+        relay_publisher_takeover)
+            [ "$argcount" -ge 3 ] || wc_fail "missing argument" "MISSING_ARGUMENT"
+            [ "$argcount" -le 3 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            wc_op_relay_publisher_takeover "$name" "$value2"
+            ;;
+        relay_create_studio)
+            [ "$argcount" -ge 3 ] || wc_fail "missing argument" "MISSING_ARGUMENT"
+            [ "$argcount" -le 3 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            wc_op_relay_create_studio "$name" "$value2"
+            ;;
         relay_set_continuous)
             [ "$argcount" -ge 3 ] || wc_fail "missing argument" "MISSING_ARGUMENT"
             [ "$argcount" -le 3 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
@@ -1184,6 +1254,16 @@ wc_dispatch() {
             fi
             wc_op_playlist_schedule_set "$name" "$value2" "${4:-}"
             ;;
+        studio_frame|studio_thumb)
+            [ "$argcount" -ge 2 ] || wc_fail "missing target name" "MISSING_TARGET"
+            [ "$argcount" -le 2 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            wc_op_studio_preview "${operation#studio_}" "$name"
+            ;;
+        studio_health)
+            [ "$argcount" -ge 2 ] || wc_fail "missing target name" "MISSING_TARGET"
+            [ "$argcount" -le 2 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            wc_op_studio_health "$name"
+            ;;
         relay_publisher_status|playlist_publisher_status)
             # Phase 1C: EXACTLY operation + one validated target name (argv == 2).
             if [ "$argcount" -lt 2 ]; then
@@ -1198,7 +1278,7 @@ wc_dispatch() {
             esac
             ;;
         '')
-            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|relay_create_webpage|relay_set_continuous|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|relay_set_source_webpage|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear|relay_publisher_status|playlist_publisher_status)" "MISSING_OPERATION"
+            wc_fail "no operation specified (usage: web-ctl version|snapshot|relay_list|playlist_list|media_list|relay_start|relay_stop|relay_restart|playlist_start|playlist_stop|playlist_restart|relay_create_url|relay_create_media|relay_create_webpage|relay_create_studio|relay_set_continuous|media_import_staged|playlist_create|playlist_cache_status|playlist_cache_clear_unused|destination_list|destination_create|destination_enable|destination_disable|destination_delete|relay_destinations_get|relay_destinations_set|playlist_destinations_get|playlist_destinations_set|relay_delete|playlist_delete|media_delete|relay_set_source|relay_set_source_webpage|playlist_schedule_get|playlist_schedule_set|playlist_schedule_clear|relay_publisher_status|playlist_publisher_status|studio_health|studio_frame|studio_thumb|relay_publisher_takeover)" "MISSING_OPERATION"
             ;;
         *)
             wc_fail "unknown operation: $operation" "UNKNOWN_OPERATION"

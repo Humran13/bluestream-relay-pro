@@ -1,0 +1,68 @@
+# BlueStream Studio - isolated browser-capture worker, one instance per Studio stream.
+# Instantiated as bluestream-browser@<relay>.service ONLY when the operator enabled
+# the feature (BLUESTREAM_STUDIO_BROWSER=1) AND the published project has a browser
+# overlay. It is bound to its relay: it stops when the relay stops, and a crash here
+# can never affect the stream (the last good capture image simply stays on screen).
+#
+# Isolation layers (see webapp/studio/browsercap.py for the in-process ones):
+#   * cgroup caps: memory, CPU, task count - a runaway page cannot starve the VPS
+#   * KillMode=control-group: every renderer/zygote/GPU helper dies with the unit
+#   * IPAddressDeny: the kernel (cgroup eBPF) refuses sockets to loopback, RFC1918,
+#     link-local/cloud-metadata, CGNAT, ULA and multicast. This holds even if Chromium
+#     or our own checks were bypassed or DNS were rebound.
+#   * filesystem: read-only system, private /tmp, only the run dir writable
+# 127.0.0.53 (the local systemd-resolved stub) is the single allowed private address,
+# needed by the worker's own DNS lookups; Chromium is pinned to pre-resolved IPs.
+#
+# NOTE: Chromium's sandbox needs unprivileged user namespaces. On hosts where that is
+# disabled (Ubuntu 24.04 AppArmor policy), the worker REFUSES to start rather than run
+# without the sandbox. Verify on staging before enabling (docs/studio.md).
+
+[Unit]
+Description=BlueStream Studio browser capture worker %i
+BindsTo=bluestream-relay@%i.service
+After=bluestream-relay@%i.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The unprivileged service account the installer creates (BLUESTREAM_USER/GROUP in lib/common.sh,
+# useradd in install.sh). It owns /var/lib/bluestream/run (0750), where the capture PNGs are written
+# and where the relay's FFmpeg reads them. A unit test keeps this in sync with the installer.
+User=bluestream-relay
+Group=bluestream-relay
+Environment=PYTHONPATH=/usr/local/lib/bluestream
+Environment=BLUESTREAM_STUDIO_BROWSER=1
+Environment=HOME=/tmp
+ExecStart=/usr/bin/python3 -m studio.cli browser-unit %i
+Restart=on-failure
+RestartSec=15
+
+MemoryHigh=700M
+MemoryMax=900M
+CPUQuota=60%
+TasksMax=200
+LimitNOFILE=1024
+KillMode=control-group
+TimeoutStopSec=10
+
+IPAddressAllow=127.0.0.53
+IPAddressDeny=127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 0.0.0.0/8 224.0.0.0/4 ::1/128 fc00::/7 fe80::/10 ff00::/8
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/bluestream/run
+
+SyslogIdentifier=bluestream-browser-%i
+StandardOutput=journal
+StandardError=journal

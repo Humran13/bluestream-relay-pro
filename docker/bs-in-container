@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Helper that runs INSIDE the BlueStream container (via `bluestream.sh ...`): read-only status/diagnostics and the admin password.
+set -u
+STATE=/var/lib/bluestream/web
+case "${1:-}" in
+    admin-password)
+        if [ -r "$STATE/initial-admin-password" ]; then
+            cat "$STATE/initial-admin-password"
+        else
+            echo "No generated password is stored (it was provided through BS_ADMIN_PASSWORD_FILE, or the file was removed)." >&2
+            exit 1
+        fi ;;
+    status)
+        systemctl list-units --all --plain --no-legend 'nginx*' 'bluestream-*'
+        echo "--- enabled at container start:"; ls /var/lib/bluestream/units/enabled 2>/dev/null ;;
+    diag)
+        shift
+        exec bash /usr/local/lib/bluestream/docker/diag.sh "$@" ;;
+    *)
+        echo "usage: bs-in-container admin-password|status|diag [--since 24h]" >&2; exit 2 ;;
+esac

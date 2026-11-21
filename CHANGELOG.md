@@ -7,6 +7,31 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added - BlueStream Studio (beta candidate, opt-in, Premium)
+
+- New relay type `studio`: a Studio project publishes into the existing private
+  local RTMP bus, so destinations, HLS, Start/Stop, boot persistence and health are
+  unchanged and there is still exactly one publisher per stream.
+- Automatic pipeline planner: direct stream copy, pre-render-then-copy (static
+  overlays, slideshows, normalisation) or one live x264 composition (clock,
+  countdown/count-up, Pomodoro, ticker, Now Playing, API data). Admission control
+  refuses an extra live encode instead of degrading silently.
+- Studio console (behind `BLUESTREAM_STUDIO_ENABLED=1`): templates, overlay editor,
+  draft vs **Apply to Live** with confirmed single-stream restart, revision rollback.
+- Signed (Ed25519), expiring, revocable entitlements with offline verification and a
+  bounded grace period, enforced in every Studio endpoint **and** the runtime.
+  Payment-provider adapter + verified-webhook plumbing (NOT live).
+- SSRF-guarded data overlays (connect-time IP validation, redirect re-validation).
+- Help & Feedback: local, redacted, rate-limited report queue.
+- `tools/studio_soak.py` (benchmark / 72-hour soak harness) and `tools/studio_license.py` (vendor).
+- Studio projects are included in config backups.
+
+### Changed
+
+- The relay FFmpeg-argv verifier accepts `libx264`/`aac` only for Studio relays
+  (`BS_ALLOW_ENCODE=1`); every other relay type still requires stream copy.
+- The web console unit template gains `-/var/lib/bluestream/studio` in `ReadWritePaths`.
+
 ### Fixed
 
 - Added a backend-enforced **24/7 Continuous Streaming** mode for uploaded

@@ -49,6 +49,11 @@ ALLOWED_READ_OPERATIONS = frozenset(
         # URL - only destination id/display/platform and derived state).
         "relay_publisher_status",
         "playlist_publisher_status",
+        # BlueStream Studio: real encoder health for one Studio stream.
+        "studio_health",
+        # read-only preview images (JPEG frame of a project source / PNG thumbnail of a media image)
+        "studio_frame",
+        "studio_thumb",
     }
 )
 
@@ -77,6 +82,8 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "relay_create_url",
         "relay_create_media",
         "relay_set_continuous",
+        "relay_create_studio",
+        "relay_publisher_takeover",
         "media_import_staged",
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
@@ -468,11 +475,36 @@ class EngineClient:
             "playlist_schedule_get",
             "relay_publisher_status",
             "playlist_publisher_status",
+            "studio_health",
+            "studio_frame",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
             return list(values)
+        if operation == "studio_thumb":
+            if len(values) != 1 or not valid_media_name(values[0]):
+                raise EngineError("invalid media name", code="INVALID_MEDIA")
+            return list(values)
         raise EngineError("unsupported operation: %r" % operation)
+
+    def studio_frame(self, project: str):
+        """JPEG bytes of the project's source (None when unavailable)."""
+        return self._decode_image(self.read("studio_frame", project, timeout=25), "image/jpeg")
+
+    def studio_thumb(self, media: str):
+        """PNG bytes of a Media Library image (None when unavailable)."""
+        return self._decode_image(self.read("studio_thumb", media, timeout=25), "image/png")
+
+    @staticmethod
+    def _decode_image(doc, mime):
+        import base64
+        if not isinstance(doc, dict) or doc.get("mime") != mime:
+            return None
+        try:
+            data = base64.b64decode(doc.get("data", ""), validate=True)
+        except ValueError:
+            return None
+        return data if 0 < len(data) <= 4 * 1024 * 1024 else None
 
     def _mutation(
         self,
@@ -578,6 +610,24 @@ class EngineClient:
             if continuous not in ("yes", "no"):
                 raise EngineError("invalid 24/7 mode", code="INVALID_CONTINUOUS")
             return [name, media, continuous]
+        if operation == "relay_publisher_takeover":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, dest = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_target_name(dest):
+                raise EngineError("invalid destination id", code="INVALID_DESTINATION")
+            return [name, dest]
+        if operation == "relay_create_studio":
+            if len(values) != 2:
+                raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
+            name, project = values
+            if not valid_target_name(name):
+                raise EngineError("invalid stream name", code="INVALID_NAME")
+            if not valid_target_name(project):
+                raise EngineError("invalid project name", code="INVALID_PROJECT")
+            return [name, project]
         if operation == "relay_set_continuous":
             if len(values) != 2:
                 raise EngineError("invalid arguments", code="MISSING_ARGUMENT")
@@ -783,6 +833,14 @@ class EngineClient:
 
     def relay_create_media(self, name: str, media: str, continuous: str = "yes"):
         return self._mutation("relay_create_media", name, media, continuous)
+
+    def relay_publisher_takeover(self, name: str, destination: str):
+        """Switch ONE destination to this running stream (previous owner stopped, recoverable)."""
+        return self._mutation("relay_publisher_takeover", name, destination)
+
+    def relay_create_studio(self, name: str, project: str):
+        """Create a Studio-backed stream (relay TYPE=studio) from a published project."""
+        return self._mutation("relay_create_studio", name, project)
 
     def relay_set_continuous(self, name: str, continuous: str):
         """Set explicit 24/7 mode on a stopped local-video stream."""
