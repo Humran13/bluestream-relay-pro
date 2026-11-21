@@ -98,3 +98,19 @@ class SpeedParsingTests(unittest.TestCase):
         src = (REPO / "tools" / "studio_soak.py").read_text()
         self.assertIn("([0-9]+(?:\.[0-9]+)?)x?", src)
         self.assertIn("tempfile.mkdtemp(prefix=\"soak\", dir=a.workdir or None)", src)       # not under --out (bind mounts)
+
+
+class ProgressTailTests(unittest.TestCase):
+    def test_parse_progress_reads_only_the_tail_of_a_huge_file(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            for i in range(40000):                                  # ~1 MB of history
+                fh.write("frame=%d\nspeed=1.0x\nprogress=continue\n" % i)
+            fh.write("frame=99999\nfps=30\ndrop_frames=2\nspeed=   1x\nprogress=continue\n")
+            path = fh.name
+        try:
+            pr = soak.parse_progress(path)
+            self.assertEqual((pr["frame"], pr["drop_frames"], pr["speed"].strip()), ("99999", "2", "1x"))
+        finally:
+            os.unlink(path)
+        self.assertEqual(soak.parse_progress("/nonexistent/path"), {})

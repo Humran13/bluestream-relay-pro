@@ -50,8 +50,11 @@ def proc_rss_mb(pid):
 def parse_progress(path):
     last, cur = {}, {}
     try:
-        with open(path, errors="ignore") as fh:
-            data = fh.read()[-20000:]
+        # Only the tail: over 72 h the progress file reaches hundreds of MB; never read it all every sample.
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 20000))
+            data = fh.read().decode("utf-8", "ignore")
     except OSError:
         return {}
     for line in data.splitlines():
