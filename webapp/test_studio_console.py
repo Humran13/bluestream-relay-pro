@@ -28,6 +28,7 @@ class StudioEngine(FakeEngine):
 class Base(unittest.TestCase):
     enabled = True
     licensed = True
+    enforce = True        # existing enforcement tests opt in; the DEFAULT (deferred licensing) is covered by DeferredLicensingTests
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -37,6 +38,8 @@ class Base(unittest.TestCase):
         if self.enabled:
             env["BLUESTREAM_STUDIO_ENABLED"] = "1"
         env["BLUESTREAM_STUDIO_PUBKEY_HEX"] = PK.hex()
+        if self.enforce:
+            env["BLUESTREAM_STUDIO_ENFORCE_LICENCE"] = "1"
         p = mock.patch.dict(os.environ, env)
         p.start()
         self.addCleanup(p.stop)
@@ -153,6 +156,38 @@ class StudioRouteTests(Base):
         # consent required
         self.post("/console/help", {"kind": "bug", "message": "long enough message"}, "/console/help")
         self.assertEqual(raw.count("\n"), open(feedback.queue_path()).read().count("\n"))
+
+
+class DeferredLicensingTests(Base):
+    """Licensing/payment is deferred: by default Studio needs no key, token or payment and shows no licence UI."""
+    enforce = False
+    licensed = False
+    make = StudioRouteTests.make
+
+    def test_whole_flow_works_with_no_licence_key_or_token(self):
+        html = self.client.get("/console/studio").get_data(as_text=True)
+        self.assertNotIn("Paste licence key", html)
+        self.assertNotIn("NOT ACTIVE", html)
+        self.assertNotIn("Premium", html)
+        self.assertEqual(self.make("free1", "ticker").status_code, 302)
+        self.assertIn("ticker", [o.kind for o in store.load_draft("free1").overlays])
+        self.assertEqual(self.post("/console/studio/free1/publish", {}, "/console/studio/free1").status_code, 302)
+        self.assertEqual(store.load_published("free1").revision, 1)
+        self.post("/console/studio/free1/create-stream", {}, "/console/studio/free1")
+        self.assertIn(("relay_create_studio", "free1", "free1"), self.engine.mutation_calls)
+        edit = self.client.get("/console/studio/free1").get_data(as_text=True)
+        self.assertNotIn("Premium", edit)
+        self.assertIn("Save draft", edit)
+
+    def test_licence_endpoint_is_inert(self):
+        rv = self.post("/console/studio/license", {"token": "BS1.x.y"}, "/console/studio")
+        self.assertEqual(rv.status_code, 302)
+        self.assertFalse(os.path.exists(os.environ["BLUESTREAM_ETC_DIR"] + "/studio-license.token"))
+
+    def test_runtime_does_not_require_a_licence(self):
+        from studio import cli
+        with mock.patch.dict(os.environ, {"BLUESTREAM_STUDIO_PUBKEY_HEX": ""}):
+            self.assertTrue(entitlement.current().ok)
 
 
 class UnlicensedTests(Base):

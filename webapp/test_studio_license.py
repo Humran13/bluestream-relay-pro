@@ -90,11 +90,21 @@ class EntitlementTests(unittest.TestCase):
             self.assertTrue(entitlement.current().ok)
 
     def test_runtime_refuses_without_licence(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"BLUESTREAM_ETC_DIR": d}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"BLUESTREAM_ETC_DIR": d, "BLUESTREAM_STUDIO_ENFORCE_LICENCE": "1"}):
             os.environ.pop("BLUESTREAM_STUDIO_PUBKEY_HEX", None)
             with mock.patch("sys.stderr", io.StringIO()) as err:
                 self.assertEqual(cli.cmd_argv("demo", "demo"), 5)
             self.assertIn("licence", err.getvalue())
+
+    def test_deferred_by_default_runtime_is_not_gated(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"BLUESTREAM_ETC_DIR": d}):
+            os.environ.pop("BLUESTREAM_STUDIO_ENFORCE_LICENCE", None)
+            os.environ.pop("BLUESTREAM_STUDIO_PUBKEY_HEX", None)
+            self.assertFalse(entitlement.enforced())
+            self.assertTrue(entitlement.current().ok)
+            with mock.patch("sys.stderr", io.StringIO()) as err:
+                self.assertNotEqual(cli.cmd_argv("demo", "demo"), 5)   # fails later (no project), but never on licence
+            self.assertNotIn("licence", err.getvalue())
 
 
 class PaymentTests(unittest.TestCase):

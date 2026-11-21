@@ -121,7 +121,7 @@ def register(console, find_relay, engine_of):
                                  "unpublished": store.has_unpublished_changes(n)})
             except (ValueError, OSError):
                 projects.append({"name": n, "overlays": 0, "broken": True})
-        return render_template("studio_home.html", projects=projects, licence=v, licence_ok=ok,
+        return render_template("studio_home.html", projects=projects, licence=v, licence_ok=ok, licence_enforced=entitlement.enforced(),
                                templates=templates_lib.TEMPLATES, source_choices=_source_choices(),
                                browser_gate=BROWSER_SOURCE_GATE)
 
@@ -140,6 +140,9 @@ def register(console, find_relay, engine_of):
     def studio_license_post():
         if not auth():
             return need_login()
+        if not entitlement.enforced():
+            flash("No licence is needed: Studio is fully available.", "success")
+            return redirect(url_for("console.studio_home"))
         v = entitlement.install_token(request.form.get("token", ""))
         if v.ok:
             flash("Licence activated (%s)." % v.state, "success")

@@ -154,7 +154,15 @@ def load_pubkey():
         return b""
 
 
+def enforced():
+    """Licensing is DEFERRED: Studio is fully available unless an operator explicitly turns enforcement on later
+    (BLUESTREAM_STUDIO_ENFORCE_LICENCE=1). The verification code below is kept dormant for that future work."""
+    return os.environ.get("BLUESTREAM_STUDIO_ENFORCE_LICENCE", "") == "1"
+
+
 def current(now=None):
+    if not enforced():
+        return Verdict(True, "open", "no licence is required in this build")
     pk = load_pubkey()
     token = _read(os.path.join(etc_dir(), "studio-license.token"))
     rev = _read(os.path.join(etc_dir(), "studio-revocations.token"))

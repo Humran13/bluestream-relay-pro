@@ -110,7 +110,7 @@ EOF
   1. Admin password:   bash docker/bluestream.sh admin-password --project $PROJECT      (username: admin)
   2. From YOUR PC:     ssh -L 8765:127.0.0.1:$HTTP_PORT <your-ssh-user>@<this-server>
                        then open  http://localhost:8765/console   and log in. Studio is a tab in the same dashboard.
-  3. Studio -> Licence: paste your licence token (docs/bluestream/DOCKER.md).
+  3. Open the Studio tab: no licence or payment is needed.
 EOF
         ;;
 

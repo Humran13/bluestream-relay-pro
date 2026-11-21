@@ -389,14 +389,14 @@ class StudioE2E(unittest.TestCase):
         sk = bytes(range(32))
         store.save_draft(self.project("lic", "media", "loop.mp4").validate())
         store.publish("lic")
-        ok = subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=self.env, capture_output=True, timeout=60)
+        ok = subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=dict(self.env, BLUESTREAM_STUDIO_ENFORCE_LICENCE="1"), capture_output=True, timeout=60)
         self.assertEqual(ok.returncode, 0, ok.stderr.decode())
         rev = entitlement.make_token(sk, {"revoked": ["e2e"]}, prefix="BS1R")
         open(self.tmp + "/etc/studio-revocations.token", "w").write(rev)
-        blocked = subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=self.env, capture_output=True, timeout=60)
+        blocked = subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=dict(self.env, BLUESTREAM_STUDIO_ENFORCE_LICENCE="1"), capture_output=True, timeout=60)
         self.assertEqual(blocked.returncode, 5)
         os.unlink(self.tmp + "/etc/studio-revocations.token")
-        self.assertEqual(subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=self.env,
+        self.assertEqual(subprocess.run([sys.executable, "-m", "studio.cli", "argv", "lic", "lic"], env=dict(self.env, BLUESTREAM_STUDIO_ENFORCE_LICENCE="1"),
                                         capture_output=True, timeout=60).returncode, 0)
         del ed25519
 

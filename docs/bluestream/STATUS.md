@@ -39,13 +39,19 @@ update, Docker restart) invalidates it and it must be restarted. Check progress 
 This is a Docker-on-workstation result; it does not replace the VPS soak (Gate C). On `proceed`: run soak-status.sh, record the numbers in TESTS.md honestly.
 Still VPS-only: systemd units, sandbox under the unit, IP deny/cgroups, reboot, real playlist, real destinations.
 
+## SCOPE CORRECTION (round 9): licensing/payment is DEFERRED
+Licensing and payments were never requested for this phase. Studio no longer requires a licence, vendor key or token: `entitlement.current()` returns "open" unless an
+operator sets `BLUESTREAM_STUDIO_ENFORCE_LICENCE=1` in the future. The signature-verification code is kept dormant (not removed, no replacement mechanism); the
+licence panel is hidden. Payments/billing/commercial restrictions are a separate future task the owner will start. Enforcement tests opt in explicitly;
+`DeferredLicensingTests` pin the default. Studio is fully usable with no key.
+
 ## Native in-place Studio activation (owner-run, round 8) - TESTED IN A CONTAINER ONLY
 `tools/canary/studio_activate.sh` (+ `studio_activate_rollback.sh`, `studio_smoke.py`) activates Studio inside an EXISTING native dashboard (same URL/login/session).
 Dry-run by default; `--execute` stages+validates, backs up, replaces files atomically (running streams keep old inodes), adds a minimal web-unit drop-in
 (`BLUESTREAM_STUDIO_ENABLED=1`, `ReadWritePaths=/var/lib/bluestream/studio`), `daemon-reload`, restarts ONLY `bluestream-web.service`, smoke-tests (anonymous refusal,
 authenticated pages, Studio tab, assets, CSRF, sandbox write probe), compares stream units before/after, auto-rolls back on failure (never touching streams).
 Exercised in a Docker container with a systemd shim, including a forced failure -> automatic rollback and a manual rollback. NOT run on the real VPS: Claude has no
-access to it; the owner runs it. Without a vendor public key/licence token Studio is integrated but locked (licence state NO-VENDOR-KEY); nothing is bypassed.
+access to it; the owner runs it. No licence is involved (see the scope correction above).
 
 **72 h Docker soak: INVALIDATED.** The Docker daemon stopped (host sleep/restart) at about 12.3 h (last sample 2026-11-21 21:25 UTC; container exit 255, restart=none). It is NOT a pass
 and no 72 h result exists; a new run would have to start from zero.

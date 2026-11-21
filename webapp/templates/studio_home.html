@@ -3,7 +3,7 @@
 {% block content %}
 <div class="toolbar"><h1>Studio</h1><a class="btn btn-secondary" href="{{ url_for('console.studio_help') }}">Help &amp; Feedback</a></div>
 
-<section class="card">
+{% if licence_enforced %}<section class="card">
   <h2>Licence</h2>
   {% if licence_ok %}
   <p><span class="badge badge-healthy">{{ licence.state|upper }}</span> {{ licence.reason }}.</p>
@@ -17,7 +17,7 @@
     <button type="submit" class="btn btn-sm">Activate</button>
   </form>
   <p class="muted">Payments are not live yet: licence keys are issued by the vendor. See docs/bluestream/COMMERCIAL.md.</p>
-</section>
+</section>{% endif %}
 
 <section class="card">
   <h2>Projects</h2>

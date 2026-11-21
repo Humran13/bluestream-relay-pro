@@ -78,7 +78,7 @@ session cookie is only marked non-Secure for plain HTTP on localhost. A public H
 
 1. YouTube Studio -> Create -> Go live: create a **private or unlisted** broadcast with a stream key **different from any key already live**.
 2. Dashboard -> Media -> upload a video (or Studio -> project source = your media).
-3. Studio tab -> **Licence** (paste the token from the vendor, or the test token you issued; payments are not live) -> **New project** (pick a
+3. Studio tab (no licence or payment is involved) -> **New project** (pick a
    template, choose your media) -> add/edit overlays -> **Apply to Live** -> **Create stream**.
 4. Destinations -> add YouTube: server `rtmp://a.rtmp.youtube.com/live2`, paste the key (it is stored root-only in the volume and never logged).
    Attach it to the Studio stream; press **Start**.
