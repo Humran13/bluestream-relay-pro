@@ -139,11 +139,37 @@ def main(argv):
                 keys = props or ["ActiveState", "SubState", "Result", "NRestarts", "MainPID", "ExecMainStatus", "ActiveEnterTimestamp"]
                 for k in keys:
                     v = snap.get(k, "")
+                    if k == "InvocationID" and not v:
+                        v = "%s-%s" % (snap.get("ActiveEnterTimestamp", ""), snap.get("MainPID", ""))
+                    if k == "Environment" and not v:
+                        unit = B.load_unit(name) or {}
+                        v = " ".join(unit.get("env") or [])
                     print(str(v) if "--value" in opts else "%s=%s" % (k, v))
             else:
                 print("* %s\n     Active: %s (%s)" % (name, snap["ActiveState"], snap["SubState"]))
                 if snap["ActiveState"] != "active":
                     rc = 3
+        return rc
+
+    if verb == "cat":
+        rc = 0
+        for u in units:
+            try:
+                name = B.unit_name(u)
+            except ValueError:
+                rc = 1
+                continue
+            found = False
+            for d in B.UNIT_DIRS:
+                f = os.path.join(d, name)
+                if os.path.isfile(f):
+                    sys.stdout.write("# %s" % f + chr(10))
+                    sys.stdout.write(open(f, encoding="utf-8").read())
+                    found = True
+                    break
+            if not found:
+                sys.stderr.write("No files found for %s." % name + chr(10))
+                rc = 1
         return rc
 
     if verb == "list-units":
