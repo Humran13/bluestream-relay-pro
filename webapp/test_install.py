@@ -7,6 +7,7 @@ Gunicorn/service start, nginx -t/reload) is recorded as VPS-pending.
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -2047,6 +2048,23 @@ class ContinuousPublisherRecoveryTests(unittest.TestCase):
         between = publisher[condition:override]
         self.assertIn('RELAY_TYPE" = "local-file', between)
         self.assertIn('RELAY_LOOP" = "yes', between)
+
+    def test_dropin_write_does_not_fail_for_non_continuous_relays(self):
+        """Regression: the override group's LAST command was `[ cond ] && printf ...`, which returns 1 for every relay
+        that is not a looping local file (all Studio streams), so publisher_sync_dropin returned failure and the
+        destination never started. The group must end with a command that always succeeds."""
+        publisher = repo_text("lib/publisher.sh")
+        start = publisher.index("publisher_sync_dropin()")
+        end = publisher.index('} > "$tmp"; then', start)
+        last = [ln for ln in publisher[start:end].splitlines() if ln.strip()][-1]
+        self.assertNotIn("&&", last, last)
+
+    def test_every_ffprobe_helper_in_use_is_defined(self):
+        used = set()
+        for path in ("lib/media.sh", "lib/relay.sh", "lib/playlist.sh", "lib/probe.sh"):
+            used.update(re.findall(r"\bbs_have_ffprobe\b", repo_text(path)))
+        if used:
+            self.assertRegex(repo_text("lib/common.sh"), r"(?m)^bs_have_ffprobe\(\)")
 
 
 class Gui1dPlaylistEngineTests(unittest.TestCase):

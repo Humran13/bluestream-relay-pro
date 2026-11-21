@@ -39,6 +39,22 @@ update, Docker restart) invalidates it and it must be restarted. Check progress 
 This is a Docker-on-workstation result; it does not replace the VPS soak (Gate C). On `proceed`: run soak-status.sh, record the numbers in TESTS.md honestly.
 Still VPS-only: systemd units, sandbox under the unit, IP deny/cgroups, reboot, real playlist, real destinations.
 
+## Docker-first deployment (Compose) - BUILT AND TESTED LOCALLY ONLY
+`docker/` = one image + one Compose project containing the whole product (console, Studio tab, nginx-rtmp, FFmpeg, publisher). Host-side CLI:
+`docker/bluestream.sh` (`preflight`, `up`, `status`, `url`, `logs`, `diag`, `admin-password`, `down`), guide: `docs/bluestream/DOCKER.md`.
+Isolation: non-privileged, read-only rootfs, cap_drop ALL (+8), named volumes only, loopback-only dashboard port, no Docker socket, CPU/RAM/pids limits,
+all names/labels per project, rollback scoped to the project's own labelled resources. The real, unmodified `install.sh` runs at image build; `bsunitd`
+replaces systemd inside the container.
+**Verified in Docker Desktop (throwaway project, 2026-11-21):** preflight pass/block logic, dry-run-by-default `up`/`down`, image build, healthy start,
+login, Studio tab in the same console, licence activation with a TEST key, Studio project -> publish -> stream, live x264 composition 720p30 H.264/AAC,
+publisher to a local sink, FFmpeg kill recovery, `docker restart` auto-start, in-container `selftest` 21/21, no stream key in container logs/unit logs/diag,
+scoped teardown with `--purge-volumes`. 21 static/stub tests in `webapp/test_docker_deploy.py`, 15 in `test_docker_unitd.py`.
+**Real bugs found by this and fixed (they also affected native installs):** `bs_have_ffprobe` was never defined (CLI media import always refused);
+`publisher_sync_dropin` returned failure for every non-looping-local-file relay (all Studio streams), so a YouTube destination would never have started.
+**NOT done / NOT claimed:** no install on a real VPS, no real YouTube livestream, no preflight run on a real Linux VPS (Windows Git Bash has no `/proc`:
+RAM/CPU/disk checks only warn there), no 72 h or 4-vCPU result for the Docker deployment, no playlist schedule timers in the container, no
+native->Docker migration (design only). The 72 h soak in `bs-studio-soak72` was running concurrently on the same Docker VM during these tests.
+
 ## Staging status: BLOCKED (no staging VPS accessible)
 No staging host, SSH config or credentials exist in this environment. The only VPS ever mentioned (`vmi2980718`) is PRODUCTION and
 was deliberately not used. No staging test has run; every `U` item in TASKS.md and every `[ ]` in RELEASE_CHECKLIST.md Gates B/C/E stays open.

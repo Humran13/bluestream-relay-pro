@@ -85,6 +85,12 @@ Offline preparation only: `test_studio_preflight.py` (7 tests) proves the prefli
 - Real playlist -> Now Playing end to end; real health numbers under load.
 - Payment provider (not integrated).
 
+## Docker-first deployment (round 7, Docker Desktop only)
+See STATUS.md "Docker-first deployment". Evidence: in-container `bluestream-manager selftest` 21 passed / 0 failed (after fixing the missing
+`_units` volume for publisher drop-ins on a read-only rootfs); Studio stream via the console HTTP flow at 720p30 H.264/AAC; kill -9 FFmpeg -> recovered;
+`docker restart` -> enabled relay/console/nginx active; key-leak scan 0 hits (container logs, unit logs, `diag`). UNTESTED: real VPS, real YouTube, Linux
+preflight on a real host, schedule timers.
+
 ## Commands
 - Studio only: `cd webapp && python -m pytest test_studio*.py -q`
 - Editor E2E locally: `PYTHON="python studio_server.py" npx playwright test -c tests/browser/playwright.config.js --project=chromium studio-editor`

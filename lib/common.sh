@@ -538,6 +538,10 @@ bs_require_cmd() {
     command -v "$1" >/dev/null 2>&1 || bs_die "Required command not found: $1"
 }
 
+bs_have_ffprobe() {
+    command -v ffprobe >/dev/null 2>&1
+}
+
 bs_have_cmd() {
     command -v "$1" >/dev/null 2>&1
 }

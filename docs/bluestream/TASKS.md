@@ -24,4 +24,5 @@
 | Security | review round 2; fixes listed in TESTS.md | I,V; independent review - |
 | Ops | installer copies studio/ + browser unit, backup includes projects, soak + licence tools | I; U(staging install) |
 | Docker validation | real nginx-rtmp + FFmpeg e2e, real-account permissions, editor x3 engines, 10-min benchmark, container-restart recovery | I,V (Docker) |
+| Docker-first deployment | docker/ image + Compose + bluestream.sh preflight/up/down/diag, bsunitd, DOCKER.md | I,V (Docker Desktop); U (real VPS, real YouTube, Linux preflight) |
 | Release | staging, failure injection on systemd, 4-vCPU benchmark, 72 h soak | B/PENDING |

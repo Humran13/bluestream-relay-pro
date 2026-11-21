@@ -1,0 +1,9 @@
+[Unit]
+Description=nginx (BlueStream container: RTMP bus, HLS, player and console proxy)
+
+[Service]
+ExecStart=/usr/sbin/nginx -g "daemon off;"
+ExecReload=/usr/sbin/nginx -s reload
+Restart=always
+RestartSec=2
+TimeoutStopSec=15

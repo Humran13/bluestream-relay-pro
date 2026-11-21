@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""journalctl shim for the BlueStream container: reads the per-unit log files written by bsunitd."""
+import os
+import re
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import bsunitd as B  # noqa: E402
+
+
+def parse_since(v):
+    if v.startswith("@"):
+        try:
+            return float(v[1:])
+        except ValueError:
+            return 0.0
+    m = re.match(r"^-(\d+)([smhd])$", v)
+    if m:
+        return time.time() - int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return 0.0
+
+
+def main(argv):
+    units, n, since, fmt = [], 100, 0.0, "short"
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-u", "--unit") and i + 1 < len(argv):
+            units.append(argv[i + 1])
+            i += 2
+            continue
+        if a in ("-n", "--lines") and i + 1 < len(argv):
+            try:
+                n = int(argv[i + 1])
+            except ValueError:
+                n = 100
+            i += 2
+            continue
+        if a == "--since" and i + 1 < len(argv):
+            since = parse_since(argv[i + 1])
+            i += 2
+            continue
+        if a in ("-o", "--output") and i + 1 < len(argv):
+            fmt = argv[i + 1]
+            i += 2
+            continue
+        if a == "-k":
+            return 0          # no kernel ring buffer in a container
+        i += 1
+    host = os.uname().nodename
+    lines = []
+    for u in units:
+        try:
+            name = B.unit_name(u)
+        except ValueError:
+            continue
+        path = os.path.join(B.LOG_DIR, re.sub(r"[^A-Za-z0-9_.@:-]", "_", name) + ".log")
+        for p in (path + ".1", path):
+            try:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    for raw in fh:
+                        ts, _, rest = raw.rstrip("\n").partition(" ")
+                        try:
+                            t = float(ts)
+                        except ValueError:
+                            continue
+                        if t >= since:
+                            lines.append((t, rest))
+            except OSError:
+                continue
+    lines.sort(key=lambda x: x[0])
+    for t, rest in lines[-n:]:
+        if fmt == "short-unix":
+            print("%.6f %s %s" % (t, host, rest))
+        elif fmt == "cat":
+            print(rest.split(": ", 1)[-1])
+        else:
+            print("%s %s %s" % (time.strftime("%b %d %H:%M:%S", time.gmtime(t)), host, rest))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -248,7 +248,7 @@ publisher_sync_dropin() {
         [ "$continuous_source" = "yes" ] && printf 'StartLimitIntervalSec=0\n'
         printf '[Service]\n'
         printf 'RestartSec=%s\n' "$BLUESTREAM_PUBLISHER_RESTART_SEC"
-        [ "$continuous_source" = "yes" ] && printf 'Restart=always\n'
+        if [ "$continuous_source" = "yes" ]; then printf 'Restart=always\n'; fi
     } > "$tmp"; then
         rm -f "$tmp"
         return 1

@@ -1,0 +1,78 @@
+# BlueStream Relay Pro + Studio - Docker Compose deployment (one project, fully isolated).
+#
+# Use through docker/bluestream.sh (preflight -> up). Everything is named after ${BS_PROJECT} so it can never collide
+# with, or touch, your other containers, networks or volumes. Nothing here uses the host's nginx, apt, systemd, firewall,
+# SSL certificates or the Docker socket.
+#
+# Studio is a TAB inside the one console (same login). Only the dashboard port is published, on 127.0.0.1 only.
+name: ${BS_PROJECT:-bluestream}
+
+services:
+  app:
+    image: ${BS_IMAGE:-bluestream-relay-pro:local}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ${BS_PROJECT:-bluestream}-app
+    hostname: ${BS_PROJECT:-bluestream}
+    init: true
+    restart: unless-stopped
+    # ---- isolation -----------------------------------------------------------------------------------
+    privileged: false
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL, NET_BIND_SERVICE, AUDIT_WRITE]
+    pids_limit: ${BS_PIDS:-512}
+    cpus: ${BS_CPUS:-2.0}
+    mem_limit: ${BS_MEM:-2g}
+    memswap_limit: ${BS_MEM:-2g}
+    ulimits:
+      nofile: { soft: 8192, hard: 8192 }
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+      - /run:size=16m,mode=0755,nosuid
+      - /var/log/nginx:size=32m,mode=0755
+      - /var/lib/nginx:size=64m,mode=0755
+      - /var/cache/nginx:size=32m,mode=0755
+    # ---- network: private network, loopback-only publishing ---------------------------------------
+    networks: [bsnet]
+    ports:
+      - "127.0.0.1:${BS_HTTP_PORT:-18090}:80"          # dashboard + HLS + player; the RTMP bus is NOT published
+    # ---- data: only dedicated named volumes (no host paths, no Docker socket) --------------------------
+    volumes:
+      - bs_etc:/etc/bluestream
+      - bs_units:/etc/systemd/system                     # unit files + generated drop-ins (refreshed from the image at each start)
+      - bs_data:/var/lib/bluestream
+      - bs_www:/var/www/bluestream
+    environment:
+      BLUESTREAM_STUDIO_ENABLED: "1"
+      BLUESTREAM_STUDIO_PUBKEY_HEX: ${BS_VENDOR_PUBKEY:-}
+      BS_ADMIN_USER: ${BS_ADMIN_USER:-admin}
+      TZ: ${TZ:-UTC}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    labels:
+      com.bluestream.project: ${BS_PROJECT:-bluestream}
+      com.bluestream.role: app
+
+networks:
+  bsnet:
+    name: ${BS_PROJECT:-bluestream}_net
+    driver: bridge
+    labels:
+      com.bluestream.project: ${BS_PROJECT:-bluestream}
+
+volumes:
+  bs_etc:
+    name: ${BS_PROJECT:-bluestream}_etc
+    labels: { com.bluestream.project: "${BS_PROJECT:-bluestream}" }
+  bs_units:
+    name: ${BS_PROJECT:-bluestream}_units
+    labels: { com.bluestream.project: "${BS_PROJECT:-bluestream}" }
+  bs_data:
+    name: ${BS_PROJECT:-bluestream}_data
+    labels: { com.bluestream.project: "${BS_PROJECT:-bluestream}" }
+  bs_www:
+    name: ${BS_PROJECT:-bluestream}_www
+    labels: { com.bluestream.project: "${BS_PROJECT:-bluestream}" }
