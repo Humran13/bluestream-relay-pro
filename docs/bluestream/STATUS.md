@@ -19,6 +19,16 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
+## Production canary package (owner-run on the existing VPS)
+Prepared in `tools/canary/` + `docs/bluestream/CANARY.md`: read-only production-canary preflight (separate from the staging gate; the production
+hostname does not block it), guarded installer wrapper (dry run by default; needs a snapshot id, the vendor PUBLIC key and a phrase naming the host;
+never passes --with-ufw/--with-ssl, never enables browser capture, never starts a stream, restarts only bluestream-web), targeted rollback (dry run
+by default; only bluestream-* things; keeps data unless --purge-data; never reloads nginx), read-only diagnostics with redaction.
+Compatibility audit of the installer: CloudPanel -> isolated loopback nginx, no /etc/nginx writes, no firewall/SSH/SSL changes, Docker untouched.
+ONE real side effect found and disclosed: `libnginx-mod-rtmp` adds a `load_module` line under /etc/nginx/modules-enabled and queues a graceful
+system-nginx reload; the preflight blocks unless nginx is apt-managed, provides ABI nginx-abi-1.24.0-1, is not changed by apt, and `nginx -t` passes.
+NOTHING has been run on the VPS: no installation or livestream has succeeded yet. The owner performs it; results go in TESTS.md only when real.
+
 ## Docker validation (local, Windows 11 + Docker Desktop/WSL2)
 Done: full suite 838 passed, real nginx-rtmp/FFmpeg end-to-end, real-account permission tests, editor 27/27 in 3 browsers, 10-minute benchmark
 (CPU 0.79 median / 0.99 max cores, speed >=1.00x, 0 drops/restarts), container-restart recovery. Details and defects fixed: TESTS.md.

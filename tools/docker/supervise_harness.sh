@@ -19,7 +19,7 @@ build() {
     FFMPEG_ARGS=()
     mapfile -d '' FFMPEG_ARGS < "$tmp"
     rm -f "$tmp"
-    BS_ALLOW_ENCODE=1
+    export BS_ALLOW_ENCODE=1
     [ "${#FFMPEG_ARGS[@]}" -ge 12 ]
 }
 

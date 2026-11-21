@@ -13,6 +13,13 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [x] Browser unit account matches the installer's (`bluestream-relay`); soak harness initialisation proven by test
 - [x] Browser source refuses to run unless `BLUESTREAM_STUDIO_BROWSER=1` + Chromium + working sandbox (also enforced in the runtime against crafted project files)
 
+## Production canary (owner-run, NOT yet performed)
+- [x] Package prepared + tested offline (preflight/installer/rollback/diagnostics against stubs; redaction tests)
+- [ ] Owner: preflight clean on the VPS, provider snapshot taken, install executed
+- [ ] Owner: first private/unlisted YouTube stream at 720p30 observed on YouTube
+- [ ] Owner: continuous run measured and reported honestly (72 h only when 72 continuous hours have elapsed)
+- [ ] Rollback rehearsal on the real host (dry run at minimum)
+
 ## Docker (local) - done, NOT a substitute for the gates below
 - [x] Real FFmpeg + nginx-rtmp end to end (720p30, overlays, slideshow, audio, PiP, recovery, disconnect/return, fail-closed)
 - [x] Preview-bridge permissions with real accounts

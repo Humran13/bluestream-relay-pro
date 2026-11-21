@@ -5,7 +5,7 @@ set -u
 OUT=/out; mkdir -p "$OUT"
 rm -rf /work && mkdir -p /work
 ( cd /src && tar --exclude=.git --exclude=node_modules --exclude=test-results --exclude=__pycache__ -cf - . ) | tar -xf - -C /work
-cd /work
+cd /work || exit 1
 ln -sfn /opt/pwdeps/node_modules /work/node_modules
 FAILED=0
 phase() { # name, command...
