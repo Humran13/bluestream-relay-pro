@@ -16,7 +16,8 @@ async function login(page) {
 
 /** Create a blank project and add the given overlay kinds via the real UI. */
 async function project(page, kinds) {
-  const name = "e2e-" + Date.now().toString(36) + "-" + seq++;
+  // Unique across PARALLEL workers/engines (a per-process counter + timestamp collided and the server rightly refused the duplicate).
+  const name = "e2e-" + require("crypto").randomBytes(6).toString("hex") + "-" + seq++;
   await login(page);
   await page.goto(BASE + "/console/studio");
   await page.fill('input[name="name"]', name);

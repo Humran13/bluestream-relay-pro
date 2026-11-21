@@ -19,6 +19,12 @@ sandbox/isolation on a real host.
 | 9 | Tests | automated tests for every feature above; evidence in TESTS.md |
 | 10 | Docs | updated |
 
+## Docker validation (local, Windows 11 + Docker Desktop/WSL2)
+Done: full suite 838 passed, real nginx-rtmp/FFmpeg end-to-end, real-account permission tests, editor 27/27 in 3 browsers, 10-minute benchmark
+(CPU 0.79 median / 0.99 max cores, speed >=1.00x, 0 drops/restarts), container-restart recovery. Details and defects fixed: TESTS.md.
+**72-hour soak:** started in Docker only after all other Docker tests (see below for start time); it is NOT a pass until 72 real hours have elapsed.
+Still VPS-only: systemd units, sandbox under the unit, IP deny/cgroups, reboot, real playlist, real destinations.
+
 ## Staging status: BLOCKED (no staging VPS accessible)
 No staging host, SSH config or credentials exist in this environment. The only VPS ever mentioned (`vmi2980718`) is PRODUCTION and
 was deliberately not used. No staging test has run; every `U` item in TASKS.md and every `[ ]` in RELEASE_CHECKLIST.md Gates B/C/E stays open.

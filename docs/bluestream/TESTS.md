@@ -1,5 +1,44 @@
 # TESTS
 
+## Docker Desktop / WSL2 results (local container, NOT a VPS)
+Environment: Windows 11, Docker Desktop 29.7.2 + WSL2, image `bs-studio-test:local` (Ubuntu 24.04, FFmpeg 6.1.1, nginx 1.24 + rtmp,
+Python 3.12, Node 18, Playwright 1.56.1 browsers), container limited to `--cpus=4 --memory=8g`, no published ports, results on D:.
+Rebuild/run: `tools/docker/build.sh`, `tools/docker/run-tests.sh` (phases), `tools/docker/restart-test.sh`. Other Docker projects were not touched.
+Everything below is a CONTAINER result: it does not prove systemd units, reboot persistence, sandbox-under-systemd, or VPS performance.
+
+### Passed in Docker (final code)
+- Full suite as a non-root user: **838 passed, 15 skipped** (includes the real nginx-rtmp + FFmpeg end-to-end tests below).
+- End-to-end through real nginx-rtmp with the repo's rtmp.conf.template, invoked like production (`python3 -m studio.cli argv|widgets`, real
+  `lib/supervise.sh` loop): 720p30 H.264/AAC verified with ffprobe on the live RTMP stream; keyframe gaps <= 2.2 s on HLS segments; clock on the live
+  stream advances; encoder health HEALTHY with real CPU/RAM; countdown, ticker, image overlay, video picture-in-picture (frozen-frame check);
+  slideshow (pre-render then stream copy, slides advance); audio source + waveform; `kill -9 ffmpeg` auto-recovery; deliberate stop -> STOPPED,
+  no restart, no orphan; source disconnect and return; missing media fails closed; corrupt media never crashes the runtime; licence revocation blocks the
+  runtime and lifting it restores it; browser gate follows the real sandbox self-test.
+- Preview-bridge permissions with REAL accounts (`bluestream-relay`, `bluestream-web`, `www-data`): 9/9 - the console user cannot read media or HLS
+  (media root:bluestream-relay 0750/0640, HLS www-data 0750); the bridge as root produces JPEG/PNG previews for media, slideshow image, relay HLS and
+  thumbnails; the helper process runs as the owning account, never root; unmanaged paths and symlinks refused; console user running the CLI directly gets nothing.
+- Editor in real browsers: 27/27 Playwright tests (Chromium, Firefox, WebKit).
+- Real-Chromium browser capture: 21/21 (element/viewport sizes, egress policy blocks an internal address, caching, hang timeout, no orphans, validation; test-only `--no-sandbox`).
+- Shell: web-ctl self-test 27/27 (3 skipped need a VPS), `bash -n` + shellcheck (errors) over lib, runners, tools.
+- **10-minute benchmark** (4 CPU / 8 GB cap, 720p30, 4000k, veryfast, live composition with clock, ticker, countdown, bar and logo):
+  0 restarts, 0 stalls, 0 dropped frames, encoder speed min 1.00x, CPU 0.79 cores median / 0.92 p95 / 0.99 max, RAM max 328 MB,
+  17,979 frames = 599 s of video in 600 s. (Docker-on-a-workstation figures; the VPS result is still required.)
+- Container hard restart mid-stream (`docker restart`): published project revision 2 and history intact, stale lease/port files from the crash handled,
+  stream valid 720p30 again after start (nothing restarts by itself without systemd - that is Gate B).
+
+### Failed in Docker, fixed, regression-tested
+- CLI emitted `ffmpeg` as argv[0]; the supervisor already runs `ffmpeg "${FFMPEG_ARGS[@]}"` -> a real Studio relay would have exec'd `ffmpeg ffmpeg ...`.
+- Project store dropped an audio project's background + visualizer (published audio projects lost their waveform); store now persists every field automatically.
+- Soak harness: scratch dir on a bind mount broke drawtext's atomic reload; padded `speed=   1x` was read as 0.0; frames were not accumulated across restarts.
+- Test-suite races found (not product bugs): parallel Playwright workers generated colliding project names; stale nginx worker held the RTMP port; leftover sidecars legitimately tripped admission control.
+- Running tests as root hid real permission behaviour; the Docker runner now runs the suite as non-root and permissions as root with real accounts.
+
+### Docker security results vs VPS-only
+- Docker-verified: preview bridge permission model (above), path/symlink refusal, SSRF/egress policy in the browser, licence enforcement, ownership flock, auth/CSRF (suite).
+- Docker shows Chromium's sandbox CANNOT start under Docker's default seccomp ("No usable sandbox"); the browser source correctly REFUSES in that case (tested).
+  Whether it starts on the VPS under the systemd unit is **VPS-only**. Also VPS-only: `IPAddressDeny`/cgroup caps, unit start-up as `bluestream-relay`, AppArmor userns policy,
+  boot persistence, real playlist engine for Now Playing, nginx/CloudPanel coexistence, real destinations.
+
 ## Automated evidence
 Full local run on the (Windows) dev box, round 2: **747 passed, 35 skipped**. Skips are tests that need Linux-only pieces
 (FFmpeg, flock, tz database, real Chromium); they run in CI.

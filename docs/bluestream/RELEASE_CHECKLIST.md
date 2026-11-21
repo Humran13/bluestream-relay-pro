@@ -13,6 +13,13 @@ Nothing below is deployed anywhere. Production deploys are owner-approved only. 
 - [x] Browser unit account matches the installer's (`bluestream-relay`); soak harness initialisation proven by test
 - [x] Browser source refuses to run unless `BLUESTREAM_STUDIO_BROWSER=1` + Chromium + working sandbox (also enforced in the runtime against crafted project files)
 
+## Docker (local) - done, NOT a substitute for the gates below
+- [x] Real FFmpeg + nginx-rtmp end to end (720p30, overlays, slideshow, audio, PiP, recovery, disconnect/return, fail-closed)
+- [x] Preview-bridge permissions with real accounts
+- [x] 10-minute benchmark in a 4 CPU / 8 GB container (CPU 0.79 median, speed >= 1.00x, 0 drops/restarts)
+- [x] Container hard restart recovery
+- [ ] 72-hour Docker soak (started after the other Docker tests; pass only after 72 real hours)
+
 ## Gate B - staging VPS (NOT DONE: no staging machine/credentials available)
 - [x] Offline: preflight guard written and tested (`tools/staging_preflight.sh`)
 - [ ] Preflight passes on the real staging VPS (marker, non-production, Ubuntu 24.04, 4 CPU, 8 GB, 20 GB free, snapshot id)

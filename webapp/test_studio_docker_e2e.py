@@ -352,6 +352,38 @@ class StudioE2E(unittest.TestCase):
         self.assertIn(r.returncode, (0, 2, 4))                # produces argv (ffmpeg will then fail+retry) or refuses; never a traceback
         self.assertNotIn(b"Traceback", r.stderr)
 
+    def test_09_browser_gate_follows_whether_chromiums_sandbox_really_starts(self):
+        """With the flag on and Chromium installed, usable() must equal the REAL sandbox self-test result.
+        Under Docker's default seccomp the sandbox cannot start, so the feature must refuse (never fall back to --no-sandbox)."""
+        chrome = os.environ.get("BLUESTREAM_BROWSER_BIN", "")
+        if not chrome:
+            found = subprocess.run("find /opt/pw -type f -name chrome -path '*chromium-*' ! -path '*headless*' | head -1",
+                                   shell=True, capture_output=True, text=True).stdout.strip()
+            chrome = found
+        if not chrome:
+            self.skipTest("no Chromium binary available")
+        from webapp.studio import browsercap, store
+        from webapp.studio.model import Overlay
+        env = {"BLUESTREAM_STUDIO_BROWSER": "1", "BLUESTREAM_BROWSER_BIN": chrome}
+        from unittest import mock
+        with mock.patch.dict(os.environ, env):
+            browsercap._usable_cache.update(at=0.0, val=None)
+            works = browsercap.sandbox_works(chrome)
+            ok, why = browsercap.usable()
+            self.assertEqual(ok, works, why)
+            if not works:
+                self.assertIn("sandbox", why)
+            store.save_draft(self.project("brgate", "media", "loop.mp4", [Overlay("browser", url="https://example.com/", refresh_s=60)]).validate())
+            store.publish("brgate")
+            r = subprocess.run([sys.executable, "-m", "studio.cli", "argv", "brgate", "brgate"],
+                               env=dict(self.env, **env), capture_output=True, timeout=120)
+            if works:
+                self.assertIn(r.returncode, (0, 3))       # allowed (or refused only by admission control)
+            else:
+                self.assertEqual(r.returncode, 2, r.stderr.decode())            # refused: no sandbox, no browser source
+                self.assertIn(b"browser source unavailable", r.stderr)
+            browsercap._usable_cache.update(at=0.0, val=None)
+
     def test_08_licence_revocation_blocks_the_runtime(self):
         from webapp.studio import ed25519, entitlement, store
         sk = bytes(range(32))
