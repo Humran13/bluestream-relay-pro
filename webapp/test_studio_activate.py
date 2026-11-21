@@ -54,6 +54,16 @@ class SafetyTests(unittest.TestCase):
         self.assertRegex(DEPLOY, r'EXPECT="[0-9a-f]{40}"')
         self.assertIn("git -C \"$SRC\" diff --quiet \"$EXPECT\" -- lib config web-ctl webapp", DEPLOY)
 
+    def test_pinned_commit_matches_the_code_being_deployed(self):
+        """If the deployed paths change after the pinned commit, the script would refuse to run on the VPS: catch that here."""
+        pin = re.search(r'EXPECT="([0-9a-f]{40})"', DEPLOY).group(1)
+        git = shutil.which("git")
+        if not git or subprocess.run([git, "-C", str(ROOT), "cat-file", "-e", pin + "^{commit}"], capture_output=True).returncode != 0:
+            self.skipTest("pinned commit not available in this checkout (shallow clone)")
+        r = subprocess.run([git, "-C", str(ROOT), "diff", "--stat", pin, "--", "lib", "config", "web-ctl", "webapp", ":(exclude)webapp/test_*.py"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "", "deployed code changed after the pinned commit; update EXPECT in studio_activate.sh: " + r.stdout)
+
     def test_deploys_the_files_the_studio_backend_needs(self):
         for need in ("lib/*.sh", "run-relay.sh", "run-publisher.sh", "web-ctl", "bluestream-publisher@.service", "50-studio.conf",
                      "BLUESTREAM_STUDIO_ENABLED=1", "ReadWritePaths"):
