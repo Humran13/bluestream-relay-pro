@@ -48,7 +48,7 @@ Same commands. The preflight additionally:
 - lists running containers and refuses a name/network/volume clash (`--project other-name` picks different names);
 - picks the first free loopback port in 18090-18099 (an occupied or container-published port is never reused);
 - detects a **native BlueStream** install and its running units. It is reported as a warning: the Docker copy is *separate* - its own volumes,
-  config, admin login, licence, URL and ports. It **cannot see or change** `/etc/bluestream`, `/var/lib/bluestream`, `/var/www/bluestream`
+  config, admin login, URL and ports. It **cannot see or change** `/etc/bluestream`, `/var/lib/bluestream`, `/var/www/bluestream`
   or any `bluestream-*` unit, and it is **not an upgrade of the native dashboard**. Do not publish the same YouTube key from both.
 - checks 15-minute CPU load, RAM headroom and disk, and blocks if they cannot support a live 720p30 encode.
 
@@ -59,8 +59,7 @@ Native state is small and file-based: `/etc/bluestream` (relay/destination/playl
 `/var/lib/bluestream` (web state, Studio store, media), `/var/www/bluestream` (HLS, regenerated). A non-disruptive path would be:
 (1) install the Docker copy alongside (above) and verify it with a *new* test stream; (2) in a maintenance window, stop the native relays,
 copy the three trees into the Docker volumes while the container is stopped (`docker run --rm -v <volume>:/dst -v <backup>:/src:ro ... cp -a`),
-keeping ownership/permissions; (3) start the container and verify; (4) leave the native install stopped but intact for rollback. Licensing is
-Ed25519 token based and tied to a per-install id, so a migrated install needs a re-issued token. This procedure needs a rehearsal on a copy
+keeping ownership/permissions; (3) start the container and verify; (4) leave the native install stopped but intact for rollback. This procedure needs a rehearsal on a copy
 before anyone relies on it; it is documented only.
 
 ## Dashboard access
