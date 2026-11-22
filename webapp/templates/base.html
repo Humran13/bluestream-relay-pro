@@ -30,6 +30,7 @@
         <a href="{{ url_for('console.media') }}"{% if active_section == 'media' %} class="nav-active" aria-current="page"{% endif %}>Media Library</a>
         <a href="{{ url_for('console.playlists') }}"{% if active_section == 'playlists' %} class="nav-active" aria-current="page"{% endif %}>Playlists</a>
         <a href="{{ url_for('console.destinations') }}"{% if active_section == 'destinations' %} class="nav-active" aria-current="page"{% endif %}>Destinations</a>
+        {% if studio_enabled %}<a href="{{ url_for('console.studio_home') }}"{% if active_section == 'studio' %} class="nav-active" aria-current="page"{% endif %}>Studio</a>{% endif %}
       </nav>
       {% endif %}
     </div>

@@ -24,6 +24,10 @@ backup_configs() {
     if [ -f /usr/local/lib/bluestream/VERSION ]; then
         includes+=("usr/local/lib/bluestream/VERSION")
     fi
+    # Studio projects/revisions are small, non-secret layout files: always included.
+    if [ -d /var/lib/bluestream/studio ]; then
+        includes+=("var/lib/bluestream/studio")
+    fi
     if [ "$with_media" = "yes" ]; then
         bs_warn "Including managed media in the backup (this can be very large)."
         includes+=("var/lib/bluestream/media")
@@ -70,7 +74,7 @@ backup_restore() {
 
     # Safety: refuse archives containing paths outside the allowed set.
     local bad
-    bad="$(tar -tzf "$file" 2>/dev/null | grep -v -E '^(etc/bluestream/|usr/local/lib/bluestream/VERSION$|var/lib/bluestream/media/)' | head -n 10)" || true
+    bad="$(tar -tzf "$file" 2>/dev/null | grep -v -E '^(etc/bluestream/|usr/local/lib/bluestream/VERSION$|var/lib/bluestream/media/|var/lib/bluestream/studio/)' | head -n 10)" || true
     if [ -n "$bad" ]; then
         bs_error "Archive contains unexpected paths; refusing to restore:"
         printf '%s\n' "$bad"

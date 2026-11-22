@@ -248,7 +248,7 @@ publisher_sync_dropin() {
         [ "$continuous_source" = "yes" ] && printf 'StartLimitIntervalSec=0\n'
         printf '[Service]\n'
         printf 'RestartSec=%s\n' "$BLUESTREAM_PUBLISHER_RESTART_SEC"
-        [ "$continuous_source" = "yes" ] && printf 'Restart=always\n'
+        if [ "$continuous_source" = "yes" ]; then printf 'Restart=always\n'; fi
     } > "$tmp"; then
         rm -f "$tmp"
         return 1
@@ -440,7 +440,7 @@ publisher_last_failure_reason() {
 publisher_status() {
     local kind="$1" name="$2" destid="$3"
     PUBLISHER_STATE="UNKNOWN"; PUBLISHER_DETAIL=""; PUBLISHER_RESTARTS="0"
-    PUBLISHER_UPTIME="0"; PUBLISHER_LAST_CONNECTED=""
+    PUBLISHER_UPTIME="0"; PUBLISHER_LAST_CONNECTED=""; PUBLISHER_BLOCKED_BY=""
 
     dest_load_config "$destid" 2>/dev/null || { PUBLISHER_DETAIL="destination not found"; return 1; }
     if [ "$DEST_ENABLED" != "yes" ]; then
@@ -507,7 +507,13 @@ publisher_status() {
             PUBLISHER_DETAIL="$(publisher_last_failure_reason "$unit")"
             ;;
         *)
-            if journalctl -u "$unit" -n 10 --no-pager 2>/dev/null | grep -q 'start-limit-hit'; then
+            local _owner
+            _owner="$(publisher_dest_owner "$destid" 2>/dev/null || true)"
+            if [ -n "$_owner" ] && [ "$_owner" != "$(publisher_instance "$kind" "$name" "$destid")" ]; then
+                PUBLISHER_STATE="BLOCKED"
+                PUBLISHER_BLOCKED_BY="$_owner"
+                PUBLISHER_DETAIL="destination is in use by another stream; switch it explicitly to take over"
+            elif journalctl -u "$unit" -n 10 --no-pager 2>/dev/null | grep -q 'start-limit-hit'; then
                 PUBLISHER_STATE="FAILED"
                 PUBLISHER_DETAIL="restart limit reached; manual restart required (restart the stream/playlist)"
             else
@@ -517,6 +523,105 @@ publisher_status() {
             ;;
     esac
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# Destination ownership (one publisher per destination, ever).
+#
+# A destination (stream key) may be ATTACHED to several streams, but only one
+# publisher may actually push to it at a time: two simultaneous publishers to
+# one YouTube key fight each other and flap the broadcast. The guarantee is an
+# exclusive flock(2) on a per-destination lock file taken by run-publisher.sh
+# for the whole life of its FFmpeg process (the descriptor is inherited across
+# exec, so the kernel releases it on ANY exit, including kill -9 / power loss -
+# no stale locks). The owner file names the holder for diagnostics only; the
+# lock, not the file, is authoritative.
+# ---------------------------------------------------------------------------
+publisher_dest_lock_file()  { printf '%s/dest-%s.lock' "$BLUESTREAM_RUN_DIR" "$1"; }
+publisher_dest_owner_file() { printf '%s/dest-%s.owner' "$BLUESTREAM_RUN_DIR" "$1"; }
+publisher_dest_prev_file()  { printf '%s/dest-%s.previous' "$BLUESTREAM_RUN_DIR" "$1"; }
+
+# publisher_acquire_dest_lock <destid> <instance>
+#   0 acquired (fd 9 stays open in THIS shell) | 1 held by another publisher | 2 error
+publisher_acquire_dest_lock() {
+    local destid="$1" instance="$2" lock owner
+    bs_valid_name "$destid" || return 2
+    lock="$(publisher_dest_lock_file "$destid")"
+    owner="$(publisher_dest_owner_file "$destid")"
+    mkdir -p "$BLUESTREAM_RUN_DIR" 2>/dev/null || return 2
+    exec 9>"$lock" || return 2
+    flock -n 9 || return 1
+    printf '%s\n' "$instance" > "$owner" 2>/dev/null || true
+    chmod 0644 "$owner" 2>/dev/null || true
+    return 0
+}
+
+# publisher_dest_held <destid> - 0 when SOME publisher currently holds the lock.
+publisher_dest_held() {
+    local lock
+    lock="$(publisher_dest_lock_file "$1")"
+    [ -e "$lock" ] || return 1
+    ( flock -n 8 ) 8<"$lock" 2>/dev/null && return 1
+    return 0
+}
+
+# publisher_dest_owner <destid> - prints the owner instance ("kind:target:dest")
+# only while the lock is really held.
+publisher_dest_owner() {
+    local owner
+    publisher_dest_held "$1" || return 1
+    owner="$(publisher_dest_owner_file "$1")"
+    [ -r "$owner" ] || return 1
+    head -n 1 "$owner" 2>/dev/null
+}
+
+# publisher_takeover <kind> <name> <destid>
+# Controlled, recoverable switch of a destination to <kind>:<name>. The current
+# owner's publisher is stopped (recorded in dest-<id>.previous so the switch can
+# be reversed by calling takeover for that target), the lock is awaited, and our
+# publisher is started. If ours fails to take over, the previous owner is
+# restarted. Returns: 0 ok | 1 invalid | 2 target not running/attached |
+# 3 could not release | 4 start failed (previous restored)
+publisher_takeover() {
+    local kind="$1" name="$2" destid="$3" owner tries=0 attached="no" id
+    bs_valid_name "$name" && bs_valid_name "$destid" || return 1
+    case "$kind" in relay|playlist) ;; *) return 1 ;; esac
+    case "$kind" in
+        relay)    relay_load_config "$name" 2>/dev/null || return 2 ;;
+        playlist) playlist_load_config "$name" 2>/dev/null || return 2 ;;
+    esac
+    while IFS= read -r id; do
+        [ "$id" = "$destid" ] && attached="yes"
+    done < <(if [ "$kind" = relay ]; then relay_get_destinations "$name" 2>/dev/null; else playlist_get_destinations "$name" 2>/dev/null; fi)
+    [ "$attached" = "yes" ] || return 2
+    [ "$(systemctl is-active "$(bs_unit "$kind" "$name")" 2>/dev/null)" = "active" ] || return 2
+
+    owner="$(publisher_dest_owner "$destid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$(publisher_instance "$kind" "$name" "$destid")" ]; then
+        publisher_parse_instance "$owner" || return 3
+        printf '%s\n' "$owner" > "$(publisher_dest_prev_file "$destid")" 2>/dev/null || true
+        publisher_stop "$PUB_KIND" "$PUB_TARGET" "$PUB_DEST"
+        while publisher_dest_held "$destid" && [ "$tries" -lt 20 ]; do
+            sleep 0.5; tries=$((tries + 1))
+        done
+        publisher_dest_held "$destid" && return 3
+    fi
+    publisher_start "$kind" "$name" "$destid" || { _publisher_restore_prev "$destid"; return 4; }
+    tries=0
+    while [ "$tries" -lt 20 ]; do
+        [ "$(systemctl is-active "$(publisher_unit "$kind" "$name" "$destid")" 2>/dev/null)" = "active" ] && return 0
+        sleep 0.5; tries=$((tries + 1))
+    done
+    _publisher_restore_prev "$destid"
+    return 4
+}
+
+_publisher_restore_prev() {
+    local prev
+    prev="$(head -n 1 "$(publisher_dest_prev_file "$1")" 2>/dev/null || true)"
+    [ -n "$prev" ] || return 0
+    publisher_parse_instance "$prev" || return 0
+    publisher_start "$PUB_KIND" "$PUB_TARGET" "$PUB_DEST" 2>/dev/null || true
 }
 
 # end of publisher.sh

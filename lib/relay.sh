@@ -62,6 +62,12 @@ relay_config_validate() {
             bs_valid_url "$RELAY_URL" || return 1
             case "$RELAY_URL" in http://*|https://*) ;; *) return 1 ;; esac
             ;;
+        studio)
+            # RELAY_URL holds the Studio PROJECT name; the published project
+            # file must exist (see lib/studio.sh / webapp/studio/store.py).
+            bs_valid_name "$RELAY_URL" || return 1
+            [ -f "${BLUESTREAM_STUDIO_DIR:-/var/lib/bluestream/studio}/$RELAY_URL.json" ] || return 1
+            ;;
         youtube)
             # The configured value is the PUBLIC YouTube page URL; it is
             # resolved to a playable media URL at start time (never stored).
@@ -291,8 +297,26 @@ relay_build_ffmpeg_args() {
     local output=()
     local url="$RELAY_URL"
     FFMPEG_ARGS=()
+    BS_ALLOW_ENCODE=0
 
     case "$RELAY_TYPE" in
+        studio)
+            # Studio picks the cheapest valid pipeline (copy / pre-render cache /
+            # live composition) in Python and emits a NUL-separated argv. The
+            # argv builder only ever reads/writes the private local RTMP bus.
+            local _studio_tmp
+            _studio_tmp="$(mktemp)" || return 1
+            if ! PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"                     python3 -m studio.cli argv "$RELAY_NAME" "$RELAY_URL" > "$_studio_tmp"; then
+                rm -f "$_studio_tmp"
+                return 1
+            fi
+            FFMPEG_ARGS=()
+            mapfile -d '' FFMPEG_ARGS < "$_studio_tmp"
+            rm -f "$_studio_tmp"
+            [ "${#FFMPEG_ARGS[@]}" -ge 12 ] || return 1
+            BS_ALLOW_ENCODE=1
+            return 0
+            ;;
         local-file)
             if [ "$RELAY_LOOP" = "yes" ]; then
                 input+=( -re -stream_loop -1 )
@@ -370,6 +394,13 @@ relay_sync_dropin() {
 # ---------------------------------------------------------------------------
 # systemd lifecycle
 # ---------------------------------------------------------------------------
+# Unattended 24/7 modes: explicit Start/Restart enable boot persistence and an
+# explicit Stop withdraws it. 24/7 local video, and every Studio stream.
+relay_boot_persistent_mode() {
+    [ "$RELAY_TYPE" = "studio" ] && return 0
+    [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]
+}
+
 relay_start() {
     local name="$1" unit was_enabled
     bs_require_root
@@ -382,7 +413,7 @@ relay_start() {
     # systemctl stop remains respected: an enabled unit is not restarted merely
     # because an operator stopped it; it starts again only on a later Start or
     # on the next boot.
-    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
+    if relay_boot_persistent_mode; then
         was_enabled="$RELAY_ENABLED"
         systemctl enable "$unit" 2>/dev/null || bs_die "Failed to enable relay '$name' at boot"
         RELAY_ENABLED="yes"
@@ -416,7 +447,7 @@ relay_stop() {
     # persistence, so a deliberately stopped stream does not resume after a
     # VPS reboot. A later explicit Start/Restart re-enables it. Other source
     # types keep their existing Stop behavior unchanged.
-    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ] && [ "$RELAY_ENABLED" = "yes" ]; then
+    if relay_boot_persistent_mode && [ "$RELAY_ENABLED" = "yes" ]; then
         systemctl disable "$unit" 2>/dev/null || true
         RELAY_ENABLED="no"
         relay_save_config "$name" || true
@@ -444,7 +475,7 @@ relay_restart() {
     bs_ensure_hls_dir relay "$name" || bs_die "Could not prepare HLS output directory"
     relay_sync_dropin "$name"
     unit="$(bs_unit relay "$name")"
-    if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
+    if relay_boot_persistent_mode; then
         was_enabled="$RELAY_ENABLED"
         systemctl enable "$unit" 2>/dev/null || bs_die "Failed to enable relay '$name' at boot"
         RELAY_ENABLED="yes"

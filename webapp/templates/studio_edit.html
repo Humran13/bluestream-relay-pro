@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Studio: {{ project.name }} - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div id="ws" class="ws" data-csrf="{{ csrf_token() }}" data-project="{{ project.name }}">
+  <header class="ws-top" role="toolbar" aria-label="Studio toolbar">
+    <div class="ws-brand"><strong>BlueStream Studio</strong></div>
+    <div class="ws-proj"><a class="ws-back" href="{{ state.urls.projects }}" title="All Studio projects">&laquo; Projects</a>
+      <span class="ws-pname" title="Current project">{{ project.name }}</span>
+      <span id="ws-dirty" class="ws-dirty" hidden>Unsaved changes</span></div>
+    <div class="ws-view" role="group" aria-label="Preview or Program view">
+      <button type="button" class="seg" data-view="draft" aria-pressed="true" title="Edit the draft">Preview</button>
+      <button type="button" class="seg" data-view="program" aria-pressed="false" title="See what is applied to live (read-only)">Program</button>
+    </div>
+    <div class="ws-panels" role="group" aria-label="Show or hide panels">
+      <button type="button" class="seg" data-toggle="left" aria-expanded="true" title="Show or hide the Media panel">Media</button>
+      <button type="button" class="seg" data-toggle="right" aria-expanded="true" title="Show or hide the Properties panel">Properties</button>
+      <button type="button" class="seg" data-toggle="bottom" aria-expanded="true" title="Show or hide Layers and stream controls">Layers</button>
+    </div>
+    <div class="ws-actions">
+      <button type="button" id="ws-save" class="btn" disabled title="Save draft (Ctrl+S). The live stream is not changed.">Save Draft</button>
+      <button type="button" id="ws-apply" class="btn btn-apply" title="Apply the saved draft to the live stream">Apply to Live</button>
+      <button type="button" id="ws-settings" class="btn btn-secondary" title="Studio settings">Settings</button>
+    </div>
+  </header>
+
+  <aside class="ws-left" aria-label="Media Library">
+    <div class="pan-head"><h2>Media</h2>
+      <button type="button" class="ibtn" data-toggle="left" aria-expanded="true" aria-label="Collapse media panel" title="Collapse">&lsaquo;</button></div>
+    <div id="ws-media" class="ws-media"></div>
+    <div id="ws-mactions" class="ws-mactions" aria-live="polite"></div>
+  </aside>
+  <div class="split split-v split-l" data-split="wl" role="separator" aria-orientation="vertical" aria-label="Resize media panel"></div>
+
+  <section class="ws-center" aria-label="Preview canvas">
+    <div id="ws-programbar" class="ws-programbar" hidden><span class="live-dot"></span> PROGRAM (live, read-only) <span id="ws-programrev"></span></div>
+    <div class="ws-stage">
+      <div id="ws-canvas" class="ws-canvas" role="group" aria-label="16:9 output canvas. Layers can be moved with the arrow keys.">
+        <img id="ws-bg" class="ws-bg" alt="" hidden>
+        <div id="ws-bgnote" class="ws-bgnote" hidden></div>
+        <div class="safe-a"></div><div class="safe-t"></div><div class="grid3"></div>
+        <div id="ws-guides" class="ws-guides" aria-hidden="true"></div>
+      </div>
+    </div>
+    <div id="ws-live" class="visually-hidden" aria-live="polite"></div>
+    <p class="ws-hint">Drag to move, drag the handles to resize, arrow keys nudge (Shift = coarse, Alt = resize). The preview is a still of your source; it never encodes video.</p>
+  </section>
+
+  <div class="split split-v split-r" data-split="wr" role="separator" aria-orientation="vertical" aria-label="Resize properties panel"></div>
+  <aside class="ws-right" aria-label="Properties">
+    <div class="pan-head"><h2>Properties</h2>
+      <button type="button" class="ibtn" data-toggle="right" aria-expanded="true" aria-label="Collapse properties panel" title="Collapse">&rsaquo;</button></div>
+    <div id="ws-props" class="ws-props"></div>
+    <div class="ws-revs">
+      {% if state.revisions %}
+      <form id="ws-rollform" method="post" action="{{ state.urls.rollback }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="revision" value="">
+      </form>
+      <label for="ws-rev" class="fl">Earlier revision</label>
+      <div class="prow"><select id="ws-rev">{% for r in state.revisions|reverse %}<option value="{{ r }}">Revision {{ r }}</option>{% endfor %}</select>
+        <button type="button" id="ws-rollback" class="btn btn-sm btn-secondary">Load into draft</button></div>
+      {% endif %}
+      {% if not state.stream_exists %}
+      <form id="ws-delform" method="post" action="{{ state.urls.delete }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"></form>
+      <button type="button" id="ws-delete" class="btn btn-sm btn-danger">Delete project</button>
+      {% endif %}
+    </div>
+  </aside>
+
+  <div class="split split-h" data-split="hb" role="separator" aria-orientation="horizontal" aria-label="Resize bottom panel"></div>
+  <section class="ws-bottom" aria-label="Layers and stream">
+    <div class="bp bp-layers">
+      <div class="pan-head"><h2>Layers <span id="ws-layercount" class="muted"></span></h2>
+        <div class="menuwrap"><button type="button" id="ws-add" class="btn btn-sm" aria-haspopup="menu" aria-expanded="false">+ Add Source</button>
+          <div id="ws-menu" class="ws-menu" role="menu" hidden></div></div>
+        <button type="button" class="ibtn" data-toggle="bottom" aria-expanded="true" aria-label="Collapse bottom panel" title="Collapse">&#x2304;</button></div>
+      <ul id="ws-layers" class="ws-layers" aria-label="Layers, front to back"></ul>
+    </div>
+    <div class="bp bp-status"><div class="pan-head"><h2>Stream</h2></div><div id="ws-status" class="ws-status" aria-live="polite"></div></div>
+    <div class="bp bp-ctl"><div class="pan-head"><h2>Controls</h2></div><div id="ws-ctl" class="ws-ctl"></div></div>
+  </section>
+  <div id="ws-toasts" class="ws-toasts"></div>
+</div>
+<script type="application/json" id="studio-state">{{ state|tojson }}</script>
+<script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/studio_workspace.js') }}" defer></script>
+{% endblock %}

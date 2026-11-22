@@ -92,7 +92,7 @@ ProtectSystem=strict
 # Ownership/modes of these paths are unchanged; the web state dir below stays
 # READ-ONLY for bluestream-web (root:bluestream-web 0640/0750; the installer
 # pre-creates admin.json/secret_key/web.conf).
-ReadWritePaths=/run/sudo /etc/systemd/system /etc/bluestream/relays /etc/bluestream/playlists /etc/bluestream/destinations /var/www/bluestream/hls /var/lib/bluestream/run /var/lib/bluestream/web/upload /var/lib/bluestream/media
+ReadWritePaths=/run/sudo /etc/systemd/system /etc/bluestream/relays /etc/bluestream/playlists /etc/bluestream/destinations /var/www/bluestream/hls /var/lib/bluestream/run /var/lib/bluestream/web/upload /var/lib/bluestream/media -/var/lib/bluestream/studio
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

@@ -224,6 +224,7 @@ TYPE_LABELS = {
     # GUI-7B: any other public webpage supported by the installed resolver
     # (yt-dlp); the playable media URL is resolved fresh at Start time.
     "web-resolver": "Public Webpage",
+    "studio": "Studio",
 }
 
 # GUI-4 Phase 1A: display labels for the stable internal platform values.
@@ -865,7 +866,12 @@ _NAV_SECTIONS = {
 def _register_template_context(app: Flask) -> None:
     @app.context_processor
     def _inject_active_section():
-        return {"active_section": _NAV_SECTIONS.get(request.endpoint or "", "")}
+        ep = request.endpoint or ""
+        section = _NAV_SECTIONS.get(ep, "")
+        if ep.startswith("console.studio"):
+            section = "studio"
+        from .studio import views as studio_views
+        return {"active_section": section, "studio_enabled": studio_views.enabled(app)}
 
 
 # ---------------------------------------------------------------------------
@@ -2202,6 +2208,12 @@ def _register_console_routes(app: Flask) -> None:
         )
         return redirect(url_for("console.streams"))
 
+    # BlueStream Studio (opt-in): endpoints exist only when the feature flag is on.
+    from .studio import views as studio_views
+    if studio_views.enabled(app):
+        studio_views.register(
+            console, _find_relay,
+            lambda: current_app.extensions["bluestream_engine"])
     app.register_blueprint(console)
 
 

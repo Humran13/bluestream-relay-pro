@@ -182,6 +182,12 @@ web_configure_state() {
     # the unprivileged bluestream-web process may write to; the root web-ctl
     # bridge imports staged uploads from here into /var/lib/bluestream/media.
     # 0770 root:bluestream-web keeps it private to root and the web user.
+    # BlueStream Studio project store: the web console (unprivileged) writes
+    # validated project JSON here; the relay runtime user only READS it (o+rx).
+    # Files are non-secret (layout/text only) and re-validated on every load.
+    mkdir -p /var/lib/bluestream/studio 2>/dev/null
+    chown root:"$BLUESTREAM_WEB_GROUP" /var/lib/bluestream/studio
+    chmod 2775 /var/lib/bluestream/studio
     mkdir -p "$BLUESTREAM_WEB_STATE_DIR/upload" 2>/dev/null
     chown root:"$BLUESTREAM_WEB_GROUP" "$BLUESTREAM_WEB_STATE_DIR/upload"
     chmod 0770 "$BLUESTREAM_WEB_STATE_DIR/upload"

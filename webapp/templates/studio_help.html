@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Help &amp; Feedback - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="toolbar"><h1>Help &amp; Feedback</h1></div>
+<section class="card">
+  <h2>Send a bug report or suggestion</h2>
+  <form method="post" action="{{ url_for('console.studio_help_post') }}" class="studio-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="k">Type</label>
+    <select id="k" name="kind"><option value="bug">Bug report</option><option value="suggestion">Suggestion</option></select>
+    <label for="m">What happened / what would help? (10-4000 characters)</label>
+    <textarea id="m" name="message" rows="6" maxlength="4000" required style="width:100%"></textarea>
+    <label><input type="checkbox" name="diagnostics"> Attach basic server facts (version, CPU count, load). No keys, media or config are ever attached.</label>
+    <label><input type="checkbox" name="consent" required> I agree this report is saved on my server. Stream keys and tokens in the text are redacted automatically.</label>
+    <button class="btn" type="submit">Save report</button>
+  </form>
+  <p class="muted">Reports are stored in a local queue ({{ queue.total }} saved, {{ queue.pending }} not yet delivered). {% if endpoint %}A forwarder may deliver them to the configured support endpoint.{% else %}No support endpoint is configured, so nothing leaves this server; send the saved reports to support by hand.{% endif %}</p>
+</section>
+{% endblock %}

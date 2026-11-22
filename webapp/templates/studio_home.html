@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Studio - BlueStream Relay Pro{% endblock %}
+{% block content %}
+<div class="toolbar"><h1>Studio</h1><a class="btn btn-secondary" href="{{ url_for('console.studio_help') }}">Help &amp; Feedback</a></div>
+
+{% if licence_enforced %}<section class="card">
+  <h2>Licence</h2>
+  {% if licence_ok %}
+  <p><span class="badge badge-healthy">{{ licence.state|upper }}</span> {{ licence.reason }}.</p>
+  {% else %}
+  <p><span class="badge badge-stopped">NOT ACTIVE</span> {{ licence.reason }}. Studio is a Premium feature; Relay and Playlists stay free and unaffected.</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('console.studio_license_post') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="token">Paste licence key</label>
+    <input id="token" name="token" type="text" autocomplete="off" spellcheck="false" style="width:100%" placeholder="BS1....">
+    <button type="submit" class="btn btn-sm">Activate</button>
+  </form>
+  <p class="muted">Payments are not live yet: licence keys are issued by the vendor. See docs/bluestream/COMMERCIAL.md.</p>
+</section>{% endif %}
+
+<section class="card">
+  <h2>Projects</h2>
+  {% if projects %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>Overlays</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td>{{ p.name }}</td><td>{{ p.overlays }}</td>
+        <td>{% if p.broken %}<span class="badge badge-failed">DAMAGED</span>{% elif p.unpublished %}<span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span>{% else %}<span class="badge badge-healthy">PUBLISHED</span>{% endif %}</td>
+        <td><a class="btn btn-sm" href="{{ url_for('console.studio_edit', name=p.name) }}">Open</a></td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% else %}<p class="empty-state">No Studio projects yet.</p>{% endif %}
+</section>
+
+{% if licence_ok %}
+<section class="card">
+  <h2>New project</h2>
+  <form method="post" action="{{ url_for('console.studio_new_post') }}" class="studio-form" id="studio-new"
+        data-csrf="{{ csrf_token() }}" data-media-url="{{ url_for('console.studio_media_json') }}" data-upload-url="{{ url_for('console.studio_media_upload') }}"
+        data-thumb-url="{{ url_for('console.studio_media_thumb', asset='__A__') }}" data-asset-url="{{ url_for('console.studio_asset', asset='__A__') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="n">Project / stream name</label>
+    <input id="n" name="name" required pattern="[a-z0-9_\-]{1,48}" placeholder="countdown-channel">
+    <label for="sk">Source type</label>
+    <select id="sk" name="source_kind">
+      <option value="media">Media file (loops 24/7)</option>
+      <option value="relay">Existing Relay stream</option>
+      <option value="playlist">Existing Playlist</option>
+      <option value="slideshow">Image slideshow (Media Library images, comma separated)</option>
+      <option value="audio">Audio file (music/radio, with background and optional waveform)</option>
+    </select>
+    <label for="sr">Source name</label>
+    <div class="src-row"><input id="sr" name="source_ref" required list="sources" placeholder="choose from the Media Library, or a stream name" autocomplete="off">
+      <button type="button" class="btn btn-secondary" id="sr-browse">Browse Media Library</button></div>
+    <datalist id="sources">{% for s in source_choices %}<option value="{{ s }}">{% endfor %}</datalist>
+    <script type="application/json" id="source-lists">{{ source_lists|tojson }}</script>
+    <p class="muted" id="sr-help">Pick a file with Browse (you can upload from your computer there). Nothing has to be typed.</p>
+    <label for="ss">Slideshow: seconds per image</label>
+    <input id="ss" name="slide_seconds" type="number" min="2" max="3600" value="10">
+    <label><input type="checkbox" name="slide_shuffle"> Shuffle slideshow order</label>
+    <label><input type="checkbox" name="visualizer"> Audio: show a live waveform (uses a live encode)</label>
+    <label for="tp">Template</label>
+    <select id="tp" name="template">{% for k, v in templates.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    <button type="submit" class="btn">Create project</button>
+  </form>
+  <p class="muted">{{ browser_gate }}</p>
+</section>
+{% endif %}
+<script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/studio_home.js') }}" defer></script>
+{% endblock %}

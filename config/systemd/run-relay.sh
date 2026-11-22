@@ -73,6 +73,19 @@ if [ "${BLUESTREAM_PRIV_DROPPED:-0}" != "1" ]; then
     # block the relay itself from starting.
     publisher_sync_target relay "$NAME" 2>/dev/null || true
 
+    # BlueStream Studio: record which project this relay runs, and start the isolated
+    # browser-capture worker ONLY when the operator enabled it and the published project
+    # has a browser overlay. Best-effort: the worker (and its gates) can never block or
+    # fail the stream itself.
+    if [ "$RELAY_TYPE" = "studio" ]; then
+        printf '%s\n' "$RELAY_URL" > "$BLUESTREAM_RUN_DIR/studio-$NAME.project" 2>/dev/null || true
+        chmod 0644 "$BLUESTREAM_RUN_DIR/studio-$NAME.project" 2>/dev/null || true
+        if [ "${BLUESTREAM_STUDIO_BROWSER:-}" = "1" ] \
+            && grep -q '"kind": "browser"' "${BLUESTREAM_STUDIO_DIR:-/var/lib/bluestream/studio}/$RELAY_URL.json" 2>/dev/null; then
+            systemctl start --no-block "bluestream-browser@$NAME.service" 2>/dev/null || true
+        fi
+    fi
+
     # Hand the already-validated config to the unprivileged continuation via
     # the environment, instead of having it re-read the root-only (0600)
     # relay config file as a non-root user (which would simply fail). These
@@ -175,6 +188,17 @@ fi
 RELAY_RETRY_FOREVER=0
 if [ "$RELAY_TYPE" = "local-file" ] && [ "$RELAY_LOOP" = "yes" ]; then
     RELAY_RETRY_FOREVER=1
+fi
+
+# Studio relays: an unattended 24/7 output is retried forever (capped backoff),
+# and a sidecar refreshes live text widgets (clock/countdown/ticker/...) and holds
+# the live-encode lease. The sidecar is tied to this unit's lifetime (EXIT trap)
+# so it can never outlive a Stop. A Studio failure only ever affects this relay.
+if [ "$RELAY_TYPE" = "studio" ]; then
+    RELAY_RETRY_FOREVER=1
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         python3 -m studio.cli widgets "$RELAY_NAME" "$RELAY_URL" &
+    STUDIO_WIDGETS_PID=$!
+    trap 'kill "$STUDIO_WIDGETS_PID" 2>/dev/null; wait "$STUDIO_WIDGETS_PID" 2>/dev/null' EXIT
 fi
 
 bs_supervise_run relay "$RELAY_NAME" "$RELAY_FINITE_OK" "$RELAY_RESTART_SEC" _relay_build_for_supervisor "$RELAY_RETRY_FOREVER"
