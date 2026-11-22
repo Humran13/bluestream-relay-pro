@@ -109,3 +109,13 @@ Previous record: `a21f5e1`, run 44808318901, all four passed.
 (python includes the real-FFmpeg media tests, ownership flock tests and the PNG-reload variant test; browser includes the
 Studio editor spec in Chromium, Firefox and WebKit and the real-Chromium browser-source tests).
 This is automated CI evidence only. It is not a staging, benchmark, reboot or 72-hour result.
+
+## Studio workspace (round 10) - local results, NOT a VPS
+- `webapp/test_studio_workspace.py` (media model/routes/uploads, strict JSON save + apply, stream controls, destinations, settings, capacity, scaler,
+  real-FFmpeg thumbnails) and the updated `test_studio_console.py` / `test_studio_preview.py`: pass (the real-FFmpeg ones run in the Ubuntu container as a
+  non-root user; on the Windows dev box they are skipped = UNTESTED there, not passed).
+- `tests/browser/studio-editor.spec.js`: 18 real-browser scenarios x Chromium, Firefox, WebKit = 54 passed (media browsing/search/filter, image upload and
+  real picture on the canvas with the right aspect, rejected uploads, several image/video layers, picker replacement, layer list, Ctrl+S and server
+  rejection, settings persistence and validation, hotkey rebinding, create/start/stop with confirmation, Apply + Program view, mobile layout, auth).
+- `tools/canary/studio_smoke.py` (deployment self-test) against the e2e app: 32/32 checks, including the JSON API with CSRF header and the missing-media guard.
+- Not covered: a real VPS, real relay/YouTube publishing, performance under load.

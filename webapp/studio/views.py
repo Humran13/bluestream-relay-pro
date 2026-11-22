@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 from flask import Response, abort, current_app, flash, redirect, render_template, request, send_file, session, url_for
 
-from . import browsercap, entitlement, feedback, preview, store, templates_lib, widgets
+from . import api, browsercap, capabilities, entitlement, feedback, preview, store, templates_lib, widgets
+from . import settings as ui_settings
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
 
 SOURCE_KINDS = ("relay", "playlist", "media", "slideshow", "audio")
@@ -122,8 +123,20 @@ def register(console, find_relay, engine_of):
             except (ValueError, OSError):
                 projects.append({"name": n, "overlays": 0, "broken": True})
         return render_template("studio_home.html", projects=projects, licence=v, licence_ok=ok, licence_enforced=entitlement.enforced(),
-                               templates=templates_lib.TEMPLATES, source_choices=_source_choices(),
+                               templates=templates_lib.TEMPLATES, source_choices=_source_choices(), source_lists=_source_lists(),
                                browser_gate=BROWSER_SOURCE_GATE)
+
+    def _source_lists():
+        out = {"relay": [], "playlist": []}
+        try:
+            eng = engine_of()
+            out["relay"] = sorted(r.get("name") for r in (eng.call("relay_list") or [])
+                                  if r.get("type") != "studio" and isinstance(r.get("name"), str))
+            out["playlist"] = sorted(p.get("name") for p in (eng.call("playlist_list") or [])
+                                     if isinstance(p.get("name"), str))
+        except Exception:  # suggestions only
+            pass
+        return out
 
     def _source_choices():
         names = []
@@ -193,21 +206,44 @@ def register(console, find_relay, engine_of):
         browser_ok, browser_why = browsercap.usable()
         kinds = [k for k in KINDS if k != "browser" or browser_ok]
         ok, v = licence_ok()
-        title, why = plan_hint(project)
-        health_doc, publishers = None, []
-        if relay is not None:
-            try:
-                health_doc = engine_of().read("studio_health", name)
-                publishers = engine_of().read("relay_publisher_status", name) or []
-            except Exception as exc:  # panel is informational; never break the editor
-                current_app.logger.warning("studio health unavailable for '%s': %s", name, exc)
-        return render_template(
-            "studio_edit.html", project=project, items=preview_items(project), kinds=kinds,
-            browser_gate=None if browser_ok else browser_why,
-            unpublished=store.has_unpublished_changes(name), revisions=store.revisions(name),
-            relay=relay, licence=v, licence_ok=ok, plan_title=title, plan_why=why,
-            monthly_tb=project.profile.monthly_terabytes(), unavailable=unavailable,
-            health=health_doc, publishers=publishers)
+        try:
+            published = api.project_to_json(store.load_published(name))
+        except (ValueError, OSError):
+            published = None
+        lists = _source_lists()
+        state = {
+            "name": name, "project": api.project_to_json(project), "published": published,
+            "texts": api.render_texts(project.overlays), "kinds": kinds,
+            "defaults": {k: api.new_layer(k) for k in kinds}, "settings": ui_settings.load(),
+            "capabilities": capabilities.summary(project.profile), "sources": lists,
+            "stream_exists": relay is not None, "unavailable": bool(unavailable),
+            "unpublished": store.has_unpublished_changes(name), "revisions": store.revisions(name),
+            "browser_gate": None if browser_ok else browser_why, "can_edit": bool(ok),
+            "licence_reason": None if ok else v.reason,
+            "urls": {
+                "save": url_for("console.studio_save_json", name=name),
+                "publish": url_for("console.studio_publish_json", name=name),
+                "status": url_for("console.studio_status_json", name=name),
+                "takeover": url_for("console.studio_takeover_json", name=name),
+                "stream": url_for("console.studio_stream_json", name=name),
+                "destinations": url_for("console.studio_destinations_get", name=name),
+                "previewText": url_for("console.studio_preview_text", name=name),
+                "sourceFrame": url_for("console.studio_source_frame", name=name),
+                "assess": url_for("console.studio_assess_json"),
+                "settings": url_for("console.studio_settings_get"),
+                "media": url_for("console.studio_media_json"),
+                "upload": url_for("console.studio_media_upload"),
+                "thumb": url_for("console.studio_media_thumb", asset="__A__"),
+                "asset": url_for("console.studio_asset", asset="__A__"),
+                "rollback": url_for("console.studio_rollback_post", name=name),
+                "delete": url_for("console.studio_delete_post", name=name),
+                "projects": url_for("console.studio_home"),
+                "destinationsPage": url_for("console.relay_destinations", name=name),
+                "destinationsList": url_for("console.destinations"),
+                "streamsPage": url_for("console.streams"),
+            },
+        }
+        return render_template("studio_edit.html", project=project, state=state)
 
     @console.route("/studio/<name>/frame.jpg", methods=["GET"])
     def studio_frame(name):
@@ -377,6 +413,8 @@ def register(console, find_relay, engine_of):
         store.delete(name)
         flash("Project '%s' deleted." % name, "success")
         return redirect(url_for("console.studio_home"))
+
+    api.register_api(console, find_relay, engine_of)
 
     # ---- Help & Feedback (works on the free tier too) --------------------
     @console.route("/help", methods=["GET"])

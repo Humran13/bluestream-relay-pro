@@ -41,6 +41,11 @@ def _check_bus(url):
         raise ValidationError("Studio only reads/writes the private local bus")
 
 
+def _sf(p):
+    """Scaling-filter flags. The default (bicubic) adds nothing, so existing graphs stay byte-identical."""
+    return "" if p.scaler == "bicubic" else ":flags=%s" % p.scaler
+
+
 def _encode_opts(p):
     return ["-c:v", "libx264", "-preset", p.preset, "-profile:v", "high",
             "-b:v", "%dk" % p.video_kbps, "-maxrate", "%dk" % p.video_kbps,
@@ -66,9 +71,9 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
     p = project.profile
     extra_args = []
     extra = 0
-    chain = ["[0:v]scale=%d:%d:force_original_aspect_ratio=decrease,"
+    chain = ["[0:v]scale=%d:%d%s:force_original_aspect_ratio=decrease,"
              "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=%d,format=yuv420p[b0]"
-             % (p.width, p.height, p.width, p.height, p.fps)]
+             % (p.width, p.height, _sf(p), p.width, p.height, p.fps)]
     last = "b0"
     chain += pre_chain or []
     if pre_chain:
@@ -101,8 +106,8 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
             crop = ""
             if o.cropped:
                 crop = "crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f," % (o.crop_w, o.crop_h, o.crop_x, o.crop_y)
-            chain.append("[%d:v]%sscale=%d:-2,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
-                         % (idx, crop, _px(o.w, p.width), o.opacity, idx))
+            chain.append("[%d:v]%sscale=%d:-2%s,format=rgba,colorchannelmixer=aa=%.2f[im%d]"
+                         % (idx, crop, _px(o.w, p.width), _sf(p), o.opacity, idx))
             f = "[%s][im%d]overlay=%d:%d:shortest=1[%s]" % (last, idx, x, y, nxt)
         else:  # text, clock, countdown, ticker: all read an atomically replaced file
             tf = text_file_path(workdir, i)
@@ -199,9 +204,9 @@ def build_slideshow_args(image_paths, seconds, profile, output_file, ffmpeg="ffm
     for i, path in enumerate(image_paths):
         _check_path(path)
         args += ["-loop", "1", "-framerate", str(p.fps), "-t", str(int(seconds)), "-i", path]
-        chain.append("[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,"
+        chain.append("[%d:v]scale=%d:%d%s:force_original_aspect_ratio=decrease,"
                      "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=%d,format=yuv420p[s%d]"
-                     % (i, p.width, p.height, p.width, p.height, p.fps, i))
+                     % (i, p.width, p.height, _sf(p), p.width, p.height, p.fps, i))
     n = len(image_paths)
     chain.append("%sconcat=n=%d:v=1:a=0[v]" % ("".join("[s%d]" % i for i in range(n)), n))
     args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-filter_complex", ";".join(chain),

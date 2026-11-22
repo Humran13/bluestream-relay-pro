@@ -39,10 +39,12 @@
 {% if licence_ok %}
 <section class="card">
   <h2>New project</h2>
-  <form method="post" action="{{ url_for('console.studio_new_post') }}" class="studio-form">
+  <form method="post" action="{{ url_for('console.studio_new_post') }}" class="studio-form" id="studio-new"
+        data-csrf="{{ csrf_token() }}" data-media-url="{{ url_for('console.studio_media_json') }}" data-upload-url="{{ url_for('console.studio_media_upload') }}"
+        data-thumb-url="{{ url_for('console.studio_media_thumb', asset='__A__') }}" data-asset-url="{{ url_for('console.studio_asset', asset='__A__') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="n">Project / stream name</label>
-    <input id="n" name="name" required pattern="[a-z0-9_-]{1,48}" placeholder="countdown-channel">
+    <input id="n" name="name" required pattern="[a-z0-9_\-]{1,48}" placeholder="countdown-channel">
     <label for="sk">Source type</label>
     <select id="sk" name="source_kind">
       <option value="media">Media file (loops 24/7)</option>
@@ -52,8 +54,11 @@
       <option value="audio">Audio file (music/radio, with background and optional waveform)</option>
     </select>
     <label for="sr">Source name</label>
-    <input id="sr" name="source_ref" required list="sources" placeholder="file name or stream name">
+    <div class="src-row"><input id="sr" name="source_ref" required list="sources" placeholder="choose from the Media Library, or a stream name" autocomplete="off">
+      <button type="button" class="btn btn-secondary" id="sr-browse">Browse Media Library</button></div>
     <datalist id="sources">{% for s in source_choices %}<option value="{{ s }}">{% endfor %}</datalist>
+    <script type="application/json" id="source-lists">{{ source_lists|tojson }}</script>
+    <p class="muted" id="sr-help">Pick a file with Browse (you can upload from your computer there). Nothing has to be typed.</p>
     <label for="ss">Slideshow: seconds per image</label>
     <input id="ss" name="slide_seconds" type="number" min="2" max="3600" value="10">
     <label><input type="checkbox" name="slide_shuffle"> Shuffle slideshow order</label>
@@ -65,4 +70,6 @@
   <p class="muted">{{ browser_gate }}</p>
 </section>
 {% endif %}
+<script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/studio_home.js') }}" defer></script>
 {% endblock %}

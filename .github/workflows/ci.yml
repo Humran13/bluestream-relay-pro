@@ -70,6 +70,8 @@ jobs:
           node-version: "20"
       - name: Run player.js unit tests
         run: node --test web/*.test.js
+      - name: Syntax-check the Studio front-end scripts
+        run: for f in webapp/static/js/*.js; do node --check "$f"; done
 
   browser:
     runs-on: ubuntu-24.04

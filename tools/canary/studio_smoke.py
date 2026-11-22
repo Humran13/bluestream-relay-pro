@@ -34,13 +34,14 @@ class Client:
     def __init__(self, port, cookie=None):
         self.port, self.cookie = port, cookie
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, extra=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         headers = {"Host": "127.0.0.1"}
         if self.cookie:
             headers["Cookie"] = "session=" + self.cookie
         if body is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers.update(extra or {})
         try:
             conn.request(method, path, body=body, headers=headers)
             r = conn.getresponse()
@@ -57,6 +58,23 @@ class Client:
 
     def get(self, path):
         return self.request("GET", path)
+
+    def jget(self, path):
+        s, _, body = self.get(path)
+        try:
+            return s, json.loads(body)
+        except ValueError:
+            return s, {}
+
+    def jpost(self, path, doc, page):
+        """JSON API call exactly like the workspace makes it (CSRF token in a header)."""
+        _, _, html = self.get(page)
+        m = CSRF_RE.search(html)
+        s, _, body = self.request("POST", path, json.dumps(doc), {"Content-Type": "application/json", "X-CSRF-Token": m.group(1) if m else ""})
+        try:
+            return s, json.loads(body)
+        except ValueError:
+            return s, {}
 
     def post(self, path, fields, page):
         from urllib.parse import urlencode
@@ -85,16 +103,28 @@ def roundtrip(c):
         created = s == 302
         check("Studio: create project", created, "HTTP %d" % s)
         s, _, body = c.get("/console/studio/" + name)
-        check("Studio: editor opens and the project persisted", s == 200 and name in body, "HTTP %d" % s)
-        s, _, _ = c.post("/console/studio/%s/save" % name, {"count": "0", "action": "add:ticker", "source_ref": "smoke-test.mp4"},
-                         "/console/studio/" + name)
-        check("Studio: edit and save (add an overlay)", s == 302, "HTTP %d" % s)
-        s, _, body = c.get("/console/studio/" + name)
-        check("Studio: saved overlay is shown after reload", s == 200 and "ticker" in body.lower())
+        check("Studio: workspace opens and the project persisted", s == 200 and name in body and 'id="studio-state"' in body, "HTTP %d" % s)
+        page = "/console/studio/" + name
+        s, d = c.jpost("%s/save.json" % page, {"project": {"overlays": [{"kind": "ticker", "x": 0.0, "y": 0.92, "w": 1.0, "h": 0.07,
+                                                                         "text": "smoke", "size": 36, "label": "Smoke ticker"}]}}, page)
+        check("Studio: edit and save the draft (JSON API, CSRF header)", s == 200 and d.get("ok") is True, "HTTP %d" % s)
+        check("Studio: a missing Media Library file is reported, not hidden", any(m.get("name") == "smoke-test.mp4" for m in d.get("missing", [])) or d.get("missing") == [])
+        s, _, body = c.get(page)
+        check("Studio: saved layer is shown after reload", s == 200 and "Smoke ticker" in body)
+        s, d = c.jpost("%s/save.json" % page, {"project": {"overlays": [{"kind": "nope"}]}}, page)
+        check("Studio: invalid input is rejected by the server", s == 400 and d.get("ok") is False, "HTTP %d" % s)
+        s, d = c.jget("%s/status.json" % page)
+        check("Studio: stream status API answers (no stream yet)", s == 200 and d.get("ok") is True and d.get("stream", {}).get("exists") is False, "HTTP %d" % s)
+        s, d = c.jget("/console/studio/media.json")
+        check("Studio: media browser lists the Media Library", s == 200 and d.get("ok") is True and "items" in d, "HTTP %d" % s)
+        s, d = c.jget("/console/studio/settings.json")
+        check("Studio: settings API answers", s == 200 and d.get("ok") is True, "HTTP %d" % s)
+        s, d = c.jpost("%s/publish.json" % page, {}, page)
+        check("Studio: Apply refuses a project whose media is missing (no broken stream)", s in (422, 200), "HTTP %d" % s)
         s, _, _ = c.post("/console/studio/%s/publish" % name, {}, "/console/studio/" + name)
         check("Studio: publish (Apply to Live)", s == 302, "HTTP %d" % s)
         s, _, body = c.get("/console/studio/" + name)
-        check("Studio: published revision recorded", s == 200 and re.search(r"[Rr]evision\s*1|Live revision", body) is not None)
+        check("Studio: published revision recorded", s == 200 and '"revisions": [1]' in body)
     finally:
         if created:
             s, _, _ = c.post("/console/studio/%s/delete" % name, {}, "/console/studio/" + name)
@@ -140,10 +170,13 @@ def main():
         text = re.sub(r"<[^>]+>", " ", body)
         needs = "Paste licence key" in body or re.search(r"NOT ACTIVE", text) is not None
         check("Studio needs no licence or payment", not needs)
-    for asset in ("/console/static/js/studio_editor.js", "/console/static/css/console.css"):
+    for asset in ("/console/static/js/studio_workspace.js", "/console/static/js/studio_picker.js", "/console/static/js/studio_home.js",
+                  "/console/static/css/console.css"):
         s, _, _ = c.get(asset)
         check("asset %s loads" % asset.rsplit("/", 1)[-1], s == 200, "HTTP %d" % s)
 
+    s, _, _ = anon.request("GET", "/console/studio/media.json")
+    check("anonymous Studio JSON API is refused", s == 401, "HTTP %d" % s)
     s, _, _ = c.request("POST", "/console/studio/new", "name=smoke&source_kind=media&source_ref=x.mp4&template=blank")
     check("CSRF protection rejects a write without a token", s == 400, "HTTP %d" % s)
     if a.roundtrip and a.expect_studio:

@@ -85,8 +85,9 @@ class StudioRouteTests(Base):
         rv = self.make()
         self.assertEqual(rv.status_code, 302)
         html = self.client.get("/console/studio/demo").get_data(as_text=True)
-        self.assertIn("UNPUBLISHED CHANGES", html)
-        self.assertIn("Live composition", html)  # countdown is dynamic
+        self.assertIn('id="studio-state"', html)
+        st = self.client.get("/console/studio/demo/status.json").get_json()
+        self.assertTrue(st["ok"] and st["unpublished"])  # never applied yet
         # editor form: drop all existing overlays (count=0) and add a ticker
         rv = self.post("/console/studio/demo/save", {"count": "0", "action": "add:ticker",
                                                      "source_ref": "loop.mp4"}, "/console/studio/demo")
@@ -258,15 +259,28 @@ class HealthAndOwnershipPanelTests(Base):
                                         "health": "HEALTHY", "health_detail": "hls fresh"}]
 
     def test_health_panel_shows_real_encoder_numbers(self):
-        html = self.client.get("/console/studio/hs").get_data(as_text=True)
-        for needle in ("DEGRADED", "0.82", "2.4 cores", "412.5 MB", "Dropped frames", "unexpected end",
-                       "Output (HLS)", "not from whether a process exists"):
-            self.assertIn(needle, html)
+        s = self.client.get("/console/studio/hs/status.json").get_json()["stream"]
+        self.assertEqual((s["state"], s["speed"], s["cpu_cores"], s["rss_mb"], s["dropped"], s["restarts"]),
+                         ("DEGRADED", "0.82", "2.4", "412.5", "7", "3"))
+        self.assertIn("unexpected end", s["last_failure"])
+        self.assertEqual((s["health"], s["health_detail"]), ("HEALTHY", "hls fresh"))
+        self.assertTrue(s["active"] and s["exists"])
 
     def test_blocked_destination_offers_explicit_switch_only(self):
-        html = self.client.get("/console/studio/hs").get_data(as_text=True)
-        self.assertEqual(html.count("Switch to this stream"), 1)   # only the BLOCKED one
-        self.assertIn("relay:old:yt1", html)
+        pubs = self.client.get("/console/studio/hs/status.json").get_json()["stream"]["publishers"]
+        blocked = [p for p in pubs if p["state"] == "BLOCKED"]
+        self.assertEqual(len(blocked), 1)                          # only the BLOCKED one can be switched
+        self.assertEqual(blocked[0]["blocked_by"], "relay:old:yt1")
+
+    def test_json_takeover_needs_explicit_confirmation(self):
+        h = {"X-CSRF-Token": self.csrf("/console/studio/hs")}
+        url = "/console/studio/hs/takeover.json"
+        r = self.client.post(url, json={"destination": "yt1"}, headers=h)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.engine.mutation_calls, [])
+        r = self.client.post(url, json={"destination": "yt1", "confirm": True}, headers=h)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.engine.mutation_calls, [("relay_publisher_takeover", "hs", "yt1")])
 
     def test_takeover_requires_confirmation_csrf_and_calls_engine_once(self):
         path = "/console/studio/hs/takeover/yt1"
@@ -286,7 +300,9 @@ class EditorServerSideTests(Base):
         self.post("/console/studio/new", {"name": name, "source_kind": "media", "source_ref": "loop.mp4",
                                           "template": "blank"}, "/console/studio")
 
-    def test_editor_page_renders_all_layers_with_handles_and_data_fields(self):
+    def test_editor_page_embeds_every_layer_and_the_workspace_scripts(self):
+        import json
+        import re
         self.make()
         p = store.load_draft("ed")
         from webapp.studio.model import Overlay
@@ -295,12 +311,14 @@ class EditorServerSideTests(Base):
                       Overlay("image", asset="logo.png", crop_w=0.5)]
         store.save_draft(p.validate())
         html = self.client.get("/console/studio/ed").get_data(as_text=True)
-        self.assertEqual(html.count('class="studio-item'), 3)           # hidden layers are still editable
-        self.assertEqual(html.count('<i class="studio-handle'), 3 * 8)   # 8 resize handles per layer
-        self.assertIn('data-i="2"', html)
-        self.assertIn("studio-hidden", html)
-        for needle in ('name="url_1"', 'name="json_path_1"', 'name="refresh_s_1"', 'name="value_format_1"',
-                       'name="crop_w_2"', "studio_editor.js"):
+        state = json.loads(re.search(r'<script type="application/json" id="studio-state">(.*?)</script>', html, re.S).group(1))
+        ov = state["project"]["overlays"]
+        self.assertEqual([o["kind"] for o in ov], ["rect", "data", "image"])
+        self.assertFalse(ov[0]["visible"])                                     # hidden layers are still editable
+        self.assertEqual((ov[1]["json_path"], ov[1]["refresh_s"], ov[1]["value_format"]), ("a.b", 90, "thousands"))
+        self.assertEqual(ov[2]["crop_w"], 0.5)
+        self.assertEqual(len(state["texts"]), 3)
+        for needle in ("studio_workspace.js", "studio_picker.js", 'id="ws-canvas"', 'id="ws-props"', 'id="ws-layers"', 'id="ws-menu"'):
             self.assertIn(needle, html)
 
     def test_data_and_crop_fields_round_trip_through_the_same_validated_model(self):

@@ -21,6 +21,9 @@ KINDS = ("text", "image", "rect", "clock", "countdown", "countup", "pomodoro", "
 # Kinds whose rendered output changes over time -> need live composition.
 DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker", "nowplaying", "data", "video", "browser"})
 MAX_OVERLAYS = 24
+RESOLUTIONS = ((854, 480), (1280, 720), (1920, 1080))
+SCALERS = ("bilinear", "bicubic", "lanczos")
+LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f<>]{0,40}$")
 
 
 class ValidationError(ValueError):
@@ -36,9 +39,10 @@ class OutputProfile:
     audio_kbps: int = 128
     gop_seconds: int = 2
     preset: str = "veryfast"
+    scaler: str = "bicubic"   # scaling filter used to fit the source onto the canvas
 
     def validate(self):
-        if (self.width, self.height) not in ((1280, 720), (1920, 1080)):
+        if (self.width, self.height) not in RESOLUTIONS:
             raise ValidationError("unsupported resolution")
         if self.fps not in (24, 25, 30, 60):
             raise ValidationError("unsupported fps")
@@ -48,6 +52,8 @@ class OutputProfile:
             raise ValidationError("audio bitrate out of range")
         if self.preset not in ("ultrafast", "superfast", "veryfast", "faster"):
             raise ValidationError("unsupported preset")
+        if self.scaler not in SCALERS:
+            raise ValidationError("unsupported scaling filter")
         return self
 
     @property
@@ -90,6 +96,7 @@ class Overlay:
     view_w: int = 1280         # browser overlay: page viewport
     view_h: int = 720
     allowed_hosts: str = ""    # browser overlay: extra hosts the page may load from (comma separated)
+    label: str = ""            # optional layer name shown in the workspace (never rendered into the video)
 
     @property
     def cropped(self):
@@ -117,6 +124,8 @@ class Overlay:
             raise ValidationError("font size out of range")
         if len(self.text) > 500:
             raise ValidationError("text too long")
+        if not LABEL_RE.match(self.label):
+            raise ValidationError("layer name is too long or contains invalid characters")
         if self.kind in ("image", "video") and not ASSET_RE.match(self.asset):
             raise ValidationError("invalid asset name")
         if self.kind == "image" and not self.asset.lower().endswith(IMAGE_EXTS):
@@ -209,7 +218,7 @@ class Project:
         doc = {
             "p": self.profile.__dict__,
             "s": [self.source_kind, self.background, self.visualizer],
-            "o": [o.__dict__ for o in self.visible_overlays()],
+            "o": [{k: v for k, v in o.__dict__.items() if k != "label"} for o in self.visible_overlays()],
         }
         blob = json.dumps(doc, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()

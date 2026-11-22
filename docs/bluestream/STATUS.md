@@ -5,6 +5,29 @@ Label: **V1 feature set implemented; release gate PENDING. NOT beta-ready.**
 Open gates (see RELEASE_CHECKLIST.md): B staging VPS, C benchmark + 72 h soak, D payments provider, E sign-off of
 sandbox/isolation on a real host.
 
+## Studio workspace redesign (round 10, OBS-inspired) - TESTED LOCALLY, NOT ON THE VPS
+Replaced the stacked admin form with a broadcasting workspace inside the SAME dashboard (same URL, login and session; no second app):
+toolbar (project, unsaved-changes flag, Save Draft, Apply to Live, Preview/Program, Settings), left Media panel, centre 16:9 canvas, right
+Properties, bottom Layers / Stream status / Controls; collapsible and resizable panels; one column on phones.
+What is functional (each has automated tests, see TESTS.md):
+- Media browser over the EXISTING Media Library: thumbnails (images direct, videos via a still), name/size/format, search, kind filter, upload with
+  progress for video, PNG/JPG/JPEG/WebP/GIF and audio (existing quarantined ffprobe import; images capped at 10 MB), visual picker everywhere a file name
+  used to be typed (including New project). No filesystem path is ever accepted from the browser.
+- Add Source menu: Media (video overlay, image, background video, image slideshow), Graphics (text, colour, clock, countdown, countup, pomodoro, ticker,
+  now playing, live data), Streaming (existing stream, existing playlist, audio file). Browser source appears only when its gate is open.
+- Properties editor per source; drag, resize (aspect-locked for pictures: the box follows the FFmpeg scale-by-width rule), alignment guides, snapping
+  (edges / sources / centre, sensitivity), keyboard nudge and resize, layer order, visibility, duplicate, remove, crop.
+- Stream controls over the existing relay operations: Create Stream (applies the saved draft once if nothing was applied), Start, Stop (confirmation),
+  live status from FFmpeg progress, publisher states, explicit "Switch to this stream" for BLOCKED destinations. Draft saves never touch a live stream.
+- Settings: General (theme, confirmations, snapping, safe areas, grid), Stream (attach existing destinations; key presence only, never the key),
+  Output (preset, video bitrate, encoder), Audio (bitrate), Video (480p/720p/1080p, fps, scaling filter), Hotkeys (rebindable, duplicates refused),
+  Advanced (refresh intervals). Everything is validated on the server; output settings are checked against this server's CPU (an impossible output is refused,
+  existing projects are never locked).
+- Program view shows exactly the last applied revision, read-only (a real preview/program split on top of draft/published).
+NOT offered because it cannot work in a browser/VPS architecture: screen, window, game and camera capture, recording, virtual camera, NVENC (no GPU is
+detected on typical VPSs and the pipeline does not use one; the UI reports why), a mixer, font choice (only DejaVu Sans is installed for drawtext).
+Deployment: same one-command activation (dry run by default); new files ride the existing manifest. Production deployment: NOT performed.
+
 ## Round-2 owner review items
 | # | Item | State |
 |---|---|---|

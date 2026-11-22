@@ -10,6 +10,12 @@
 | Widgets | timers survive restarts (absolute anchors), DST, atomic text files, data overlay formatting | I,V |
 | Data | API overlay: URL, JSON path, refresh, format; SSRF-guarded; last good value | I,V |
 | Now Playing | real title from the Playlist engine, updates on advance/restart, empty when unknown | I,V (unit + shell) U(real playlist) |
+| Studio UI | OBS-inspired workspace: toolbar, media panel, canvas, properties, layers, stream status/controls, resizable panels, mobile | I,V (Playwright Chromium/Firefox/WebKit) U(real VPS) |
+| Studio UI | media browser: library thumbnails, search/filter, uploads (video/image/audio) with progress, visual picker everywhere | I,V U(real VPS upload of images through the root importer) |
+| Studio UI | Add Source menu (only working source types), per-source properties, snapping/guides, aspect-locked pictures, crop | I,V |
+| Studio UI | stream controls (create/start/stop/confirm), status, destinations attach, BLOCKED takeover, Program (live) view | I,V (fake engine) U(real relay + YouTube) |
+| Studio UI | Settings (General/Stream/Output/Audio/Video/Hotkeys/Advanced), server-side validated, capacity check, scaler option in FFmpeg | I,V (real FFmpeg in container) |
+| Studio UI | screen/window/game/camera capture, recording, virtual camera, NVENC, mixer | not offered (architecture) |
 | Previews | real source frame + overlay image thumbnails on a hardened host via read-only bridge ops (no permission widening) | I,V (unit + CI ffmpeg) U(real VPS) |
 | Editor | drag, resize, 8 handles, snap, keyboard, touch, crop, layer order, visibility, real source frame, mobile | I,V (Playwright x3 engines) |
 | Editor | Save draft, Apply to Live (confirmed single-stream restart), revision rollback (10) | I,V |

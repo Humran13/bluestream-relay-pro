@@ -302,8 +302,10 @@ class RealPreviewTests(unittest.TestCase):
                              input=data, capture_output=True).stdout
         self.assertLess(pix[3], 255)                                    # alpha channel survived
 
-    def test_non_images_and_missing_files_are_refused(self):
-        self.assertIsNone(preview.thumb_png("clip.mp4"))
+    def test_videos_get_a_small_still_for_the_media_browser_but_other_files_are_refused(self):
+        png = preview.thumb_png("clip.mp4")                              # media browser thumbnail (first second of the video)
+        self.assertTrue(png and png[:4] == b"\x89PNG")
+        self.assertIsNone(preview.thumb_png("notes.txt"))
         self.assertIsNone(preview.thumb_png("nope.png"))
         self.assertIsNone(preview.frame_jpeg(Project("p", "relay", "unknown")))
 

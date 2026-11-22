@@ -22,6 +22,7 @@ from .model import ASSET_RE
 
 IMAGE_EXT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
              ".gif": "image/gif", ".webp": "image/webp"}
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm", ".m4v", ".ts", ".avi")
 MAX_ASSET_BYTES = 10 * 1024 * 1024
 MAX_PREVIEW_BYTES = 4 * 1024 * 1024
 _cache = {}  # (path, mtime, size, kind) -> (expires, bytes)
@@ -167,13 +168,21 @@ def frame_jpeg(project, ffmpeg="ffmpeg", timeout=10, width=960, now=None):
 def thumb_png(name, ffmpeg="ffmpeg", timeout=10, max_width=960):
     """Scaled PNG (alpha preserved) of a Media Library image for overlay previews."""
     found = asset_image(name)
+    seeks = [[]]
     if not found:
-        return None
+        # A video from the Media Library: one small still for the media browser (first second, else frame 0).
+        path = safe_media_path(name)
+        if not path or os.path.splitext(name)[1].lower() not in VIDEO_EXT:
+            return None
+        found, seeks, max_width = (path, None), [["-ss", "1"], []], min(max_width, 480)
     path = found[0]
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-frames:v", "1",
-           "-vf", "scale='min(%d,iw)':-2" % max_width, "-c:v", "png", "-f", "image2pipe", "pipe:1"]
-    try:
-        out = _run(cmd, path, timeout)
-    except (OSError, subprocess.TimeoutExpired, PermissionError):
-        return None
-    return out if out[:8] == b"\x89PNG\r\n\x1a\n" and len(out) <= MAX_PREVIEW_BYTES else None
+    for seek in seeks:
+        cmd = [ffmpeg, "-v", "error", "-nostdin"] + seek + ["-i", path, "-frames:v", "1",
+               "-vf", "scale='min(%d,iw)':-2" % max_width, "-c:v", "png", "-f", "image2pipe", "pipe:1"]
+        try:
+            out = _run(cmd, path, timeout)
+        except (OSError, subprocess.TimeoutExpired, PermissionError):
+            return None
+        if out[:8] == b"\x89PNG\r\n\x1a\n" and len(out) <= MAX_PREVIEW_BYTES:
+            return out
+    return None
