@@ -19,23 +19,6 @@
   <p class="muted">Payments are not live yet: licence keys are issued by the vendor. See docs/bluestream/COMMERCIAL.md.</p>
 </section>{% endif %}
 
-<section class="card">
-  <h2>Projects</h2>
-  {% if projects %}
-  <div class="table-wrap"><table>
-    <thead><tr><th>Name</th><th>Overlays</th><th>State</th><th></th></tr></thead>
-    <tbody>
-    {% for p in projects %}
-      <tr>
-        <td>{{ p.name }}</td><td>{{ p.overlays }}</td>
-        <td>{% if p.broken %}<span class="badge badge-failed">DAMAGED</span>{% elif p.unpublished %}<span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span>{% else %}<span class="badge badge-healthy">PUBLISHED</span>{% endif %}</td>
-        <td><a class="btn btn-sm" href="{{ url_for('console.studio_edit', name=p.name) }}">Open</a></td>
-      </tr>
-    {% endfor %}
-    </tbody></table></div>
-  {% else %}<p class="empty-state">No Studio projects yet.</p>{% endif %}
-</section>
-
 {% if licence_ok %}
 <section class="card">
   <h2>New project</h2>
@@ -70,6 +53,23 @@
   <p class="muted">{{ browser_gate }}</p>
 </section>
 {% endif %}
+<section class="card">
+  <h2>Projects</h2>
+  {% if projects %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>Overlays</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td>{{ p.name }}</td><td>{{ p.overlays }}</td>
+        <td>{% if p.broken %}<span class="badge badge-failed">DAMAGED</span>{% elif p.unpublished %}<span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span>{% else %}<span class="badge badge-healthy">PUBLISHED</span>{% endif %}</td>
+        <td><a class="btn btn-sm" href="{{ url_for('console.studio_edit', name=p.name) }}">Open</a></td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% else %}<p class="empty-state">No Studio projects yet.</p>{% endif %}
+</section>
+
 <script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/studio_home.js') }}" defer></script>
 {% endblock %}

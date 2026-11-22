@@ -168,6 +168,29 @@ def _publish_locked(name):
     return draft.revision
 
 
+def republish(name, revision):
+    """Promote an EARLIER published snapshot to be the new published revision (the draft is left untouched)."""
+    _path(name, ".json")
+    with _locked(name):
+        if revision not in revisions(name):
+            raise ValidationError("unknown revision")
+        p = _read(os.path.join(_path(name, ".rev"), "%d.json" % revision))
+        try:
+            p.revision = load_published(name).revision + 1
+        except (OSError, ValueError):
+            p.revision = 1
+        doc = to_dict(p)
+        _atomic_json(_path(name, ".json"), doc)
+        revdir = _path(name, ".rev")
+        _atomic_json(os.path.join(revdir, "%d.json" % p.revision), doc)
+        for old in sorted((int(f[:-5]) for f in os.listdir(revdir) if f[:-5].isdigit()))[:-KEEP_REVISIONS]:
+            try:
+                os.unlink(os.path.join(revdir, "%d.json" % old))
+            except OSError:
+                pass
+        return p.revision
+
+
 def revisions(name):
     revdir = _path(name, ".rev")
     if not os.path.isdir(revdir):

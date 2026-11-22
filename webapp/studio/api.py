@@ -9,10 +9,12 @@ destination attachment operations. Stream keys are never read or returned.
 import dataclasses
 import math
 import os
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 
-from flask import Response, current_app, jsonify, request, session
+from flask import Response, current_app, jsonify, request, session, stream_with_context
 
 from . import browsercap, capabilities, entitlement, media, preview, settings, store, templates_lib, widgets
 from .model import KINDS, NAME_RE, OutputProfile, Overlay, Project, ValidationError
@@ -20,7 +22,7 @@ from .model import KINDS, NAME_RE, OutputProfile, Overlay, Project, ValidationEr
 SOURCE_KINDS = ("relay", "playlist", "media", "slideshow", "audio")
 MAX_JSON_BYTES = 512 * 1024
 _OVERLAY_TYPES = {f.name: type(f.default) for f in dataclasses.fields(Overlay) if f.name != "kind"}
-_PROFILE_FIELDS = ("width", "height", "fps", "video_kbps", "audio_kbps", "preset", "scaler")
+_PROFILE_FIELDS = ("width", "height", "fps", "video_kbps", "audio_kbps", "preset", "scaler", "encoder")
 _PROFILE_TYPES = {f.name: type(f.default) for f in dataclasses.fields(OutputProfile)}
 _PROJECT_KEYS = {"source_kind", "source_ref", "slide_seconds", "slide_shuffle", "background", "visualizer",
                  "profile", "overlays"}
@@ -150,6 +152,7 @@ def media_refs(project):
 
 
 def register_api(console, find_relay, engine_of):
+    _snap_cache = {}    # per app: the public-address snapshot, refreshed at most once a minute
     def jerr(message, code=400, **extra):
         return jsonify(ok=False, error=message, **extra), code
 
@@ -366,6 +369,10 @@ def register_api(console, find_relay, engine_of):
             cap = capabilities.assess(new.profile)
             if new.profile != old.profile and cap["level"] == "block":
                 raise ValidationError(cap["message"])
+            if new.profile.encoder != old.profile.encoder:
+                ok_e, why_e = capabilities.encoder_usable(new.profile.encoder)
+                if not ok_e:
+                    raise ValidationError("encoder %s cannot be used on this server: %s" % (new.profile.encoder, why_e))
             store.save_draft(new)
         except (ValidationError, ValueError, OSError) as exc:
             return jerr("Not saved: %s." % exc)
@@ -386,25 +393,65 @@ def register_api(console, find_relay, engine_of):
             return jerr(str(exc))
         relay, _ = find_relay(name)
         running = bool(relay and relay.get("type") == "studio" and relay.get("active") == "yes")
-        if running and not restart:
-            return jerr("Confirm the controlled restart to apply changes to a running stream.", 409)
         try:
-            gone = missing_media(store.load_draft(name))
+            draft = store.load_draft(name)
+            try:
+                prev = store.load_published(name)
+            except (ValidationError, OSError, ValueError):
+                prev = None
         except (ValidationError, OSError, ValueError):
             return jerr("That project file is damaged; roll back to an earlier revision.", 500)
+        # HOT apply: the running pipeline is a live composition and only file-backed text CONTENT changed, so the
+        # sidecar adopts the new values within a second and FFmpeg is never touched.
+        hot = bool(running and prev is not None and prev.runs_live_encode and draft.runs_live_encode
+                   and prev.structure_fingerprint() == draft.structure_fingerprint())
+        if running and not hot and not restart:
+            return jerr("These changes alter the video pipeline. Confirm the controlled restart of this Studio stream "
+                        "(other streams are not touched).", 409, needs_restart=True)
+        gone = missing_media(draft)
         if gone:
             return jerr("Cannot apply: %s." % "; ".join("%s uses '%s', which is not in the Media Library" % g
                                                         for g in gone[:4]), 422,
                         missing=[{"where": w, "name": n} for w, n in gone])
+        if running and not hot:
+            ok_e, why_e = capabilities.encoder_usable(draft.profile.encoder)
+            if not ok_e:
+                return jerr("Cannot apply: encoder %s is not usable: %s" % (draft.profile.encoder, why_e), 422)
         try:
             rev = store.publish(name)
-            if running:
+            if running and not hot:
                 engine_of().relay_restart(name)
         except Exception as exc:
             current_app.logger.warning("studio publish '%s' failed: %s", name, exc)
             return jerr("Publish failed; the previous live revision is still in use.", 500)
-        return jsonify(ok=True, revision=rev, restarted=running, unpublished=False,
-                       message="Revision %d applied%s." % (rev, "; stream restarted" if running else ""))
+        mode = "hot" if hot else ("restart" if running else "stored")
+        msg = {"hot": "Revision %d applied live with no interruption.",
+               "restart": "Revision %d applied; this Studio stream is restarting (verifying it comes back healthy).",
+               "stored": "Revision %d applied. It goes on air when the stream starts."}[mode] % rev
+        return jsonify(ok=True, revision=rev, previous=prev.revision if prev else 0, mode=mode, restarted=mode == "restart",
+                       unpublished=False, message=msg)
+
+    @console.route("/studio/<name>/revert-live.json", methods=["POST"])
+    def studio_revert_live(name):
+        """Staged-apply rollback: put an earlier published revision back on air (restarts only this Studio stream)."""
+        bad = guard(write=True, name=name, body=True)
+        if bad:
+            return bad
+        try:
+            rev = body_json().get("revision")
+            if not isinstance(rev, int) or isinstance(rev, bool):
+                raise ValidationError("choose a revision")
+            new_rev = store.republish(name, rev)
+        except ValidationError as exc:
+            return jerr(str(exc))
+        relay, _ = find_relay(name)
+        if relay is not None and relay.get("type") == "studio" and relay.get("active") == "yes":
+            try:
+                engine_of().relay_restart(name)
+            except Exception as exc:
+                current_app.logger.warning("studio revert '%s' restart failed: %s", name, exc)
+                return jerr("Reverted the stored revision but the restart failed; check the Streams page.", 500)
+        return jsonify(ok=True, revision=new_rev, message="Revision %d (the earlier layout) is back on air." % new_rev)
 
     @console.route("/studio/assess.json", methods=["POST"])
     def studio_assess_json():
@@ -424,9 +471,11 @@ def register_api(console, find_relay, engine_of):
             relay = None
         doc = {"exists": relay is not None, "unavailable": bool(unavailable), "active": False, "health": "",
                "health_detail": "", "state": "", "detail": "", "speed": "", "fps": "", "cpu_cores": "",
-               "restarts": "", "dropped": "", "rss_mb": "", "last_failure": "", "publishers": [], "destinations_attached": 0}
+               "restarts": "", "dropped": "", "rss_mb": "", "last_failure": "", "revision": "", "plan": "",
+               "pending_restart": False, "publishers": [], "destinations_attached": 0}
         if relay is None:
             return doc
+        doc["hls_url"] = _hls_urls("relay", name)
         doc.update(active=relay.get("active") == "yes", health=relay.get("health") or "",
                    health_detail=relay.get("health_detail") or "")
         eng = engine_of()
@@ -435,7 +484,8 @@ def register_api(console, find_relay, engine_of):
             doc.update(state=h.get("state") or "", detail=h.get("detail") or "", speed=h.get("speed") or "",
                        fps=h.get("fps") or "", cpu_cores=h.get("cpu_cores") or "", restarts=h.get("restarts") or "0",
                        dropped=h.get("dropped_frames") or "0", rss_mb=h.get("rss_mb") or "",
-                       last_failure=h.get("last_failure") or "")
+                       last_failure=h.get("last_failure") or "", revision=h.get("revision") or "", plan=h.get("plan") or "",
+                       pending_restart=h.get("pending_restart") == "yes")
         except Exception:
             pass
         try:
@@ -576,6 +626,165 @@ def register_api(console, find_relay, engine_of):
             return jerr("Destinations could not be saved.", 500)
         return jsonify(ok=True, attached=ids, message="Destinations saved.")
 
+    # ---- live preview: real playing video ---------------------------------
+    try:
+        n_slots = max(0, min(8, int(os.environ.get("BLUESTREAM_STUDIO_PREVIEW_SLOTS", "2"))))
+    except ValueError:
+        n_slots = 2
+    play_slots = threading.BoundedSemaphore(max(n_slots, 1)) if n_slots else threading.Semaphore(0)   # a preview must never starve a broadcast
+
+    @console.route("/studio/media/<asset>/play.mp4", methods=["GET"])
+    def studio_media_play(asset):
+        """Authenticated, on-demand playable video of one Media Library file for the editor canvas.
+        Stream copy when the browser can play the file as is, else ONE 540p ultrafast transcode while it is being watched.
+        Closing the tab kills the process. Never touches a broadcast or any other process."""
+        if not session.get("authenticated"):
+            return Response("sign in", status=401)
+        if not preview.ASSET_RE.match(asset or "") or media.classify(asset) != "video":
+            return Response("not found", status=404)
+        if not play_slots.acquire(blocking=False):
+            return Response("Too many previews are open. Close another Studio tab and retry.", status=429)
+        proc = None
+        try:
+            started = preview.open_proxy(asset)           # works where this user can read the file
+            if started:
+                proc = started[0]
+            else:
+                try:                                       # hardened VPS: read-only privileged bridge, raw stdout
+                    proc = subprocess.Popen(engine_of().proxy_argv(asset), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                except Exception as exc:                  # EngineError, AttributeError (no bridge), OSError
+                    current_app.logger.info("studio play unavailable for '%s': %s", asset, exc)
+                    proc = None
+            if proc is None:
+                play_slots.release()
+                return Response("This video cannot be previewed (missing or unreadable).", status=404)
+        except Exception:
+            play_slots.release()
+            raise
+
+        def gen():
+            deadline = time.monotonic() + 6 * 3600
+            try:
+                while time.monotonic() < deadline:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:                                        # also runs when the browser disconnects
+                try:
+                    proc.kill()
+                    proc.stdout.close()                    # closes the pipe: the privileged bridge's next write fails and it stops FFmpeg
+                    proc.wait(timeout=5)
+                except Exception:                           # noqa: BLE001
+                    pass
+                play_slots.release()
+        return Response(stream_with_context(gen()), mimetype="video/mp4",
+                        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    def _hls_urls(kind, name):
+        """Public HLS URL of a relay/playlist from the engine's trusted server config (never the Host header)."""
+        from .. import app as webapp
+        now = time.monotonic()
+        if _snap_cache.get("t", -1e9) + 60 < now:
+            try:
+                _snap_cache.update(t=now, snap=engine_of().call("snapshot"))
+            except Exception:
+                _snap_cache.update(t=now - 50, snap=None)      # retry soon, never hammer the bridge
+        snap = _snap_cache.get("snap")
+        if snap is None:
+            return None
+        return (webapp.relay_hls_url if kind == "relay" else webapp.playlist_hls_url)(snap, name)
+
+    @console.route("/studio/sources.json", methods=["GET"])
+    def studio_sources_json():
+        """Existing relays and playlists a project can monitor / read from (read-only listing)."""
+        bad = guard()
+        if bad:
+            return bad
+        out = {"relays": [], "playlists": []}
+        try:
+            for r in engine_of().call("relay_list") or []:
+                if isinstance(r, dict) and r.get("type") != "studio" and isinstance(r.get("name"), str):
+                    out["relays"].append({"name": r["name"], "type": r.get("type") or "", "active": r.get("active") == "yes",
+                                          "health": r.get("health") or "", "hls_url": _hls_urls("relay", r["name"])})
+            for p in engine_of().call("playlist_list") or []:
+                if isinstance(p, dict) and isinstance(p.get("name"), str):
+                    out["playlists"].append({"name": p["name"], "active": p.get("active") == "yes", "health": p.get("health") or "",
+                                             "count": p.get("item_count") or p.get("items") or "", "hls_url": _hls_urls("playlist", p["name"])})
+        except Exception as exc:
+            current_app.logger.info("studio sources unavailable: %s", exc)
+            return jerr("Streams could not be listed right now.", 503)
+        out["relays"].sort(key=lambda r: r["name"])
+        out["playlists"].sort(key=lambda r: r["name"])
+        return jsonify(ok=True, **out)
+
+    @console.route("/studio/<name>/monitor.json", methods=["GET"])
+    def studio_monitor_json(name):
+        """What the canvas can PLAY for this project: the source's live HLS (read-only monitoring) and, when the
+        Studio stream exists, its own composited output HLS."""
+        bad = guard(name=name)
+        if bad:
+            return bad
+        try:
+            proj = store.load_draft(name)
+        except (ValidationError, OSError, ValueError):
+            return jerr("That project file is damaged.", 500)
+        src = {"kind": proj.source_kind, "ref": proj.source_ref, "mode": "still", "url": None, "running": None, "message": ""}
+        if proj.source_kind == "media":
+            src.update(mode="file", url=url_for_play(proj.source_ref))
+        elif proj.source_kind in ("relay", "playlist"):
+            k = proj.source_kind
+            rows = []
+            try:
+                rows = engine_of().call("relay_list" if k == "relay" else "playlist_list") or []
+            except Exception:
+                rows = []
+            row = next((r for r in rows if isinstance(r, dict) and r.get("name") == proj.source_ref), None)
+            src.update(mode="hls", url=_hls_urls(k, proj.source_ref), running=None if row is None else row.get("active") == "yes")
+            if row is None:
+                src["message"] = "That %s no longer exists." % k
+            elif not src["running"]:
+                src["message"] = "That %s is stopped, so there is no live picture to show." % k
+        relay, _ = find_relay(name)
+        out = {"exists": False, "running": False, "url": None}
+        if relay is not None and relay.get("type") == "studio":
+            out = {"exists": True, "running": relay.get("active") == "yes", "url": _hls_urls("relay", name)}
+        return jsonify(ok=True, source=src, output=out)
+
+    def url_for_play(asset):
+        from flask import url_for
+        return url_for("console.studio_media_play", asset=asset)
+
+    @console.route("/studio/playlist/create.json", methods=["POST"])
+    def studio_playlist_create():
+        """Create an ordered Playlist from Media Library videos with the EXISTING playlist engine."""
+        bad = guard(write=True, body=True)
+        if bad:
+            return bad
+        try:
+            doc = body_json()
+            pname, items = doc.get("name"), doc.get("items")
+            if not isinstance(pname, str) or not NAME_RE.match(pname):
+                raise ValidationError("choose a playlist name (letters, digits, - and _)")
+            if not isinstance(items, list) or not 2 <= len(items) <= 64 or not all(isinstance(i, str) for i in items):
+                raise ValidationError("a playlist needs 2 to 64 videos")
+            if len(set(items)) != len(items):
+                raise ValidationError("the same video cannot be used twice")
+            rows = library()
+            if rows is not None:
+                have = {r.get("name") for r in rows if isinstance(r, dict)}
+                missing = [i for i in items if i not in have or media.classify(i) != "video"]
+                if missing:
+                    raise ValidationError("not a video in the Media Library: %s" % ", ".join(missing[:3]))
+            engine_of().playlist_create(pname, items)
+        except ValidationError as exc:
+            return jerr(str(exc))
+        except Exception as exc:
+            code = getattr(exc, "code", "") or ""
+            current_app.logger.warning("studio playlist create '%s' failed: %s", doc.get("name"), exc)
+            return jerr("Playlist creation failed (%s). A playlist with that name may already exist." % (code or "error"), 500)
+        return jsonify(ok=True, name=pname, message="Playlist '%s' created. Start it on the Playlists page, then choose it as a source." % pname)
+
     # ---- workspace preferences and capabilities ---------------------------
     @console.route("/studio/settings.json", methods=["GET"])
     def studio_settings_get():
@@ -603,7 +812,7 @@ def register_api(console, find_relay, engine_of):
         bad = guard()
         if bad:
             return bad
-        return jsonify(ok=True, **capabilities.summary())
+        return jsonify(ok=True, **capabilities.summary(probe=request.args.get("probe") == "1"))
 
 
 def new_layer(kind):

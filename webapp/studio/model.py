@@ -23,6 +23,12 @@ DYNAMIC_KINDS = frozenset({"clock", "countdown", "countup", "pomodoro", "ticker"
 MAX_OVERLAYS = 24
 RESOLUTIONS = ((854, 480), (1280, 720), (1920, 1080))
 SCALERS = ("bilinear", "bicubic", "lanczos")
+ENCODERS = ("libx264", "h264_nvenc")
+ALIGNS = ("left", "center", "right")
+# Layer kinds whose text is re-read from a small file once a second: their CONTENT can change without restarting FFmpeg.
+TEXT_BACKED = frozenset({"text", "ticker", "clock", "countdown", "countup", "pomodoro", "nowplaying", "data"})
+CONTENT_FIELDS = frozenset({"text", "target", "finished_text", "tz", "work_min", "break_min", "url", "json_path", "refresh_s", "value_format"})
+UI_ONLY_FIELDS = frozenset({"label", "locked"})
 LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f<>]{0,40}$")
 
 
@@ -40,6 +46,7 @@ class OutputProfile:
     gop_seconds: int = 2
     preset: str = "veryfast"
     scaler: str = "bicubic"   # scaling filter used to fit the source onto the canvas
+    encoder: str = "libx264"  # video encoder: libx264 (software, default) or h264_nvenc (only after a real NVENC init test)
 
     def validate(self):
         if (self.width, self.height) not in RESOLUTIONS:
@@ -54,6 +61,8 @@ class OutputProfile:
             raise ValidationError("unsupported preset")
         if self.scaler not in SCALERS:
             raise ValidationError("unsupported scaling filter")
+        if self.encoder not in ENCODERS:
+            raise ValidationError("unsupported encoder")
         return self
 
     @property
@@ -97,6 +106,10 @@ class Overlay:
     view_h: int = 720
     allowed_hosts: str = ""    # browser overlay: extra hosts the page may load from (comma separated)
     label: str = ""            # optional layer name shown in the workspace (never rendered into the video)
+    locked: bool = False       # workspace only: a locked layer cannot be dragged or resized
+    align: str = "left"        # text layers: alignment inside the layer box (left | center | right)
+    bg_color: str = "#000000"  # text layers: background box colour ...
+    bg_opacity: float = 0.0    # ... and opacity (0 = transparent, no box)
 
     @property
     def cropped(self):
@@ -124,6 +137,10 @@ class Overlay:
             raise ValidationError("font size out of range")
         if len(self.text) > 500:
             raise ValidationError("text too long")
+        if self.align not in ALIGNS:
+            raise ValidationError("unknown text alignment")
+        if not COLOR_RE.match(self.bg_color) or not 0.0 <= self.bg_opacity <= 1.0:
+            raise ValidationError("invalid background colour or opacity")
         if not LABEL_RE.match(self.label):
             raise ValidationError("layer name is too long or contains invalid characters")
         if self.kind in ("image", "video") and not ASSET_RE.match(self.asset):
@@ -218,7 +235,27 @@ class Project:
         doc = {
             "p": self.profile.__dict__,
             "s": [self.source_kind, self.background, self.visualizer],
-            "o": [{k: v for k, v in o.__dict__.items() if k != "label"} for o in self.visible_overlays()],
+            "o": [{k: v for k, v in o.__dict__.items() if k not in UI_ONLY_FIELDS} for o in self.visible_overlays()],
         }
         blob = json.dumps(doc, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()
+
+    def structure_fingerprint(self):
+        """Digest of everything baked into the FFmpeg filter graph. Two revisions with the same digest differ only in
+        file-backed text CONTENT, so a running live composition can adopt the new one with no restart."""
+        o_docs = []
+        for o in self.visible_overlays():
+            drop = UI_ONLY_FIELDS | (CONTENT_FIELDS if o.kind in TEXT_BACKED else frozenset())
+            o_docs.append({k: v for k, v in o.__dict__.items() if k not in drop})
+        doc = {"p": self.profile.__dict__,
+               "s": [self.source_kind, self.source_ref, self.slide_seconds, self.slide_shuffle, self.background, self.visualizer],
+               "o": o_docs}
+        return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def runs_live_encode(self):
+        """True when this project's pipeline is a continuous live composition (text files are re-read every second)."""
+        vis = self.visible_overlays()
+        if self.dynamic_source or any(o.dynamic for o in vis):
+            return True
+        return self.source_kind in ("relay", "playlist") and bool(vis)

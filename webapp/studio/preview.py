@@ -186,3 +186,69 @@ def thumb_png(name, ffmpeg="ffmpeg", timeout=10, max_width=960):
         if out[:8] == b"\x89PNG\r\n\x1a\n" and len(out) <= MAX_PREVIEW_BYTES:
             return out
     return None
+
+
+# ---------------------------------------------------------------------------
+# On-demand video preview for the editor (never touches a broadcast)
+# ---------------------------------------------------------------------------
+def probe_codecs(path, timeout=10):
+    """{"video": codec, "pix_fmt": fmt, "audio": codec|None} via ffprobe (privilege-dropped), or None."""
+    import json
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt", "-of", "json", path]
+    try:
+        doc = json.loads(_run(cmd, path, timeout) or b"{}")
+    except (OSError, subprocess.TimeoutExpired, PermissionError, ValueError):
+        return None
+    out = {"video": None, "pix_fmt": None, "audio": None}
+    for st in doc.get("streams", []):
+        if st.get("codec_type") == "video" and out["video"] is None:
+            out["video"], out["pix_fmt"] = st.get("codec_name"), st.get("pix_fmt")
+        elif st.get("codec_type") == "audio" and out["audio"] is None:
+            out["audio"] = st.get("codec_name")
+    return out if out["video"] else None
+
+
+def proxy_mode(codecs):
+    """"copy" when a browser can play the streams as they are (H.264 yuv420p + AAC/MP3/none), else "transcode"."""
+    ok = codecs and codecs["video"] == "h264" and codecs["pix_fmt"] == "yuv420p" and codecs["audio"] in (None, "aac", "mp3")
+    return "copy" if ok else "transcode"
+
+
+def proxy_args(path, mode, ffmpeg="ffmpeg"):
+    """FFmpeg argv producing a progressive-playable FRAGMENTED MP4 on stdout. `copy` costs almost nothing; `transcode`
+    is a single 540p ultrafast encode that runs ONLY while a browser is watching."""
+    base = [ffmpeg, "-v", "error", "-nostdin", "-i", path]
+    if mode == "copy":
+        media = ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]
+    else:
+        media = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:540", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k"]
+    return base + media + ["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]
+
+
+def open_proxy(name):
+    """Start the preview process for Media Library video `name`; returns (Popen, mode) or None when unreadable/unsupported."""
+    path = safe_media_path(name)
+    if not path or os.path.splitext(name)[1].lower() not in VIDEO_EXT:
+        return None
+    mode = proxy_mode(probe_codecs(path))
+    role = choose_identity(path)
+    drop = None
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        if role is None:
+            return None
+        drop = _dropper(role)
+
+    def pre():
+        if drop:
+            drop()
+        try:
+            os.nice(10 if mode == "transcode" else 5)
+        except (AttributeError, OSError):
+            pass
+    kw = {"preexec_fn": pre} if hasattr(os, "fork") else {}
+    try:
+        proc = subprocess.Popen(proxy_args(path, mode), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+    except OSError:
+        return None
+    return proc, mode

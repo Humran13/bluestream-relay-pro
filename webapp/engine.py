@@ -495,6 +495,19 @@ class EngineClient:
         """PNG bytes of a Media Library image (None when unavailable)."""
         return self._decode_image(self.read("studio_thumb", media, timeout=25), "image/png")
 
+    def proxy_argv(self, media: str):
+        """argv of the RAW editor-preview bridge (fragmented MP4 on stdout) for one Media Library video.
+
+        Not a JSON operation: the caller streams the child's stdout to the browser and kills it when the
+        browser leaves. The name is validated here and again by web-ctl; it never reaches a shell."""
+        if not valid_media_name(media):
+            raise EngineError("invalid media name", code="INVALID_MEDIA")
+        if self._production:
+            return [SUDO_PATH, "-n", INSTALLED_WEB_CTL, "studio_proxy", media]
+        if not self._web_ctl.is_file():
+            raise EngineError("engine bridge not found")
+        return [self._bash, str(self._web_ctl), "studio_proxy", media]
+
     @staticmethod
     def _decode_image(doc, mime):
         import base64

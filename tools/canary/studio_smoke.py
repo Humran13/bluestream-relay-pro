@@ -117,6 +117,12 @@ def roundtrip(c):
         check("Studio: stream status API answers (no stream yet)", s == 200 and d.get("ok") is True and d.get("stream", {}).get("exists") is False, "HTTP %d" % s)
         s, d = c.jget("/console/studio/media.json")
         check("Studio: media browser lists the Media Library", s == 200 and d.get("ok") is True and "items" in d, "HTTP %d" % s)
+        s, d = c.jget("/console/studio/sources.json")
+        check("Studio: live sources listing answers (read-only)", s in (200, 503) and (s == 503 or d.get("ok") is True), "HTTP %d" % s)
+        s, _, _ = c.get("/console/studio/media/zz-smoke-missing.mp4/play.mp4")
+        check("Studio: video preview of a missing file is a clean 404", s == 404, "HTTP %d" % s)
+        s, d = c.jget("/console/studio/capabilities.json")
+        check("Studio: capabilities answer without running any encoder test", s == 200 and d.get("ok") is True and any(e.get("id") == "libx264" for e in d.get("encoders", [])), "HTTP %d" % s)
         s, d = c.jget("/console/studio/settings.json")
         check("Studio: settings API answers", s == 200 and d.get("ok") is True, "HTTP %d" % s)
         s, d = c.jpost("%s/publish.json" % page, {}, page)
@@ -171,7 +177,7 @@ def main():
         needs = "Paste licence key" in body or re.search(r"NOT ACTIVE", text) is not None
         check("Studio needs no licence or payment", not needs)
     for asset in ("/console/static/js/studio_workspace.js", "/console/static/js/studio_picker.js", "/console/static/js/studio_home.js",
-                  "/console/static/css/console.css"):
+                  "/console/static/js/studio_player.js", "/console/static/js/vendor/hls.min.js", "/console/static/css/console.css"):
         s, _, _ = c.get(asset)
         check("asset %s loads" % asset.rsplit("/", 1)[-1], s == 200, "HTTP %d" % s)
 
