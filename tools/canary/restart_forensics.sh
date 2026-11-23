@@ -38,7 +38,9 @@ ps -eo pid,etimes,pcpu,rss,args --sort=-pcpu 2>/dev/null | grep -E "[f]fmpeg" | 
 echo "== host headroom =="
 uptime; free -m | head -2; df -h /var/lib/bluestream /var/www/bluestream 2>/dev/null
 echo "== HLS freshness for the stream =="
-for d in "/var/www/bluestream/hls/relay/${STREAM}"; do
-    [ -d "$d" ] && ls -l --time-style=+%H:%M:%S "$d" 2>/dev/null | tail -4 && date +%H:%M:%S
-done
+HLS_DIR="/var/www/bluestream/hls/relay/${STREAM}"
+if [ -d "$HLS_DIR" ]; then
+    ls -l --time-style=+%H:%M:%S "$HLS_DIR" 2>/dev/null | tail -4
+    date +%H:%M:%S
+fi
 echo "Read-only run complete. Nothing was changed."
