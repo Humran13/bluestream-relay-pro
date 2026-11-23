@@ -198,7 +198,7 @@ class LiveCompositionSoak(OutputFrameTests):
         p = Project("soak1", "media", "motion.mp4", [Overlay("clock", x=0.05, y=0.05, w=0.3, h=0.1, size=60),
                                                      Overlay("text", text="SOAK", x=0.05, y=0.8, w=0.3, h=0.1, size=60)],
                     OutputProfile(preset="veryfast", video_kbps=2500))
-        samples = []
+        samples, proc_samples = [], []
 
         def during(t0):
             while time.monotonic() - t0 < seconds - 2:
@@ -206,6 +206,11 @@ class LiveCompositionSoak(OutputFrameTests):
                 d = health.read_health(self.env["BLUESTREAM_RUN_DIR"], "soakr")
                 if d:
                     samples.append(d)
+                pid = subprocess.run(["pgrep", "-n", "-f", "out-soak1.flv"], capture_output=True, text=True).stdout.strip()
+                if pid:                                                    # the production sampler matches the bus URL; here the output is a file
+                    ps = subprocess.run(["ps", "-o", "pcpu=,rss=", "-p", pid.split()[0]], capture_output=True, text=True).stdout.split()
+                    if len(ps) == 2:
+                        proc_samples.append((float(ps[0]), float(ps[1]) / 1024.0))
         out, doc = self.run_stream(p, seconds, relay="soakr", during=during)
         pk = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", out],
                             capture_output=True, text=True).stdout.split()
@@ -213,9 +218,9 @@ class LiveCompositionSoak(OutputFrameTests):
         gaps = [b - a for a, b in zip(pts, pts[1:])]
         worst = max(gaps) if gaps else 99
         speeds = [float(d.get("speed") or 0) for d in samples if d.get("speed")]
-        print("SOAK seconds=%d loops~%d packets=%d worst_gap=%.3fs min_speed=%.2f max_cpu_cores=%s max_rss_mb=%s dropped=%s restarts=%s plan=%s"
-              % (seconds, seconds // 4, len(pts), worst, min(speeds or [0]), max([float(d.get("cpu_cores") or 0) for d in samples] or [0]),
-                 max([float(d.get("rss_mb") or 0) for d in samples] or [0]), doc.get("dropped_frames"), doc.get("restarts"), doc.get("plan")))
+        print("SOAK seconds=%d loops~%d packets=%d worst_gap=%.3fs min_speed=%.2f ffmpeg_cpu_pct_avg=%.0f ffmpeg_rss_mb_first=%.0f ffmpeg_rss_mb_last=%.0f ffmpeg_rss_mb_max=%.0f dropped=%s restarts=%s plan=%s"
+              % (seconds, seconds // 4, len(pts), worst, min(speeds or [0]), (proc_samples[-1][0] if proc_samples else 0), (proc_samples[0][1] if proc_samples else 0),
+                 (proc_samples[-1][1] if proc_samples else 0), max([r for _, r in proc_samples] or [0]), doc.get("dropped_frames"), doc.get("restarts"), doc.get("plan")))
         self.assertGreater(len(pts), seconds * 10)
         self.assertLess(worst, 0.5, "a gap in the output (stall) was found")
         self.assertGreater(min(speeds or [0]), 0.95)

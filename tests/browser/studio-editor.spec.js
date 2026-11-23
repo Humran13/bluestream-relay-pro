@@ -35,7 +35,11 @@ async function project(page, template = "blank") {
   await page.selectOption('select[name="source_kind"]', "media");
   await page.click("#sr-browse");
   await page.locator(".sdlg .smb-card").first().waitFor();
-  await page.locator('.sdlg .smb-card[data-name="loop.mp4"]').click();
+  // a re-render (thumbnails/library refresh) can swallow a click on a slow engine: retry until the card really is selected
+  await expect(async () => {
+    await page.locator('.sdlg .smb-card[data-name="loop.mp4"]').click();
+    await expect(page.locator('.sdlg .smb-card[data-name="loop.mp4"]')).toHaveAttribute("aria-selected", "true", { timeout: 1500 });
+  }).toPass({ timeout: 20000 });
   await page.click(".sdlg-foot .btn:not(.btn-secondary)");
   await expect(page.locator("#sr")).toHaveValue("loop.mp4");
   await page.selectOption('select[name="template"]', template);

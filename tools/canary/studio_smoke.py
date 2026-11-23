@@ -177,7 +177,7 @@ def main():
         needs = "Paste licence key" in body or re.search(r"NOT ACTIVE", text) is not None
         check("Studio needs no licence or payment", not needs)
     for asset in ("/console/static/js/studio_workspace.js", "/console/static/js/studio_picker.js", "/console/static/js/studio_home.js",
-                  "/console/static/js/studio_player.js", "/console/static/js/vendor/hls.min.js", "/console/static/css/console.css"):
+                  "/console/static/js/studio_player.js", "/console/static/js/thirdparty/hls.min.js", "/console/static/css/console.css"):
         s, _, _ = c.get(asset)
         check("asset %s loads" % asset.rsplit("/", 1)[-1], s == 200, "HTTP %d" % s)
 

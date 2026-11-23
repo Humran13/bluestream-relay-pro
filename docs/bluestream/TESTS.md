@@ -119,3 +119,24 @@ This is automated CI evidence only. It is not a staging, benchmark, reboot or 72
   rejection, settings persistence and validation, hotkey rebinding, create/start/stop with confirmation, Apply + Program view, mobile layout, auth).
 - `tools/canary/studio_smoke.py` (deployment self-test) against the e2e app: 32/32 checks, including the JSON API with CSRF header and the missing-media guard.
 - Not covered: a real VPS, real relay/YouTube publishing, performance under load.
+
+## Live production round (round 11) - local results, NOT a VPS
+Evidence that overlays are in the ENCODED OUTPUT (`webapp/test_studio_output_frames.py`, container, real FFmpeg 6.1, real `studio.cli argv` + real widgets sidecar,
+output file decoded and measured; only the RTMP URL is swapped for a file): text (white pixels in the text box), solid rect (blue), transparent PNG (red),
+countdown (frames 2.5 s apart differ, same instant decoded twice is identical), picture-in-picture video (frames differ = moving), hot apply (text changes in the
+output while the SAME FFmpeg keeps running; sidecar reports revision 2, no pending restart), structural change (output unchanged, `pending_restart=yes`),
+NVENC refused with exit 6 when unusable (never silently software), software encode still decodes. Health: plan `live-composition`, encoder speed >= 0.9x.
+Soak (same file, `BLUESTREAM_SOAK_SECONDS`, 720p30 veryfast, clock + text over a looping clip, container limited to 4 CPUs):
+  600 s: 18000 packets, worst packet gap 0.167 s (no stall), min speed 1.00x, 0 dropped, 0 restarts.
+  240 s: ffmpeg CPU ~68 % of one core (synthetic content), RSS 287 -> 297 MB, 0 dropped, 0 restarts.
+  These are minutes on synthetic content, NOT the 72 h gate and not a VPS number.
+Preview against real FFmpeg (`test_studio_live.py`): browser-compatible H.264 is stream-copied (resolution unchanged); VP9 and HEVC get one 540p H.264 transcode;
+both outputs decode with moving frames. Unit/API tests (24): hot vs staged apply, revert, encoder gate, monitoring is read-only, playlist create validation,
+preview auth/validation/concurrency cap, bridge argv validation, forensics script is read-only.
+Browser (`tests/browser/studio-editor.spec.js`, 27 scenarios): Chromium, Firefox, WebKit and Edge = 102 passed, 6 skipped (bundled Chromium/WebKit cannot decode
+H.264: UNTESTED there). In Firefox and Edge the REAL playback tests pass: uploaded video plays with measured frame-to-frame motion, pause/mute never issue a stream
+request, the loop boundary continues; an existing relay is monitored through real HLS (hls.js) with motion and zero non-GET requests; stopped relay and unreachable
+relay show clear states; the Studio output plays in "Live output" mode; staged restart verifies the new revision and an unhealthy one is rolled back automatically.
+Deployment self-test `studio_smoke.py`: 37/37. Full Python suite in the container as non-root: all pass except one test that only works when pytest is started in
+`webapp/` (as CI does).
+Not covered: a real VPS, real YouTube, real GPU, browser-source renderer on a real host, 72 h.
