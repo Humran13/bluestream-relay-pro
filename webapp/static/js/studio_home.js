@@ -30,4 +30,17 @@
     });
   });
   sync();
+
+  // Edit an EXISTING stream: opens (creating once) the overlay project bound to it. Never touches the stream.
+  var csrf = form.dataset.csrf, msg = document.getElementById("ex-msg");
+  Array.prototype.forEach.call(document.querySelectorAll("[data-edit]"), function (b) {
+    b.addEventListener("click", function () {
+      b.disabled = true; msg.textContent = "Opening…";
+      fetch(form.dataset.overlayNewUrl, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf, "Accept": "application/json" },
+        body: JSON.stringify({ relay: b.dataset.edit }) }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.ok) { window.location.href = form.dataset.projectsUrl + "/" + encodeURIComponent(d.name); }
+        else { b.disabled = false; msg.textContent = (d && d.error) || "Could not open that stream."; }
+      }).catch(function () { b.disabled = false; msg.textContent = "Could not reach the server."; });
+    });
+  });
 })();

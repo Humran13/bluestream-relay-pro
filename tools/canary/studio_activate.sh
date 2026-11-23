@@ -117,6 +117,13 @@ while IFS='|' read -r u mp nr inv st ff; do
 done < "$SNAPDIR/streams.before"
 say "  Impact: replaced files get NEW inodes (atomic rename); running processes keep the old, unchanged inodes and are not affected."
 say "  Only a FUTURE restart of a unit would load the new files (the tested versions of the same code)."
+sigcgt="$(sed -n 's/^SigCgt:[[:space:]]*//p' "/proc/$r_mp/status" 2>/dev/null | head -n1)"
+if [ -n "$sigcgt" ] && [ $(( 0x$sigcgt & 0x200 )) -ne 0 ]; then
+    say "  Studio overlays on '$STREAM': live switching AVAILABLE (its supervisor can replace the picture without touching the destinations)."
+else
+    say "  Studio overlays on '$STREAM': the running supervisor predates this version, so it keeps streaming exactly as now. The FIRST time you activate overlays on it"
+    say "  Studio will ask for ONE explicit restart of '$STREAM' (its destinations reconnect with the same key, about 10-20 s). Nothing restarts now."
+fi
 find "$ETCBS" -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > "$SNAPDIR/config.before" 2>/dev/null
 
 # ---------------------------------------------------------------- 4. staging + validation (nothing in production touched)

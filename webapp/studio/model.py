@@ -49,9 +49,9 @@ class OutputProfile:
     encoder: str = "libx264"  # video encoder: libx264 (software, default) or h264_nvenc (only after a real NVENC init test)
 
     def validate(self):
-        if (self.width, self.height) not in RESOLUTIONS:
+        if (self.width, self.height) not in RESOLUTIONS and (self.width, self.height) != (0, 0):
             raise ValidationError("unsupported resolution")
-        if self.fps not in (24, 25, 30, 60):
+        if self.fps not in (0, 24, 25, 30, 60):
             raise ValidationError("unsupported fps")
         if not 1000 <= self.video_kbps <= 12000:
             raise ValidationError("video bitrate out of range")
@@ -64,6 +64,11 @@ class OutputProfile:
         if self.encoder not in ENCODERS:
             raise ValidationError("unsupported encoder")
         return self
+
+    @property
+    def matches_source(self):
+        """0x0 = keep the source's own resolution (in-place overlays on an existing stream); fps 0 = keep its frame rate."""
+        return self.width == 0
 
     @property
     def gop(self):
@@ -188,6 +193,7 @@ class Project:
     slide_shuffle: bool = False  # slideshow: deterministic shuffle (seeded by name list)
     background: str = "#0b1220"  # audio source: "#rrggbb" or a Media Library image name
     visualizer: bool = False     # audio source: live waveform strip (needs a live encode)
+    target_relay: str = ""       # "" = a Studio stream of its own; else the NAME of an existing relay whose broadcast these overlays are added to
 
     def slides(self):
         return [s for s in self.source_ref.split(",") if s]
@@ -215,6 +221,13 @@ class Project:
                 raise ValidationError("seconds per slide must be 2-3600")
         if self.source_kind == "relay" and self.source_ref == self.name:
             raise ValidationError("a Studio stream cannot read from itself")
+        if self.target_relay:
+            if not NAME_RE.match(self.target_relay):
+                raise ValidationError("invalid stream name")
+            if self.source_kind != "relay" or self.source_ref != self.target_relay:
+                raise ValidationError("overlays on an existing stream must use that stream as the source")
+        elif self.profile.width == 0 or self.profile.fps == 0:
+            raise ValidationError("'match source' output is only for overlays on an existing stream")
         if len(self.overlays) > MAX_OVERLAYS:
             raise ValidationError("too many overlays")
         self.profile.validate()
@@ -248,7 +261,7 @@ class Project:
             drop = UI_ONLY_FIELDS | (CONTENT_FIELDS if o.kind in TEXT_BACKED else frozenset())
             o_docs.append({k: v for k, v in o.__dict__.items() if k not in drop})
         doc = {"p": self.profile.__dict__,
-               "s": [self.source_kind, self.source_ref, self.slide_seconds, self.slide_shuffle, self.background, self.visualizer],
+               "s": [self.source_kind, self.source_ref, self.slide_seconds, self.slide_shuffle, self.background, self.visualizer, self.target_relay],
                "o": o_docs}
         return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -258,4 +271,4 @@ class Project:
         vis = self.visible_overlays()
         if self.dynamic_source or any(o.dynamic for o in vis):
             return True
-        return self.source_kind in ("relay", "playlist") and bool(vis)
+        return (self.source_kind in ("relay", "playlist") or bool(self.target_relay)) and bool(vis)

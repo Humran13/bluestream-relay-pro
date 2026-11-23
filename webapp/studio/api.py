@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from flask import Response, current_app, jsonify, request, session, stream_with_context
 
 from . import browsercap, capabilities, entitlement, media, preview, settings, store, templates_lib, widgets
+from . import overlay as ovl
 from .model import KINDS, NAME_RE, OutputProfile, Overlay, Project, ValidationError
 
 SOURCE_KINDS = ("relay", "playlist", "media", "slideshow", "audio")
@@ -25,7 +26,7 @@ _OVERLAY_TYPES = {f.name: type(f.default) for f in dataclasses.fields(Overlay) i
 _PROFILE_FIELDS = ("width", "height", "fps", "video_kbps", "audio_kbps", "preset", "scaler", "encoder")
 _PROFILE_TYPES = {f.name: type(f.default) for f in dataclasses.fields(OutputProfile)}
 _PROJECT_KEYS = {"source_kind", "source_ref", "slide_seconds", "slide_shuffle", "background", "visualizer",
-                 "profile", "overlays"}
+                 "profile", "overlays", "target_relay"}
 _thumb_cache = {}  # (media name) -> (expires, bytes): bridge thumbnails are cheap to serve, dear to make
 
 
@@ -91,6 +92,10 @@ def project_from_json(old, doc):
         overlays = [dict(o.__dict__) for o in old.overlays]
     if not isinstance(overlays, list):
         raise ValidationError("layers must be a list")
+    if "target_relay" in doc and doc["target_relay"] != old.target_relay:
+        raise ValidationError("the stream a project edits cannot be changed")
+    if old.target_relay and (kind != old.source_kind or doc.get("source_ref", old.source_ref) != old.source_ref):
+        raise ValidationError("the source of an existing stream cannot be changed from Studio")
     proj = Project(
         old.name, kind,
         _coerce(doc.get("source_ref", old.source_ref), str, "source_ref").strip(),
@@ -100,7 +105,7 @@ def project_from_json(old, doc):
         slide_seconds=_coerce(doc.get("slide_seconds", old.slide_seconds), int, "slide_seconds"),
         slide_shuffle=_coerce(doc.get("slide_shuffle", old.slide_shuffle), bool, "slide_shuffle"),
         background=_coerce(doc.get("background", old.background), str, "background").strip(),
-        visualizer=_coerce(doc.get("visualizer", old.visualizer), bool, "visualizer"))
+        visualizer=_coerce(doc.get("visualizer", old.visualizer), bool, "visualizer"), target_relay=old.target_relay)
     if any(o.kind == "browser" for o in proj.overlays):
         ok, why = browsercap.usable()
         if not ok:
@@ -115,6 +120,7 @@ def project_to_json(project):
         "background": project.background, "visualizer": project.visualizer,
         "profile": {k: getattr(project.profile, k) for k in _PROFILE_FIELDS},
         "overlays": [dict(o.__dict__) for o in project.overlays],
+        "target_relay": project.target_relay,
         "revision": project.revision,
     }
 
@@ -391,8 +397,6 @@ def register_api(console, find_relay, engine_of):
             restart = body_json().get("restart") is True
         except ValidationError as exc:
             return jerr(str(exc))
-        relay, _ = find_relay(name)
-        running = bool(relay and relay.get("type") == "studio" and relay.get("active") == "yes")
         try:
             draft = store.load_draft(name)
             try:
@@ -401,13 +405,30 @@ def register_api(console, find_relay, engine_of):
                 prev = None
         except (ValidationError, OSError, ValueError):
             return jerr("That project file is damaged; roll back to an earlier revision.", 500)
+        target = draft.target_relay
+        if target:
+            relay, _ = find_relay(target)
+            mk = ovl.read_marker(target)
+            running = bool(relay and relay.get("active") == "yes" and mk and mk["enabled"] and mk["project"] == name)
+        else:
+            relay, _ = find_relay(name)
+            running = bool(relay and relay.get("type") == "studio" and relay.get("active") == "yes")
         # HOT apply: the running pipeline is a live composition and only file-backed text CONTENT changed, so the
         # sidecar adopts the new values within a second and FFmpeg is never touched.
         hot = bool(running and prev is not None and prev.runs_live_encode and draft.runs_live_encode
                    and prev.structure_fingerprint() == draft.structure_fingerprint())
+        kind = ""
+        if running and not hot:
+            kind = ("swap" if swap_state(target)["ready"] else "unit-restart") if target else "restart"
         if running and not hot and not restart:
+            if kind == "swap":
+                return jerr("These changes alter the picture on air. Confirm the switch: the picture source of '%s' is replaced (about 2 seconds "
+                            "of pause) while its destination connections stay up." % target, 409, needs_restart=True, kind=kind)
+            if kind == "unit-restart":
+                return jerr("'%s' must be restarted once to switch its picture live (its running supervisor predates this update). Its "
+                            "destinations reconnect with the same stream key (about 10-20 seconds)." % target, 409, needs_restart=True, kind=kind)
             return jerr("These changes alter the video pipeline. Confirm the controlled restart of this Studio stream "
-                        "(other streams are not touched).", 409, needs_restart=True)
+                        "(other streams are not touched).", 409, needs_restart=True, kind=kind)
         gone = missing_media(draft)
         if gone:
             return jerr("Cannot apply: %s." % "; ".join("%s uses '%s', which is not in the Media Library" % g
@@ -420,15 +441,21 @@ def register_api(console, find_relay, engine_of):
         try:
             rev = store.publish(name)
             if running and not hot:
-                engine_of().relay_restart(name)
+                if kind == "swap":
+                    engine_of().relay_swap_source(target)
+                else:
+                    engine_of().relay_restart(target or name)
         except Exception as exc:
             current_app.logger.warning("studio publish '%s' failed: %s", name, exc)
             return jerr("Publish failed; the previous live revision is still in use.", 500)
-        mode = "hot" if hot else ("restart" if running else "stored")
+        mode = "hot" if hot else ((kind or "restart") if running else "stored")
         msg = {"hot": "Revision %d applied live with no interruption.",
                "restart": "Revision %d applied; this Studio stream is restarting (verifying it comes back healthy).",
-               "stored": "Revision %d applied. It goes on air when the stream starts."}[mode] % rev
-        return jsonify(ok=True, revision=rev, previous=prev.revision if prev else 0, mode=mode, restarted=mode == "restart",
+               "swap": "Revision %d applied; the picture source is being replaced (destination connections stay up; verifying).",
+               "unit-restart": "Revision %d applied; the stream is restarting once (verifying it comes back healthy).",
+               "stored": ("Revision %d is saved as ready. It is NOT on air: press Activate to put the overlays on the stream." if target
+                          else "Revision %d applied. It goes on air when the stream starts.")}[mode] % rev
+        return jsonify(ok=True, revision=rev, previous=prev.revision if prev else 0, mode=mode, restarted=mode in ("restart", "unit-restart"),
                        unpublished=False, message=msg)
 
     @console.route("/studio/<name>/revert-live.json", methods=["POST"])
@@ -444,10 +471,20 @@ def register_api(console, find_relay, engine_of):
             new_rev = store.republish(name, rev)
         except ValidationError as exc:
             return jerr(str(exc))
-        relay, _ = find_relay(name)
-        if relay is not None and relay.get("type") == "studio" and relay.get("active") == "yes":
+        try:
+            target = store.load_draft(name).target_relay
+        except (ValidationError, OSError, ValueError):
+            target = ""
+        relay, _ = find_relay(target or name)
+        mk = ovl.read_marker(target) if target else None
+        live = bool(relay is not None and relay.get("active") == "yes" and (
+            (target and mk and mk["enabled"]) or (not target and relay.get("type") == "studio")))
+        if live:
             try:
-                engine_of().relay_restart(name)
+                if target and swap_state(target)["ready"]:
+                    engine_of().relay_swap_source(target)
+                else:
+                    engine_of().relay_restart(target or name)
             except Exception as exc:
                 current_app.logger.warning("studio revert '%s' restart failed: %s", name, exc)
                 return jerr("Reverted the stored revision but the restart failed; check the Streams page.", 500)
@@ -465,9 +502,17 @@ def register_api(console, find_relay, engine_of):
         return jsonify(ok=True, capacity=capabilities.assess(prof))
 
     # ---- stream status and controls ---------------------------------------
-    def stream_doc(name):
-        relay, unavailable = find_relay(name)
-        if relay is not None and relay.get("type") != "studio":
+    def swap_state(relay_name):
+        """Can the running relay replace its FFmpeg on demand (publishers stay connected)? Never raises."""
+        try:
+            doc = engine_of().relay_swap_ready(relay_name)
+            return {"active": doc.get("active") == "yes", "ready": doc.get("ready") == "yes", "reason": doc.get("reason") or ""}
+        except Exception:                                   # noqa: BLE001 - bridge older than this release, or down
+            return {"active": None, "ready": False, "reason": "UNKNOWN"}
+
+    def stream_doc(name, target=None):
+        relay, unavailable = find_relay(target or name)
+        if target is None and relay is not None and relay.get("type") != "studio":
             relay = None
         doc = {"exists": relay is not None, "unavailable": bool(unavailable), "active": False, "health": "",
                "health_detail": "", "state": "", "detail": "", "speed": "", "fps": "", "cpu_cores": "",
@@ -475,12 +520,20 @@ def register_api(console, find_relay, engine_of):
                "pending_restart": False, "publishers": [], "destinations_attached": 0}
         if relay is None:
             return doc
-        doc["hls_url"] = _hls_urls("relay", name)
+        rname = target or name
+        doc["hls_url"] = _hls_urls("relay", rname)
+        if target:
+            mk = ovl.read_marker(target)
+            doc["inplace"] = {"relay": target, "marker": ("on" if mk and mk["enabled"] else "off") if mk else "none",
+                              "type": relay.get("type") or "", "swap": swap_state(target) if relay.get("active") == "yes" else
+                              {"active": False, "ready": False, "reason": "NOT_RUNNING"}}
         doc.update(active=relay.get("active") == "yes", health=relay.get("health") or "",
                    health_detail=relay.get("health_detail") or "")
         eng = engine_of()
         try:
-            h = eng.read("studio_health", name) or {}
+            h = eng.read("studio_health", rname) or {}
+            if target:
+                doc["inplace"]["overlay"] = h.get("overlay") or ""
             doc.update(state=h.get("state") or "", detail=h.get("detail") or "", speed=h.get("speed") or "",
                        fps=h.get("fps") or "", cpu_cores=h.get("cpu_cores") or "", restarts=h.get("restarts") or "0",
                        dropped=h.get("dropped_frames") or "0", rss_mb=h.get("rss_mb") or "",
@@ -489,7 +542,7 @@ def register_api(console, find_relay, engine_of):
         except Exception:
             pass
         try:
-            pubs = eng.read("relay_publisher_status", name) or []
+            pubs = eng.read("relay_publisher_status", rname) or []
             doc["publishers"] = [{"id": p.get("id"), "display_name": p.get("display_name") or p.get("id"),
                                   "state": p.get("state") or "", "detail": p.get("detail") or "",
                                   "blocked_by": p.get("blocked_by") or ""} for p in pubs]
@@ -510,7 +563,7 @@ def register_api(console, find_relay, engine_of):
             published = store.load_published(name).revision
         except (ValidationError, OSError, ValueError):
             published = 0
-        return jsonify(ok=True, stream=stream_doc(name), unpublished=store.has_unpublished_changes(name),
+        return jsonify(ok=True, stream=stream_doc(name, draft.target_relay or None), unpublished=store.has_unpublished_changes(name),
                        published_revision=published, capacity=capabilities.assess(draft.profile),
                        load=capabilities.load_avg())
 
@@ -519,6 +572,12 @@ def register_api(console, find_relay, engine_of):
         bad = guard(write=True, name=name, body=True)
         if bad:
             return bad
+        try:
+            owner = store.load_draft(name).target_relay
+        except (ValidationError, OSError, ValueError):
+            owner = ""
+        if owner:
+            return jerr("This project edits the existing stream '%s'. Start and stop it on the Streams page; use Activate here to put overlays on air." % owner, 409)
         try:
             action = body_json().get("action")
         except ValidationError as exc:
@@ -559,6 +618,8 @@ def register_api(console, find_relay, engine_of):
         bad = guard(write=True, name=name, body=True)
         if bad:
             return bad
+        if store.load_draft(name).target_relay:
+            return jerr("Overlays on an existing stream keep its destinations as they are: there is nothing to switch.", 409)
         try:
             doc = body_json()
         except ValidationError as exc:
@@ -587,24 +648,31 @@ def register_api(console, find_relay, engine_of):
             current_app.logger.info("destination list unavailable: %s", exc)
             return jerr("Destinations could not be read right now.", 503)
         attached, relay = [], None
-        relay, _ = find_relay(name)
-        if relay is not None and relay.get("type") == "studio":
+        try:
+            target = store.load_draft(name).target_relay
+        except (ValidationError, OSError, ValueError):
+            target = ""
+        rname = target or name
+        relay, _ = find_relay(rname)
+        if relay is not None and (target or relay.get("type") == "studio"):
             try:
-                attached = list(engine_of().relay_destinations_get(name) or [])
+                attached = list(engine_of().relay_destinations_get(rname) or [])
             except Exception:
                 attached = []
         dests = [{"name": r.get("name"), "display_name": r.get("display_name") or r.get("name"),
                   "platform": r.get("platform") or "", "server_url": r.get("server_url") or "",
                   "enabled": r.get("enabled") == "yes", "has_stream_key": r.get("has_stream_key") == "yes"}
                  for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
-        return jsonify(ok=True, destinations=dests, attached=attached, stream_exists=relay is not None
-                       and relay.get("type") == "studio")
+        return jsonify(ok=True, destinations=dests, attached=attached, inplace=bool(target), stream_name=rname,
+                       stream_exists=relay is not None and bool(target or relay.get("type") == "studio"))
 
     @console.route("/studio/<name>/destinations.json", methods=["POST"])
     def studio_destinations_post(name):
         bad = guard(write=True, name=name, body=True)
         if bad:
             return bad
+        if store.load_draft(name).target_relay:
+            return jerr("Destinations of an existing stream are managed on the Destinations page; Studio leaves them untouched.", 409)
         try:
             ids = body_json().get("ids")
             if not isinstance(ids, list) or not all(isinstance(i, str) and NAME_RE.match(i) for i in ids) or len(ids) > 16:
@@ -625,6 +693,125 @@ def register_api(console, find_relay, engine_of):
             current_app.logger.warning("studio destinations '%s' failed: %s", name, exc)
             return jerr("Destinations could not be saved.", 500)
         return jsonify(ok=True, attached=ids, message="Destinations saved.")
+
+    # ---- overlays on an EXISTING stream ---------------------------------------------------------------------------------------
+    def inplace_project(name):
+        """(project, error response) for a project that edits an existing stream."""
+        try:
+            p = store.load_draft(name)
+        except (ValidationError, OSError, ValueError):
+            return None, jerr("That project file is damaged.", 500)
+        if not p.target_relay:
+            return None, jerr("This project is not attached to an existing stream.", 409)
+        return p, None
+
+    @console.route("/studio/overlay/new.json", methods=["POST"])
+    def studio_overlay_new():
+        """Open (creating it once) the overlay project of an EXISTING stream. Never touches the stream."""
+        bad = guard(write=True, body=True)
+        if bad:
+            return bad
+        try:
+            relay_name = body_json().get("relay")
+            if not isinstance(relay_name, str) or not NAME_RE.match(relay_name):
+                raise ValidationError("choose a stream")
+        except ValidationError as exc:
+            return jerr(str(exc))
+        relay, unavailable = find_relay(relay_name)
+        if relay is None:
+            return jerr("That stream was not found." if not unavailable else "The stream list is unavailable right now.", 404)
+        if relay.get("type") not in ovl.SUPPORTED_RELAY_TYPES:
+            return jerr("Overlays can be added to streams read from a file, URL, HLS, RTMP, RTSP or public webpage; '%s' is a %s stream." % (
+                relay_name, relay.get("type") or "different"), 409)
+        pname = (relay_name + "-overlay")[:48]
+        if store.exists(pname):
+            existing, err = inplace_project(pname)
+            if err or existing.target_relay != relay_name:
+                return jerr("A Studio project named '%s' already exists for something else." % pname, 409)
+            return jsonify(ok=True, name=pname, existing=True)
+        if find_relay(pname)[0] is not None:
+            return jerr("A stream named '%s' already exists; rename it first." % pname, 409)
+        try:
+            proj = Project(pname, "relay", relay_name, [], OutputProfile(width=0, height=0, fps=0, preset="veryfast", video_kbps=4000),
+                           target_relay=relay_name).validate()
+            store.save_draft(proj)
+        except (ValidationError, OSError) as exc:
+            return jerr("Could not create the overlay project: %s." % exc, 500)
+        return jsonify(ok=True, name=pname, existing=False)
+
+    def overlay_switch(name, enable):
+        """Shared body of activate/deactivate. Order: write the switch, then ask the relay to rebuild its picture; any failure puts the switch back."""
+        bad = guard(write=True, name=name, body=True)
+        if bad:
+            return bad
+        proj, err = inplace_project(name)
+        if err:
+            return err
+        try:
+            confirm = body_json().get("confirm_restart") is True
+        except ValidationError as exc:
+            return jerr(str(exc))
+        target = proj.target_relay
+        relay, _ = find_relay(target)
+        if relay is None:
+            return jerr("The stream '%s' no longer exists." % target, 404)
+        old = ovl.read_marker(target)
+        if enable:
+            try:
+                pub = store.load_published(name)
+            except (ValidationError, OSError, ValueError):
+                return jerr("Press Apply first: nothing has been saved as ready yet.", 409)
+            if not pub.visible_overlays():
+                return jerr("The applied revision has no visible layers: there is nothing to put on air (the stream stays in plain copy mode).", 409)
+            gone = missing_media(pub)
+            if gone:
+                return jerr("Cannot activate: %s." % "; ".join("%s uses '%s', which is not in the Media Library" % g for g in gone[:3]), 422)
+            ok_e, why_e = capabilities.encoder_usable(pub.profile.encoder)
+            if not ok_e:
+                return jerr("Cannot activate: encoder %s is not usable: %s" % (pub.profile.encoder, why_e), 422)
+        elif not old or not old["enabled"]:
+            return jsonify(ok=True, mode="none", message="Overlays are not on air on '%s'." % target)
+        running = relay.get("active") == "yes"
+        sw = swap_state(target) if running else {"ready": False}
+        if running and not sw["ready"] and not confirm:
+            return jerr("'%s' must be restarted once to %s overlays live: its running supervisor predates this update. Its destinations "
+                        "reconnect with the same stream key (about 10-20 seconds). Later changes will not need a restart." % (
+                            target, "switch" if enable else "remove"), 409, needs_restart=True, kind="unit-restart")
+        try:
+            ovl.write_marker(target, name, enable)
+        except (ValidationError, OSError) as exc:
+            return jerr("Could not write the overlay switch: %s." % exc, 500)
+        if not running:
+            return jsonify(ok=True, mode="armed" if enable else "none",
+                           message=("Overlays will be on air the next time '%s' starts." % target) if enable else "Overlays removed.")
+        try:
+            if sw["ready"]:
+                engine_of().relay_swap_source(target)
+                mode = "swap"
+            else:
+                engine_of().relay_restart(target)
+                mode = "unit-restart"
+        except Exception as exc:
+            current_app.logger.warning("overlay %s '%s' failed: %s", "activation" if enable else "removal", target, exc)
+            try:                                              # put the switch back: a failed activation must change nothing
+                if old:
+                    ovl.write_marker(target, old["project"], old["enabled"])
+                else:
+                    ovl.delete_marker(target)
+            except (ValidationError, OSError):
+                pass
+            return jerr("The stream did not accept the change; the previous state was restored. The stream is untouched.", 500)
+        msg = {"swap": "Switching the picture of '%s' now; its destination connections stay up (expect a pause of about 2 seconds)." % target,
+               "unit-restart": "Restarting '%s' once; its destinations reconnect with the same stream key." % target}[mode]
+        return jsonify(ok=True, mode=mode, message=msg, revision=store.load_published(name).revision)
+
+    @console.route("/studio/<name>/overlay/activate.json", methods=["POST"])
+    def studio_overlay_activate(name):
+        return overlay_switch(name, True)
+
+    @console.route("/studio/<name>/overlay/deactivate.json", methods=["POST"])
+    def studio_overlay_deactivate(name):
+        return overlay_switch(name, False)
 
     # ---- live preview: real playing video ---------------------------------
     try:
@@ -734,6 +921,17 @@ def register_api(console, find_relay, engine_of):
             src.update(mode="file", url=url_for_play(proj.source_ref))
         elif proj.source_kind in ("relay", "playlist"):
             k = proj.source_kind
+            if proj.target_relay:
+                src["raw_url"] = None
+                try:
+                    row = next((r for r in (engine_of().call("relay_list") or []) if isinstance(r, dict) and r.get("name") == proj.target_relay), None)
+                    base = os.path.basename((row or {}).get("source") or "")
+                    if row and row.get("type") == "local-file" and base and media.classify(base) == "video":
+                        have = {m.get("name") for m in (library() or []) if isinstance(m, dict)}
+                        if base in have:
+                            src["raw_url"] = url_for_play(base)       # the file the stream loops, WITHOUT any overlay burned in
+                except Exception:                                    # noqa: BLE001 - the HLS preview still works
+                    pass
             rows = []
             try:
                 rows = engine_of().call("relay_list" if k == "relay" else "playlist_list") or []

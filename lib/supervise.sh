@@ -148,6 +148,20 @@ bs_supervise_run() {
     }
     trap _bs_supervise_on_signal TERM INT
 
+    # SIGUSR1 = replace the FFmpeg that feeds the bus RIGHT NOW (used to switch Studio overlays on/off or change them). Destination
+    # publishers pull from the bus and stay connected; no backoff, no attempt is counted. A supervisor started before this feature
+    # has no handler (the web bridge checks for it first and never signals such a process).
+    swap_requested=0
+    # Why the next FFmpeg is being (re)built: start | swap (deliberate replacement) | retry (the previous one ended unexpectedly).
+    BS_SUPERVISE_REASON=start
+    _bs_supervise_on_swap() {
+        swap_requested=1
+        if [ -n "$current_child" ] && kill -0 "$current_child" 2>/dev/null; then
+            kill -TERM "$current_child" 2>/dev/null
+        fi
+    }
+    trap _bs_supervise_on_swap USR1
+
     bs_supervise_write_status "$kind" "$name" STARTING "starting" "" 0
 
     while true; do
@@ -178,6 +192,11 @@ bs_supervise_run() {
             bs_supervise_write_status "$kind" "$name" STOPPED "stopped by request" "" "$attempt"
             exit 0
         fi
+        # A swap request that arrived while the arguments were being built: build again so the newest state is what starts.
+        if [ "$swap_requested" = "1" ]; then
+            swap_requested=0
+            continue
+        fi
 
         bs_supervise_write_status "$kind" "$name" LIVE "ffmpeg running" "" "$attempt"
         start_ts="$(date +%s)"
@@ -191,7 +210,22 @@ bs_supervise_run() {
         fi
         wait "$current_child"
         ec=$?
+        swap_child="$current_child"
         current_child=""
+        if [ "$swap_requested" = "1" ] && [ "$stop_requested" != "1" ]; then
+            swap_requested=0
+            # Free the bus name first (nginx-rtmp refuses a second publisher), bounded to 10 s, then rebuild immediately.
+            swap_wait=0
+            while kill -0 "$swap_child" 2>/dev/null && [ "$swap_wait" -lt 100 ]; do
+                sleep 0.1
+                swap_wait=$(( swap_wait + 1 ))
+            done
+            kill -KILL "$swap_child" 2>/dev/null || true
+            wait "$swap_child" 2>/dev/null || true
+            bs_supervise_write_status "$kind" "$name" STARTING "switching the picture source (destination publishers stay connected)" "" "$attempt"
+            BS_SUPERVISE_REASON=swap
+            continue
+        fi
         now="$(date +%s)"
         ran_for=$(( now - start_ts ))
 
@@ -230,6 +264,7 @@ bs_supervise_run() {
         else
             bs_supervise_write_status "$kind" "$name" RECONNECTING "unexpected end (ffmpeg exit=$ec after ${ran_for}s); reconnecting in ${delay}s (attempt $attempt/$BS_SUPERVISE_MAX_ATTEMPTS)" "$ec" "$attempt"
         fi
+        BS_SUPERVISE_REASON=retry
         sleep "$delay" &
         current_child=$!
         wait "$current_child"

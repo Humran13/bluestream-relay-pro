@@ -149,7 +149,8 @@ def encoder_usable(encoder):
 
 
 def estimate_cores(profile):
-    ratio = (profile.width * profile.height * profile.fps) / float(1280 * 720 * 30)
+    w, h, f = profile.width or 1280, profile.height or 720, profile.fps or 30      # "match source": judged at 720p30 until the source is known
+    ratio = (w * h * f) / float(1280 * 720 * 30)
     if getattr(profile, "encoder", "libx264") == "h264_nvenc":
         return round(0.4 * ratio + 0.2, 2)               # filters/composition still run on the CPU; the encode does not
     return round(BASE_CORES_720P30 * ratio * PRESET_FACTOR.get(profile.preset, 1.0), 2)
@@ -160,7 +161,7 @@ def assess(profile, cores=None):
     `block` means the output cannot fit this machine at all; `warn` means it will crowd other streams."""
     cores = cores or cpu_count()
     need = estimate_cores(profile)
-    res = "%dx%d at %d fps" % (profile.width, profile.height, profile.fps)
+    res = "%dx%d at %d fps" % (profile.width or 1280, profile.height or 720, profile.fps or 30) if profile.width else "the source's own size and rate (about 720p30 assumed)"
     if need > cores * 0.85:
         level, msg = "block", ("%s needs about %.1f CPU cores for a live encode but this server has %d. "
                                "Choose a lower resolution or frame rate." % (res, need, cores))

@@ -14,6 +14,7 @@
   var natural = {};            // media name -> natural height/width ratio (from the loaded preview image)
   var published = S.published, unpublished = S.unpublished, capacity = (S.capabilities || {}).assessment || null;
   var missing = [];
+  var INPLACE = !!P.target_relay, inplaceRaw = null;   // INPLACE: these overlays go onto the EXISTING stream named in P.target_relay
   var $ = function (s, r) { return (r || root).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || root).querySelectorAll(s)); };
 
@@ -117,7 +118,9 @@
   var NAMES = { text: "Text", image: "Image", rect: "Color", clock: "Clock", countdown: "Countdown", countup: "Countup", pomodoro: "Pomodoro",
                 ticker: "Ticker", nowplaying: "Now Playing", data: "Data", video: "Video", browser: "Browser" };
   function layerName(o) { return o.label || ((NAMES[o.kind] || o.kind) + ((o.kind === "image" || o.kind === "video") && o.asset ? ": " + o.asset : "")); }
-  function canvasAspect() { return P.profile.width / P.profile.height; }
+  function outW() { return P.profile.width || (playerInfo && playerInfo.width) || 1280; }
+  function outH() { return P.profile.height || (playerInfo && playerInfo.height) || 720; }
+  function canvasAspect() { return outW() / outH(); }
   function aspectOf(o) {
     if (o.kind === "browser") { return o.view_h / o.view_w; }
     var a = natural[o.asset]; return a ? a * (o.crop_h / o.crop_w) : null;
@@ -146,7 +149,11 @@
     return U.sourceFrame + q;
   }
   var bgKey = "", mon = "source", live = { relays: [], playlists: [] }, playerInfo = { mode: "none", state: "idle" };
-  var player = StudioPlayer.create(canvas, $("#ws-vbar"), { onState: function (i) { playerInfo = i; if (sel === -2) { refreshSourceInfo(); } } });
+  var player = StudioPlayer.create(canvas, $("#ws-vbar"), { onState: function (i) {
+    var dimsChanged = playerInfo && (playerInfo.width !== i.width || playerInfo.height !== i.height);
+    playerInfo = i; if (sel === -2) { refreshSourceInfo(); }
+    if (dimsChanged && !P.profile.width) { canvas.style.aspectRatio = outW() + " / " + outH(); $$(".ly", canvas).forEach(function (n) { paintLayer(+n.dataset.i); }); }
+  } });
   function hlsFor(kind, ref) {
     var list = kind === "relay" ? live.relays : live.playlists, row = list.filter(function (r) { return r.name === ref; })[0];
     return row || null;
@@ -155,6 +162,13 @@
     var p = P;
     if (mon === "output") {
       return stream.hls_url && stream.active ? { mode: "hls", url: stream.hls_url, label: "Studio output" } : { mode: "none", message: "The Studio stream is not running, so there is no live output to watch." };
+    }
+    if (INPLACE) {
+      var ip = stream.inplace || {}, comp = ip.marker === "on" && stream.plan === "overlay-live-composition";
+      if (stream.exists && !stream.active) { return { mode: "none", message: "'" + p.source_ref + "' is stopped, so there is no live picture. Start it on the Streams page; Studio will not start it for you." }; }
+      if (comp && inplaceRaw) { return { mode: "file", url: inplaceRaw }; }          // the loop file WITHOUT the layers that are burned into the stream
+      var u = stream.hls_url || (hlsFor("relay", p.source_ref) || {}).hls_url;
+      return u ? { mode: "hls", url: u, label: p.source_ref + (comp ? " (on air, with the published layers)" : "") } : { mode: "none", message: "Looking for the stream\u2026" };
     }
     if (p.source_kind === "media") { return p.source_ref ? { mode: "file", url: U.play.replace("__A__", encodeURIComponent(p.source_ref)) } : { mode: "none", message: "Choose a video from the Media panel." }; }
     if (p.source_kind === "relay" || p.source_kind === "playlist") {
@@ -184,7 +198,7 @@
     player.load(spec);
   }
   function refreshSourceInfo() { if (sel === -2 && mon === "source") { buildProps(); } }
-  var scaleFont = function (o) { return (o.size / P.profile.height * 100).toFixed(3) + "cqh"; };
+  var scaleFont = function (o) { return (o.size / outH() * 100).toFixed(3) + "cqh"; };
 
   function layerEl(o, i, live) {
     var kind = o.kind, e = h("div", { class: "ly ly-" + kind + (LOCKED[kind] ? " locked" : ""), "data-i": i, tabindex: live ? "0" : "-1", role: "button",
@@ -225,9 +239,16 @@
   }
   function renderCanvas() {
     var ro = mon === "output";
-    canvas.classList.toggle("program", ro); canvas.style.aspectRatio = P.profile.width + " / " + P.profile.height;
+    canvas.classList.toggle("program", ro); canvas.style.aspectRatio = outW() + " / " + outH();
     $$(".ly", canvas).forEach(function (n) { n.remove(); });
-    if (!ro) { shown().forEach(function (o, i) { var e = layerEl(o, i, canEdit && !o.locked); canvas.insertBefore(e, guides); paintLayer(i); }); }
+    var ipn = stream.inplace || {}, dupHidden = INPLACE && ipn.marker === "on" && stream.plan === "overlay-live-composition" && !inplaceRaw;
+    if (!ro) {
+      shown().forEach(function (o, i) {
+        // the on-air picture already contains the PUBLISHED layers: draw only what differs, or they would appear twice
+        if (dupHidden && published && published.overlays[i] && JSON.stringify(published.overlays[i]) === JSON.stringify(o)) { return; }
+        var e = layerEl(o, i, canEdit && !o.locked); canvas.insertBefore(e, guides); paintLayer(i);
+      });
+    }
     paintBackground();
     var note = $("#ws-monnote");
     note.textContent = ro ? "Actual encoded output of the Studio stream, about 10 s behind. Layers are already burned into this video." : "";
@@ -542,6 +563,16 @@
 
   function buildSourceProps() {
     props.innerHTML = "";
+    if (INPLACE) {
+      var ipp = stream.inplace || {};
+      props.appendChild(h("div", { class: "phead" }, [h("span", { class: "lic" }, [icon("stream")]), h("strong", { text: "Existing stream: " + P.target_relay })]));
+      props.appendChild(section("What this edits", [
+        h("p", { class: "fh", text: "You are adding overlays to the broadcast of '" + P.target_relay + "' itself. Its name, source, destinations and stream keys are not changed by Studio." }),
+        h("p", { class: "fh", text: "Everything you do here is a DRAFT until you press Activate. While the overlays are off, the stream keeps its plain stream-copy mode (no encoding, almost no CPU)." }),
+        h("p", { class: "fh", text: "The picture keeps the stream's own size and frame rate; its audio is passed through untouched." }),
+        h("p", { class: "fh", text: ipp.marker === "on" ? "Overlays are ON AIR. Text changes apply live without interruption; moving or adding layers switches the picture source (a pause of about 2 seconds; destinations stay connected)." : "Overlays are not on air." })]));
+      return;
+    }
     var kindSel = h("select", {}, [["media", "Video file (loops)"], ["slideshow", "Image slideshow"], ["audio", "Audio file with background"], ["relay", "Existing BlueStream stream"], ["playlist", "Existing playlist"]].map(function (p) {
       return h("option", { value: p[0], text: p[1], selected: P.source_kind === p[0] }); }));
     props.appendChild(h("div", { class: "phead" }, [h("span", { class: "lic" }, [icon("lock")]), h("strong", { text: "Background source" })]));
@@ -680,11 +711,25 @@
       renderSources();
     });
   }
+  function editExisting(relayName) {
+    api(U.overlayNew, { relay: relayName }).then(function (d) {
+      if (!d || !d.ok) { toast((d && d.error) || "Could not open that stream.", "error"); return; }
+      if (dirty && !window.confirm("You have unsaved changes in this project. Leave without saving?")) { return; }
+      dirty = false; window.location.href = U.projects + "/" + encodeURIComponent(d.name);
+    });
+  }
   function srcRow(kind, r) {
     var cur = P.source_kind === kind && P.source_ref === r.name;
-    return h("div", { class: "srcrow" + (cur ? " cur" : "") }, [h("span", { class: "badge2 " + (r.active ? "ok" : "off"), text: r.active ? "RUNNING" : "STOPPED" }), h("span", { class: "sn", text: r.name }),
-      h("button", { type: "button", class: "btn btn-sm " + (cur ? "btn-secondary" : ""), disabled: !canEdit || cur, text: cur ? "Current source" : "Use as source",
-        onclick: function () { setSource(kind, r.name); } })]);
+    var row = h("div", { class: "srcrow" + (cur ? " cur" : "") }, [h("span", { class: "badge2 " + (r.active ? "ok" : "off"), text: r.active ? "RUNNING" : "STOPPED" }), h("span", { class: "sn", text: r.name })]);
+    if (kind === "relay" && !INPLACE) {
+      row.appendChild(h("button", { type: "button", class: "btn btn-sm", disabled: !canEdit, text: "Edit this stream", title: "Open it here with its picture and add overlays to ITS broadcast (nothing changes until you activate)",
+        onclick: function () { editExisting(r.name); } }));
+    }
+    if (!INPLACE) {
+      row.appendChild(h("button", { type: "button", class: "btn btn-sm btn-secondary", disabled: !canEdit || cur, text: cur ? "Current source" : (kind === "relay" ? "Source for a new stream" : "Use as source"),
+        title: kind === "relay" ? "Make a SEPARATE Studio stream that reads this one" : "", onclick: function () { setSource(kind, r.name); } }));
+    }
+    return row;
   }
   function renderSources() {
     var box = $("#ws-sources"); box.innerHTML = "";
@@ -760,7 +805,9 @@
         if (!d.needs_restart) { return d; }
         setBusy(false);
         var ask = settings.general.confirm_apply;
-        return (ask ? confirmDialog("This changes the video pipeline", "Applying restarts this Studio stream (viewers see a short interruption, about 10-20 s). Only this stream restarts; every other stream is untouched. If the new pipeline does not become healthy, the previous layout is put back automatically.", "Apply and restart", true) : Promise.resolve(true)).then(function (go) {
+        return (ask ? confirmDialog(d.kind === "swap" ? "Switch the picture on air" : d.kind === "unit-restart" ? "One-time restart needed" : "This changes the video pipeline",
+          d.error || "Applying restarts this Studio stream (viewers see a short interruption, about 10-20 s). Only this stream restarts; every other stream is untouched. If the new pipeline does not become healthy, the previous layout is put back automatically.",
+          d.kind === "swap" ? "Switch now" : "Apply and restart", true) : Promise.resolve(true)).then(function (go) {
           if (!go) { return { cancelled: true }; }
           setBusy(true);
           return api(U.publish, { restart: true });
@@ -770,7 +817,7 @@
         if (!d || d.cancelled) { return; }
         if (!d.ok) { toast(d.error || "Apply failed.", "error"); return; }
         published = clone(P); published.revision = d.revision; unpublished = false; toast(d.message, "success"); renderStatus(); pollStatus();
-        if (d.mode === "restart") { verifyRestart(d); }
+        if (d.mode === "restart" || d.mode === "swap" || d.mode === "unit-restart") { verifyRestart(d); }
       });
     });
   }
@@ -810,7 +857,8 @@
     link(!dirty, "Draft", dirty ? "has unsaved edits" : "saved");
     var pubRev = published ? published.revision : 0;
     link(!unpublished && pubRev > 0, "Applied", pubRev ? (unpublished ? "revision " + pubRev + " is live; your draft differs" : "revision " + pubRev) : "nothing applied yet");
-    if (!stream.exists) { link(null, "Pipeline", "no Studio stream yet"); }
+    if (INPLACE) { inplaceChain(link, pubRev); }
+    else if (!stream.exists) { link(null, "Pipeline", "no Studio stream yet"); }
     else if (!stream.active) { link(null, "Pipeline", "stream stopped"); }
     else { var running = stream.revision ? "running revision " + stream.revision + (stream.plan ? " (" + stream.plan + ")" : "") : "starting";
       link(!stream.pending_restart && (!pubRev || String(stream.revision) === String(pubRev)), "Pipeline", running + (stream.pending_restart ? " - applied revision " + pubRev + " is waiting for a restart" : "")); }
@@ -841,13 +889,76 @@
     box.appendChild(pubs);
     // controls
     var c = $("#ws-ctl"); c.innerHTML = "";
-    if (!stream.exists) { c.appendChild(h("button", { type: "button", class: "btn ctl", disabled: !canEdit, onclick: createStream }, [icon("plus"), " Create Stream"])); }
+    if (INPLACE) { inplaceControls(c); }
+    else if (!stream.exists) { c.appendChild(h("button", { type: "button", class: "btn ctl", disabled: !canEdit, onclick: createStream }, [icon("plus"), " Create Stream"])); }
     else if (stream.active) { c.appendChild(h("button", { type: "button", id: "ws-stop", class: "btn btn-danger ctl", disabled: !canEdit, onclick: stopStream }, [icon("stop"), " Stop Streaming"])); }
     else { c.appendChild(h("button", { type: "button", id: "ws-start", class: "btn ctl go", disabled: !canEdit, onclick: startStream }, [icon("play"), " Start Streaming"])); }
     c.appendChild(h("button", { type: "button", class: "btn btn-secondary ctl", onclick: function () { openSettings("stream"); } }, [icon("gear"), " Settings"]));
-    if (!stream.exists) { c.appendChild(h("p", { class: "fh", text: "Source (left) is what Studio reads; the output stream is what viewers see. Creating it never changes the source stream." })); }
+    if (!INPLACE && !stream.exists) { c.appendChild(h("p", { class: "fh", text: "Source (left) is what Studio reads; the output stream is what viewers see. Creating it never changes the source stream." })); }
     c.appendChild(h("p", { class: "fh", text: unpublished ? "Unapplied changes: the stream keeps using the last applied revision." : "Draft matches the applied revision." }));
     var apply = $("#ws-apply"); apply.classList.toggle("pending", !!unpublished);
+    if (INPLACE) { apply.textContent = (stream.inplace && stream.inplace.marker === "on") ? "Apply to Live" : "Save as ready"; apply.title = (stream.inplace && stream.inplace.marker === "on") ? "Apply the saved draft to the overlays that are on air" : "Save the layout as ready. It is NOT on air until you press Activate."; }
+    var banner = $("#ws-inplace");
+    if (banner) {
+      banner.hidden = !INPLACE;
+      if (INPLACE) {
+        var onAir = stream.inplace && stream.inplace.marker === "on";
+        banner.className = "ws-inplace " + (onAir ? "air" : "draft");
+        banner.textContent = onAir ? "EDITING '" + P.target_relay + "' \u00b7 overlays are ON AIR. Changes here are drafts until you apply them." :
+          "EDITING '" + P.target_relay + "' \u00b7 DRAFT ONLY. Nothing is on air until you press Activate; the stream is unchanged.";
+      }
+    }
+  }
+  function inplaceChain(link, pubRev) {
+    var ip = stream.inplace || { marker: "none", swap: {} }, comp = stream.active && stream.plan === "overlay-live-composition";
+    if (ip.marker === "on") {
+      link(comp, "On air", comp ? "overlays are on air (revision " + stream.revision + ")" : ip.overlay === "tripped" ? "SWITCHED OFF automatically: the compositor kept failing and the plain stream was restored" : stream.active ? "switch is on; the stream is changing over\u2026" : "switch is on; overlays start with the stream");
+    } else { link(null, "On air", "no overlays: the stream is unchanged (stream copy)"); }
+    link(stream.exists ? (stream.active ? true : null) : false, "Stream '" + P.target_relay + "'", !stream.exists ? "not found" : stream.active ? (comp ? "encoding with overlays" : "running in stream-copy mode") : "stopped");
+    link(stream.active ? stream.state === "HEALTHY" || (!comp && stream.health === "HEALTHY") : null, "Output", stream.active ? (comp ? (stream.state || "starting") + (stream.speed ? ", encoder " + stream.speed + "x" : "") : (stream.health || "running")) : "not on air");
+  }
+  function inplaceControls(c) {
+    var ip = stream.inplace || { marker: "none", swap: {} }, on = ip.marker === "on", relay = P.target_relay;
+    c.appendChild(h("div", { class: "srow" }, [h("span", { class: "badge2 " + (on ? "bad" : "off"), text: on ? "OVERLAYS ON AIR" : "DRAFT ONLY" })]));
+    if (on) { c.appendChild(h("button", { type: "button", class: "btn btn-danger ctl", disabled: !canEdit, onclick: function () { switchOverlays(false); } }, [icon("stop"), " Remove overlays"])); }
+    else { c.appendChild(h("button", { type: "button", id: "ws-activate", class: "btn ctl go", disabled: !canEdit, onclick: function () { switchOverlays(true); } }, [icon("play"), " Activate overlays on '" + relay + "'"])); }
+    c.appendChild(h("button", { type: "button", class: "btn btn-secondary ctl", onclick: function () { openSettings("output"); } }, [icon("gear"), " Output settings"]));
+    c.appendChild(h("p", { class: "fh", text: ip.swap && ip.swap.ready ? "Live switching is available: the destination connections stay up while the picture is replaced (a pause of about 2 s)." :
+      ip.swap && ip.swap.reason === "OLD_SUPERVISOR" ? "'" + relay + "' was started before this update: the FIRST activation needs one restart (you are asked first). Later changes will not." :
+      ip.swap && ip.swap.reason === "NOT_RUNNING" ? "'" + relay + "' is stopped: overlays will be on air when it starts." : "" }));
+    c.appendChild(h("p", { class: "fh", text: "Start and stop '" + relay + "' on the Streams page. Its destinations and keys are managed on the Destinations page." }));
+  }
+  /* Activate / remove overlays on the existing stream. Saves and applies first so what goes on air is exactly what you see; any failure
+     restores the previous state on the server, and a compositor that cannot stay up is switched off automatically (plain stream restored). */
+  function switchOverlays(on) {
+    if (!canEdit) { return; }
+    Promise.resolve(dirty ? save() : true).then(function (ok) {
+      if (!ok) { return; }
+      return Promise.resolve(on && unpublished ? api(U.publish, { restart: false }).then(function (d) { if (d.ok) { published = clone(P); published.revision = d.revision; unpublished = false; } return d.ok ? true : (toast(d.error || "Could not save the layout as ready.", "error"), false); }) : true);
+    }).then(function (ok) {
+      if (!ok) { return; }
+      return api(on ? U.overlayActivate : U.overlayDeactivate, {}).then(function (d) {
+        if (d.ok || !d.needs_restart) { return d; }
+        return confirmDialog("One-time restart needed", d.error, "Restart '" + P.target_relay + "' and continue", true).then(function (go) { return go ? api(on ? U.overlayActivate : U.overlayDeactivate, { confirm_restart: true }) : { cancelled: true }; });
+      }).then(function (d) {
+        if (!d || d.cancelled) { return; }
+        if (!d.ok) { toast(d.error || "That did not complete.", "error"); pollStatus(); return; }
+        toast(d.message, "success");
+        var t0 = 0, banner = toastSticky(on ? "Putting the overlays on air\u2026" : "Removing the overlays\u2026");
+        (function check() {
+          t0++;
+          api(U.status).then(function (r) {
+            if (r && r.ok) { stream = Object.assign({ exists: false, active: false, publishers: [] }, r.stream); renderStatus(); bgKey = ""; renderCanvas(); }
+            var comp = stream.plan === "overlay-live-composition" && stream.active, ipo = (stream.inplace || {}).overlay;
+            if (on && comp && (stream.state === "HEALTHY" || stream.state === "DEGRADED")) { banner.remove(); toast("The overlays are on air.", "success"); return; }
+            if (on && ipo === "tripped") { banner.remove(); toast("The compositor could not stay up, so the overlays were switched off automatically and the plain stream was restored. The stream itself was not interrupted for good.", "error"); return; }
+            if (!on && stream.active && !comp) { banner.remove(); toast("The overlays are off: '" + P.target_relay + "' is back in stream-copy mode.", "success"); return; }
+            if (t0 >= (window.__bsVerifyTries || 22)) { banner.remove(); toast("Still waiting for '" + P.target_relay + "' to change over. Check its state on the Streams page.", "error"); return; }
+            setTimeout(check, window.__bsVerifyMs || 2000);
+          });
+        })();
+      });
+    });
   }
   function streamAction(action, okMsg) {
     return api(U.stream, { action: action }).then(function (d) {
@@ -942,8 +1053,8 @@
         pane.appendChild(section("Audio", [fld("Audio bitrate (kbps)", selOf([64, 96, 128, 160, 192, 256, 320].map(function (b) { return [b, b + " kbps"]; }), draftProfile.audio_kbps, function (v) { draftProfile.audio_kbps = parseInt(v, 10); })),
           h("p", { class: "muted", text: "Output audio is AAC, 44.1 kHz stereo. A source without sound gets a silent track so platforms accept the stream. There is no mixer: Studio plays the source's own audio." })]));
       } else if (tab === "video") {
-        pane.appendChild(section("Canvas and output", [fld("Output resolution (canvas)", selOf((caps.resolutions || []).map(function (r) { return [r, r.replace("x", " × ")]; }), draftProfile.width + "x" + draftProfile.height, function (v) { var p = v.split("x"); draftProfile.width = +p[0]; draftProfile.height = +p[1]; assess(); })),
-          fld("Frame rate", selOf([24, 25, 30, 60].map(function (f) { return [f, f + " fps"]; }), draftProfile.fps, function (v) { draftProfile.fps = parseInt(v, 10); assess(); })),
+        pane.appendChild(section("Canvas and output", [fld("Output resolution (canvas)", selOf((INPLACE ? ["0x0"] : []).concat(caps.resolutions || []).map(function (r) { return [r, r === "0x0" ? "Same as the stream (recommended)" : r.replace("x", " × ")]; }), draftProfile.width + "x" + draftProfile.height, function (v) { var p = v.split("x"); draftProfile.width = +p[0]; draftProfile.height = +p[1]; assess(); })),
+          fld("Frame rate", selOf((INPLACE ? [0] : []).concat([24, 25, 30, 60]).map(function (f) { return [f, f === 0 ? "Same as the stream (recommended)" : f + " fps"]; }), draftProfile.fps, function (v) { draftProfile.fps = parseInt(v, 10); assess(); })),
           fld("Scaling filter", selOf([["bilinear", "Bilinear (fastest)"], ["bicubic", "Bicubic (default)"], ["lanczos", "Lanczos (sharpest)"]], draftProfile.scaler, function (v) { draftProfile.scaler = v; }), "Used when the source is a different size from the canvas."), capNote]));
         pane.appendChild(h("p", { class: "muted", text: "The canvas is the output size. Layer positions are stored as percentages, so changing resolution never moves them. Settings are checked against this server's CPU." }));
         assess();
@@ -968,7 +1079,7 @@
     function listDests(area) {
       if (!dests.destinations.length) { area.appendChild(h("p", { class: "muted", text: "No destinations exist yet. Add one on the Destinations page." })); return; }
       dests.destinations.forEach(function (d) {
-        var c = h("input", { type: "checkbox", checked: destSel.indexOf(d.name) >= 0, disabled: !d.enabled || !canEdit });
+        var c = h("input", { type: "checkbox", checked: destSel.indexOf(d.name) >= 0, disabled: !d.enabled || !canEdit || INPLACE });
         c.addEventListener("change", function () { var i = destSel.indexOf(d.name); if (c.checked && i < 0) { destSel.push(d.name); } if (!c.checked && i >= 0) { destSel.splice(i, 1); } });
         area.appendChild(h("label", { class: "dest" }, [c, h("span", { class: "dn", text: d.display_name }), h("span", { class: "dp", text: d.platform }), h("span", { class: "dk " + (d.has_stream_key ? "ok" : "bad"), text: d.has_stream_key ? "key saved" : "no key" }),
           h("span", { class: "du", text: d.enabled ? d.server_url : "disabled" })]));
@@ -985,7 +1096,7 @@
         if (!d.ok) { toast(d.error || "Settings not saved.", "error"); return; }
         settings = d.settings; applySettings(); toast("Settings saved.", "success");
       });
-      var dp = (dests && stream.exists && canEdit) ? api(U.destinations, { ids: destSel }).then(function (d) { toast(d.ok ? "Destinations saved." : (d.error || "Destinations not saved."), d.ok ? "success" : "error"); pollStatus(); }) : Promise.resolve();
+      var dp = (dests && stream.exists && canEdit && !INPLACE) ? api(U.destinations, { ids: destSel }).then(function (d) { toast(d.ok ? "Destinations saved." : (d.error || "Destinations not saved."), d.ok ? "success" : "error"); pollStatus(); }) : Promise.resolve();
       Promise.all([pr, dp]).then(function () { if (v === "apply") { openSettings(tab); } });
     });
   }
@@ -1064,6 +1175,10 @@
   if (!canEdit) { toast("Studio is read-only: " + (S.licence_reason || "editing is not available") + ".", "error"); }
   pollStatus().then(schedulePoll); scheduleTextPoll(); refreshTexts();
   if (P.source_kind === "relay" || P.source_kind === "playlist") { loadSources(); }
+  if (INPLACE) {
+    api(U.monitor).then(function (d) { if (d && d.ok && d.source && d.source.raw_url) { inplaceRaw = d.source.raw_url; bgKey = ""; renderCanvas(); } });
+    var lt = $("#tab-sources"); if (lt) { lt.hidden = true; }
+  }
   var tz = h("datalist", { id: "ws-tzs" }, ["UTC", "Europe/London", "Europe/Paris", "Europe/Berlin", "America/New_York", "America/Chicago", "America/Los_Angeles", "Africa/Nairobi", "Africa/Lagos", "Asia/Dubai", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney"].map(function (z) { return h("option", { value: z }); }));
   root.appendChild(tz);
   window.studioWorkspace = { get project() { return P; }, select: select, setLayer: setLayer, addLayer: addLayer, save: save, isDirty: function () { return dirty; }, box: function (i) { return box(P.overlays[i]); }, natural: natural };

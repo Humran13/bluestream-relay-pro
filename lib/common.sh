@@ -949,8 +949,8 @@ bs_verify_ffmpeg_args() {
             -c:v|-c:a)
                 [ $((i + 1)) -lt "$n" ] || { bs_error "Option ${FFMPEG_ARGS[$i]} has no value."; return 1; }
                 # Studio relays (BS_ALLOW_ENCODE=1, set only by the studio branch of
-                # relay_build_ffmpeg_args) may encode with exactly libx264/aac.
-                if [ "${FFMPEG_ARGS[$((i + 1))]}" != "copy" ]                     && ! { [ "${BS_ALLOW_ENCODE:-0}" = "1" ] && case "${FFMPEG_ARGS[$((i + 1))]}" in libx264|aac) true ;; *) false ;; esac; }; then
+                # relay_build_ffmpeg_args) may encode with exactly libx264/h264_nvenc/aac.
+                if [ "${FFMPEG_ARGS[$((i + 1))]}" != "copy" ]                     && ! { [ "${BS_ALLOW_ENCODE:-0}" = "1" ] && case "${FFMPEG_ARGS[$((i + 1))]}" in libx264|aac|h264_nvenc) true ;; *) false ;; esac; }; then
                     bs_error "Option ${FFMPEG_ARGS[$i]} must be followed by 'copy', found '${FFMPEG_ARGS[$((i + 1))]}'."
                     return 1
                 fi

@@ -822,6 +822,50 @@ wc_op_studio_preview() {
     PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}"         "$BS_PYTHON" -m studio.cli "$kind" "$name" 2>/dev/null | wc_json object
 }
 
+# Can this relay's running supervisor replace its FFmpeg on demand? (A supervisor started before the update has no SIGUSR1 handler
+# and would be KILLED by the signal, so it is never signalled: activation then needs one explicit relay restart.)
+wc_relay_supervisor_pid() {
+    local pid
+    pid="$(systemctl show -p MainPID --value "$(bs_unit relay "$1")" 2>/dev/null)"
+    case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$pid"
+}
+
+wc_pid_catches_usr1() {
+    local mask
+    mask="$(sed -n 's/^SigCgt:[[:space:]]*//p' "/proc/$1/status" 2>/dev/null | head -n1)"
+    [ -n "$mask" ] || return 1
+    # SIGUSR1 is signal 10 -> bit 9 -> 0x200
+    [ $(( 0x$mask & 0x200 )) -ne 0 ]
+}
+
+wc_op_relay_swap_ready() {
+    local name="${1:-}" pid ready="no" reason="" active="no"
+    bs_valid_name "$name" || wc_fail "invalid relay name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "relay not found: $name" "NOT_FOUND"
+    if [ "$(systemctl is-active "$(bs_unit relay "$name")" 2>/dev/null)" = "active" ]; then
+        active="yes"
+        if pid="$(wc_relay_supervisor_pid "$name")" && wc_pid_catches_usr1 "$pid"; then
+            ready="yes"
+        else
+            reason="OLD_SUPERVISOR"
+        fi
+    else
+        reason="NOT_RUNNING"
+    fi
+    printf 'operation\0%s\0name\0%s\0active\0%s\0ready\0%s\0reason\0%s\0' "relay_swap_ready" "$name" "$active" "$ready" "$reason" | wc_json object
+}
+
+wc_op_relay_swap_source() {
+    local name="${1:-}" pid
+    bs_valid_name "$name" || wc_fail "invalid relay name" "INVALID_NAME"
+    relay_exists "$name" || wc_fail "relay not found: $name" "NOT_FOUND"
+    pid="$(wc_relay_supervisor_pid "$name")" || wc_fail "relay is not running" "NOT_RUNNING"
+    wc_pid_catches_usr1 "$pid" || wc_fail "this relay's supervisor predates the update; restart it once to enable live switching" "OLD_SUPERVISOR"
+    kill -USR1 "$pid" 2>/dev/null || wc_fail "could not signal the relay supervisor" "SIGNAL_FAILED"
+    printf 'operation\0%s\0name\0%s\0' "relay_swap_source" "$name" | wc_json object
+}
+
 wc_op_destination_create() {
     local name="${1:-}" display="${2:-}" platform="${3:-}" url="${4:-}"
     local enabled="${5:-}" key="" rc
@@ -1258,6 +1302,11 @@ wc_dispatch() {
             [ "$argcount" -ge 2 ] || wc_fail "missing target name" "MISSING_TARGET"
             [ "$argcount" -le 2 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
             wc_op_studio_preview "${operation#studio_}" "$name"
+            ;;
+        relay_swap_ready|relay_swap_source)
+            [ "$argcount" -ge 2 ] || wc_fail "missing target name" "MISSING_TARGET"
+            [ "$argcount" -le 2 ] || wc_fail "unexpected extra argument" "TOO_MANY_ARGUMENTS"
+            if [ "$operation" = "relay_swap_ready" ]; then wc_op_relay_swap_ready "$name"; else wc_op_relay_swap_source "$name"; fi
             ;;
         studio_proxy)
             # RAW (not JSON) bridge for the editor's on-demand video preview: a fragmented MP4 of ONE Media Library

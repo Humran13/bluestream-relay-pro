@@ -254,3 +254,35 @@ def build_copy_args(source, output_url, loop_file=False, ffmpeg="ffmpeg"):
     args += _source_input(None, source, loop_file)
     return args + ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "copy",
                    "-f", "flv", output_url]
+
+
+def build_overlay_args(project, input_tokens, output_url, workdir, assets_dir, profile, has_audio,
+                       fontfile=DEFAULT_FONT, ffmpeg="ffmpeg", ts_offset=0.0):
+    """Compose overlays onto the relay's OWN source: `input_tokens` are exactly the input options + `-i <source>` the plain relay would
+    use (same loop / reconnect / resolver handling), so the picture is identical apart from the overlays. One decode, one encode.
+    The source's audio is stream-copied (never re-encoded); a source without audio gets silent AAC so platforms accept the stream.
+    `profile` is the EFFECTIVE profile (match-source already resolved to real numbers)."""
+    import dataclasses
+    _check_bus(output_url)
+    toks = list(input_tokens)
+    if not toks or len(toks) > 40 or any((not isinstance(t, str)) or "\x00" in t for t in toks) or "-i" not in toks[:-1]:
+        raise ValidationError("invalid source arguments")
+    if not (160 <= profile.width <= 3840 and 90 <= profile.height <= 2160 and profile.width % 2 == 0 and profile.height % 2 == 0
+            and 10 <= profile.fps <= 60 and 500 <= profile.video_kbps <= 20000):
+        raise ValidationError("invalid output size")
+    for path in (workdir, assets_dir, fontfile):
+        _check_path(path)
+    for o in project.overlays:
+        o.validate()
+    p2 = dataclasses.replace(project, profile=profile)
+    args = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "warning", "-nostats", "-progress", "pipe:2"] + toks
+    extra_args, graph, last, extra = _compose(p2, workdir, assets_dir, fontfile, has_audio, 1, 1, None)
+    args += extra_args
+    if has_audio:
+        amap, ain = ["-map", "0:a:0?", "-c:a", "copy"], []
+    else:
+        amap = ["-map", "%d:a" % (1 + extra), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest"]
+        ain = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+    shift = ["-output_ts_offset", "%.3f" % ts_offset] if ts_offset > 0 else []
+    args += ain + ["-filter_complex", graph, "-map", "[%s]" % last] + amap + _video_encode_opts(profile) + shift + ["-f", "flv", output_url]
+    return args

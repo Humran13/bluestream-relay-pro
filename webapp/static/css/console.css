@@ -934,3 +934,6 @@ td.col-check { width: 2.5rem; text-align: center; }
 .plist { padding-left: 1.2rem; } .plist li { display: flex; align-items: center; gap: .3rem; margin: .2rem 0; } .plist .pn { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lrename { flex: 1; min-width: 0; } .mi.off { opacity: .5; cursor: not-allowed; }
 #ws-sources[hidden], #ws-media[hidden], #ws-mactions[hidden] { display: none; }
+.ws-inplace { flex: 1 1 100%; padding: .35rem .9rem; font-size: .82rem; font-weight: 650; border-bottom: 1px solid var(--border); }
+.ws-inplace[hidden] { display: none; } .ws-inplace.draft { background: var(--warn-soft); color: var(--warn); } .ws-inplace.air { background: #7a1f1f; color: #fff; }
+.exlist { display: grid; gap: .4rem; margin: .5rem 0; } .exrow { display: flex; align-items: center; gap: .6rem; margin: 0; } .exrow .sn { flex: 1; font-weight: 600; } .exrow .btn { margin: 0; }

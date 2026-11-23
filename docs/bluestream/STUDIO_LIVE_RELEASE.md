@@ -29,3 +29,9 @@ Same guarded one-command activation as before (dry run first; stops unless the D
 * Playlist "shuffle / repeat one" are not offered: the existing playlist engine loops its list in order only.
 * Measured soak is minutes, not the 72 h gate (still PENDING); CPU numbers are from a container, not a VPS.
 * The 630 historical publisher restarts cannot be explained from the repository; run the forensics script.
+
+## Round 12 addendum: Edit Existing Stream (branch `feature/studio-live-compositor`)
+New shared-code changes (each falls back to the ORIGINAL behaviour; a relay without an overlay switch file is byte-identical, asserted by a test): `lib/relay.sh` (overlay hook, timeline epoch), `lib/supervise.sh` (SIGUSR1 swap), `lib/common.sh` (verifier accepts `h264_nvenc` - previously NVENC Studio commands were refused by the verifier), `config/systemd/run-relay.sh` (sidecar cleanup trap), `web-ctl` + `engine.py` (`relay_swap_ready` read op, `relay_swap_source` op; no sudoers change).
+**Already-running relays are not affected by deployment** (they keep the old code in memory). For Dino: after deployment the activation script prints whether live switching is available; with the old supervisor it is not, and the first Activate asks for one explicit restart.
+**Rollback:** `studio_activate_rollback.sh` restores every replaced file (the new hook files included). A leftover `overlay-<relay>.json` is ignored by the old code. To take overlays off an on-air stream without code changes: press "Remove overlays" (a swap), or stop/start the relay after deleting `/var/lib/bluestream/studio/overlay-<relay>.json`.
+**Limits:** swap stall ~2 s (connection stays up; platform tolerance untested); browser source still off; NVENC on real hardware untested; the raw (overlay-free) preview exists only for local-file streams, other types show the on-air picture and hide layers identical to the published ones; no 72 h run.

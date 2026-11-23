@@ -353,7 +353,7 @@ test.describe("Studio workspace", () => {
     // structural (a new layer): explicit confirmation, then the new revision must come up
     await addSource(page, "Clock");
     await page.click("#ws-apply");
-    await expect(page.locator(".sdlg")).toContainText("restarts this Studio stream");
+    await expect(page.locator(".sdlg")).toContainText("controlled restart of this Studio stream");
     await page.locator(".sdlg .btn", { hasText: "Apply and restart" }).click();
     await expect(page.locator(".toast.success", { hasText: /is running \(live-composition\)/ })).toBeVisible({ timeout: 20000 });
   });
@@ -454,16 +454,16 @@ test.describe("Studio workspace", () => {
     await expect(page.locator("#ws-sources .srcrow", { hasText: "sleepy" })).toContainText("STOPPED");
     await expect(page.locator("#ws-sources")).toContainText("Watching a stream is read-only");
     // stopped relay: clear message, no pretend picture
-    await page.locator("#ws-sources .srcrow", { hasText: "sleepy" }).getByRole("button").click();
+    await page.locator("#ws-sources .srcrow", { hasText: "sleepy" }).getByRole("button", { name: "Source for a new stream" }).click();
     await expect(page.locator(".ws-vstate")).toContainText("stopped");
     await expect(page.locator("video.ws-video")).toBeHidden();
     // unreachable (running but its HLS is gone): disconnected + retry, never a fake still
-    await page.locator("#ws-sources .srcrow", { hasText: "ghost" }).getByRole("button").click();
+    await page.locator("#ws-sources .srcrow", { hasText: "ghost" }).getByRole("button", { name: "Source for a new stream" }).click();
     test.skip(!(await canH264(page)), "H.264/MSE unavailable: the playing-stream part is UNTESTED in this browser");
     await expect(page.locator(".ws-vstate")).toContainText(/Disconnected|not reachable/, { timeout: 20000 });
     await expect(page.locator("#ws-vbar >> text=Retry")).toBeVisible();
     // running relay: its real HLS plays
-    await page.locator("#ws-sources .srcrow", { hasText: "dino" }).getByRole("button").click();
+    await page.locator("#ws-sources .srcrow", { hasText: "dino" }).getByRole("button", { name: "Source for a new stream" }).click();
     const v = page.locator("video.ws-video");
     await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
     await expect(page.locator(".ws-vstate")).toContainText("LIVE");
@@ -557,6 +557,87 @@ test.describe("Studio workspace", () => {
     await page.locator('.sdlg [aria-label="Move later"]').first().click();
     await page.locator(".sdlg .btn", { hasText: "Create playlist" }).click();
     await expect(page.locator(".toast.success", { hasText: "created" })).toBeVisible();
+  });
+
+  // ---- Edit an EXISTING stream (in place): its own picture, its own destinations, overlays only when activated ----------------
+  async function existing(page, prefix = "ex") {
+    const relay = prefix + "-" + uid();
+    await login(page);
+    await page.request.get(BASE + "/__e2e/relay/" + relay);
+    await page.goto(BASE + "/console/studio");
+    await page.locator('[data-edit="' + relay + '"]').click();
+    await page.waitForURL(new RegExp("/console/studio/" + relay + "-overlay"));
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    return relay;
+  }
+
+  test("Edit existing stream: opens from the Studio page as a DRAFT with the stream's own controls, no second stream, no destination switching", async ({ page }) => {
+    const relay = await existing(page);
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await expect(page.locator("#ws-inplace")).toContainText(relay);
+    await expect(page.locator("#ws-ctl")).toContainText("Activate overlays on '" + relay + "'");
+    for (const gone of ["Create Stream", "Start Streaming", "Stop Streaming"]) { await expect(page.locator("#ws-ctl")).not.toContainText(gone); }
+    await expect(page.locator("#ws-apply")).toHaveText("Save as ready");
+    await expect(page.locator("#ws-status .chain")).toContainText("the stream is unchanged");
+    await page.click("#ws-canvas");                                                         // background row: read-only explanation
+    await page.locator("#ws-layers .lrow.base .lname").click();
+    await expect(page.locator("#ws-props")).toContainText("Its name, source, destinations and stream keys are not changed");
+    await expect(page.locator("#ws-props select")).toHaveCount(0);                          // the source cannot be changed here
+    await page.click("#ws-settings");
+    await page.locator(".sset-tab", { hasText: "Stream" }).click();
+    await expect(page.locator(".sset-pane input[type=checkbox]:not([disabled])")).toHaveCount(0);   // destinations are shown, never edited here
+    await page.locator(".sdlg-foot .btn", { hasText: "Cancel" }).click();
+    const again = await page.evaluate(async (u) => (await fetch(u, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": document.getElementById("ws").dataset.csrf }, body: JSON.stringify({ action: "start" }) })).status,
+      "/console/studio/" + relay + "-overlay/stream.json");
+    expect(again).toBe(409);                                                                // Studio cannot start/stop or create a publisher for it
+  });
+
+  test("Edit existing stream: save as ready is NOT on air; Activate switches the picture (swap), Apply is hot or confirmed, Remove returns to plain copy", async ({ page }) => {
+    const relay = await existing(page);
+    await addSource(page, "Text");
+    await prop(page, "text").fill("ON AIR");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "NOT on air" })).toBeVisible();
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await page.click("#ws-activate");
+    await expect(page.locator(".toast.success", { hasText: "The overlays are on air" })).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("#ws-inplace")).toContainText("ON AIR");
+    await expect(page.locator("#ws-ctl")).toContainText("Remove overlays");
+    await expect(page.locator("#ws-status .chain")).toContainText("overlays are on air");
+    await expect(page.locator("#ws-apply")).toHaveText("Apply to Live");
+    // content-only edit: live, no dialog
+    await prop(page, "text").fill("NEW HEADLINE");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "no interruption" })).toBeVisible();
+    await expect(page.locator(".sdlg")).toHaveCount(0);
+    // moving the layer changes the picture: confirmation that says what happens, then it must come up healthy
+    await prop(page, "x").fill("40");
+    await page.click("#ws-apply");
+    await expect(page.locator(".sdlg")).toContainText("destination connections stay up");
+    await page.locator(".sdlg .btn", { hasText: "Switch now" }).click();
+    await expect(page.locator(".toast.success", { hasText: /is running \(overlay-live-composition\)/ })).toBeVisible({ timeout: 20000 });
+    // remove: back to stream copy, same stream
+    await page.click("text=Remove overlays");
+    await expect(page.locator(".toast.success", { hasText: "stream-copy mode" })).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await expect(page.locator("#ws-ctl")).toContainText("Activate overlays");
+    expect(relay.length).toBeGreaterThan(2);
+  });
+
+  test("Edit existing stream: a stream started before the update needs an explicit one-time restart; declining changes nothing", async ({ page }) => {
+    await existing(page, "oldsup");
+    await addSource(page, "Text");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "NOT on air" })).toBeVisible();
+    await expect(page.locator("#ws-ctl")).toContainText("FIRST activation needs one restart");
+    await page.click("#ws-activate");
+    await expect(page.locator(".sdlg")).toContainText("restarted once");
+    await expect(page.locator(".sdlg")).toContainText("same stream key");
+    await page.locator(".sdlg .btn", { hasText: "Cancel" }).click();
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");                  // declined: nothing happened
+    await page.click("#ws-activate");
+    await page.locator(".sdlg .btn", { hasText: /Restart .* and continue/ }).click();
+    await expect(page.locator(".toast.success", { hasText: "The overlays are on air" })).toBeVisible({ timeout: 20000 });
   });
 
   test("a logged-out visitor is sent to the login page and the JSON API answers 401", async ({ page, request }) => {

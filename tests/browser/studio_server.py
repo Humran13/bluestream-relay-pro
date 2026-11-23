@@ -88,10 +88,27 @@ class E2EEngine(FakeEngine):
         self.payloads[("dest", name)] = list(ids)
         return self._mutation("relay_destinations_set", name, tuple(ids))
 
+    def relay_swap_ready(self, name):
+        old = name.startswith("oldsup")
+        return {"active": "yes", "ready": "no" if old else "yes", "reason": "OLD_SUPERVISOR" if old else ""}
+
+    def relay_swap_source(self, name):
+        return self._mutation("relay_swap_source", name)
+
     def read(self, op, *values):
         if op == "studio_health":
-            from webapp.studio import store
+            from webapp.studio import overlay as ovl, store
             name = values[0]
+            mk = ovl.read_marker(name)
+            if mk is not None:                  # an EXISTING stream with overlays switched on/off (in-place)
+                try:
+                    rev = store.load_published(mk["project"]).revision
+                except Exception:
+                    rev = 0
+                on = mk["enabled"]
+                return {"state": "HEALTHY", "detail": "encoding at real time", "speed": "1.0", "fps": "25", "cpu_cores": "0.3", "rss_mb": "300",
+                        "dropped_frames": "0", "restarts": "0", "revision": str(rev), "plan": "overlay-live-composition" if on else "", "pending_restart": "",
+                        "overlay": "on" if on else "off"}
             try:
                 pub = store.load_published(name)
                 rev, plan = pub.revision, ("live-composition" if pub.runs_live_encode else "prerender-then-copy")
@@ -107,9 +124,10 @@ class E2EEngine(FakeEngine):
 
 
 payloads = {
-    "relay_list": [{"name": "dino", "type": "local-file", "active": "yes", "health": "HEALTHY", "health_detail": "hls fresh"},
+    "relay_list": [{"name": "dino", "type": "local-file", "active": "yes", "health": "HEALTHY", "health_detail": "hls fresh", "source": tmp + "/media/motion.mp4"},
                    {"name": "sleepy", "type": "url", "active": "no", "health": "STOPPED", "health_detail": ""},
-                   {"name": "ghost", "type": "url", "active": "yes", "health": "HEALTHY", "health_detail": ""}],
+                   {"name": "ghost", "type": "url", "active": "yes", "health": "HEALTHY", "health_detail": ""},
+                   {"name": "oldsup", "type": "url", "active": "yes", "health": "HEALTHY", "health_detail": ""}],
     "playlist_list": [{"name": "promo", "active": "yes", "health": "HEALTHY"}],
     "snapshot": {"domain": "127.0.0.1:4874", "https_configured": "no"},
     "media_list": [{"name": "logo.png", "size": 2048}, {"name": "badge.png", "size": 1024}, {"name": "banner.png", "size": 4096},
@@ -127,6 +145,13 @@ def hls(kind, name, f):
     if name == "ghost":
         abort(404)
     return send_from_directory(str(FIX / "hls"), f)
+
+
+@app.route("/__e2e/relay/<name>", methods=["GET"])
+def e2e_relay(name):
+    """Test-only: an existing running relay (so every test edits its OWN stream and parallel browsers never share state)."""
+    payloads["relay_list"].append({"name": name, "type": "local-file", "active": "yes", "health": "HEALTHY", "health_detail": "", "source": tmp + "/media/motion.mp4"})
+    return "ok"
 
 
 if not shutil.which("ffmpeg"):

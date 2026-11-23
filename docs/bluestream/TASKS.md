@@ -41,3 +41,6 @@
 | Docker validation | real nginx-rtmp + FFmpeg e2e, real-account permissions, editor x3 engines, 10-min benchmark, container-restart recovery | I,V (Docker) |
 | Docker-first deployment | docker/ image + Compose + bluestream.sh preflight/up/down/diag, bsunitd, DOCKER.md | I,V (Docker Desktop); U (real VPS, real YouTube, Linux preflight) |
 | Release | staging, failure injection on systemd, 4-vCPU benchmark, 72 h soak | B/PENDING |
+| Existing stream | edit an existing relay in Studio (open from the Studio page / Live sources), draft vs on air, activate/remove, publishers untouched | I,V (container, real stack) U(real VPS, real YouTube) |
+| Existing stream | swap-based activation keeps ONE platform session; continuous timeline; A/V sync; hot text; structural edits; failure containment | I,V (container) |
+| Existing stream | frame-seamless switching | not possible with this architecture (measured ~2 s stall) |

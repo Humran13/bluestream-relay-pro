@@ -292,12 +292,86 @@ relay_set_page_source() {
 # ---------------------------------------------------------------------------
 # ffmpeg argument construction (stream copy / remux)
 # ---------------------------------------------------------------------------
+# ---- Studio overlays on an EXISTING relay (opt-in: a marker file written by the dashboard) -------------------------------------
+# The relay keeps its name, bus stream, publishers and keys. Only this FFmpeg changes from `-c copy` to decode+overlay+encode.
+# ANY problem (no marker, disabled, nothing to draw, encoder unusable, admission refused, circuit breaker tripped, bad project)
+# returns non-zero and the caller builds the ORIGINAL stream-copy command line, so a failed activation can never leave the stream
+# without a picture.
+RELAY_OVERLAY_SIDECAR_PID=""
+
+# ONE continuous timeline on the bus. Every producer FFmpeg starts its own timestamps at 0; nginx-rtmp hands them to the destination
+# publishers as they are, and a backwards jump of less than ~10 s makes a copy-mode publisher stamp frames 1 ms apart (a frozen, then
+# sped-up picture at the platform; measured). So a producer that replaces an earlier one carries `-output_ts_offset <seconds since the
+# first producer of this supervisor started>`: its timestamps continue where the last one ended (the stall shows up as an honest gap).
+# Only relays that use Studio overlays get this; every other relay's command line is unchanged.
+RELAY_BUS_EPOCH=""
+relay_bus_ts_offset() {
+    local now
+    now="$(date +%s.%N)"
+    if [ -z "$RELAY_BUS_EPOCH" ]; then
+        RELAY_BUS_EPOCH="$now"
+        printf '0'
+        return 0
+    fi
+    awk -v n="$now" -v e="$RELAY_BUS_EPOCH" 'BEGIN { printf "%.3f", n - e }'
+}
+
+relay_overlay_marker_present() {
+    [ "$RELAY_TYPE" != "studio" ] || return 1
+    [ -f "${BLUESTREAM_STUDIO_DIR:-/var/lib/bluestream/studio}/overlay-${RELAY_NAME}.json" ]
+}
+
+relay_overlay_stop_sidecar() {
+    if [ -n "$RELAY_OVERLAY_SIDECAR_PID" ]; then
+        kill "$RELAY_OVERLAY_SIDECAR_PID" 2>/dev/null || true
+        wait "$RELAY_OVERLAY_SIDECAR_PID" 2>/dev/null || true
+        RELAY_OVERLAY_SIDECAR_PID=""
+    fi
+}
+
+relay_overlay_start_sidecar() {
+    if [ -n "$RELAY_OVERLAY_SIDECAR_PID" ] && kill -0 "$RELAY_OVERLAY_SIDECAR_PID" 2>/dev/null; then
+        return 0
+    fi
+    PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}" python3 -m studio.cli widgets "$RELAY_NAME" @overlay &
+    RELAY_OVERLAY_SIDECAR_PID=$!
+}
+
+# usage: relay_overlay_build <input option/URL tokens...>   (sets FFMPEG_ARGS + BS_ALLOW_ENCODE on success)
+relay_overlay_build() {
+    relay_overlay_marker_present || { relay_overlay_stop_sidecar; return 1; }
+    local _tmp
+    _tmp="$(mktemp)" || return 1
+    # A fresh sidecar for every (re)build: it adopts exactly the project revision this FFmpeg is built from (its structure baseline),
+    # and removes/recreates the progress-port file BEFORE overlay-argv attaches FFmpeg's progress to it.
+    relay_overlay_stop_sidecar
+    relay_overlay_start_sidecar
+    local _off
+    _off="$(relay_bus_ts_offset)"
+    if ! PYTHONPATH="${BLUESTREAM_STUDIO_PYPATH:-/usr/local/lib/bluestream}" python3 -m studio.cli overlay-argv "$RELAY_NAME" --ts-offset "$_off" --reason "${BS_SUPERVISE_REASON:-start}" -- "$@" > "$_tmp"; then
+        rm -f "$_tmp"
+        relay_overlay_stop_sidecar
+        return 1
+    fi
+    FFMPEG_ARGS=()
+    mapfile -d '' FFMPEG_ARGS < "$_tmp"
+    rm -f "$_tmp"
+    if [ "${#FFMPEG_ARGS[@]}" -lt 12 ]; then
+        FFMPEG_ARGS=()
+        relay_overlay_stop_sidecar
+        return 1
+    fi
+    BS_ALLOW_ENCODE=1
+    return 0
+}
+
 relay_build_ffmpeg_args() {
     local input=()
     local output=()
     local url="$RELAY_URL"
     FFMPEG_ARGS=()
     BS_ALLOW_ENCODE=0
+    [ -n "$RELAY_BUS_EPOCH" ] || relay_bus_ts_offset > /dev/null   # the timeline epoch is this supervisor's first build
 
     case "$RELAY_TYPE" in
         studio)
@@ -361,6 +435,18 @@ relay_build_ffmpeg_args() {
             ;;
     esac
 
+    # Overlays on this existing relay (see above). Falls through to the plain stream copy on ANY problem.
+    local _plain_off=""
+    if relay_overlay_marker_present; then
+        relay_overlay_build "${input[@]}" && return 0
+        # fell back to the plain stream copy: it must continue the same timeline too (the epoch was advanced by the attempt above only on first use)
+        _plain_off="$(relay_bus_ts_offset)"
+    else
+        relay_overlay_stop_sidecar
+    fi
+    BS_ALLOW_ENCODE=0
+    FFMPEG_ARGS=()
+
     output=(
         -map 0:v:0
         -map "0:a:0?"
@@ -369,6 +455,9 @@ relay_build_ffmpeg_args() {
         -f flv
         "${BLUESTREAM_RTMP_BASE}/${BLUESTREAM_RTMP_APP_RELAY}/${RELAY_NAME}"
     )
+    if [ -n "$_plain_off" ] && [ "$_plain_off" != "0" ]; then
+        output=( -map 0:v:0 -map "0:a:0?" -c:v copy -c:a copy -output_ts_offset "$_plain_off" -f flv "${BLUESTREAM_RTMP_BASE}/${BLUESTREAM_RTMP_APP_RELAY}/${RELAY_NAME}" )
+    fi
 
     FFMPEG_ARGS=( -nostdin -y -loglevel warning "${input[@]}" "${output[@]}" )
     return 0
