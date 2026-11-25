@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 ENABLED = (os.environ.get("BS_DOCKER_PERMS") == "1" and hasattr(os, "geteuid") and os.geteuid() == 0
@@ -78,6 +79,10 @@ class PreviewBridgePermissionTests(unittest.TestCase):
         if user:
             return sh(["runuser", "-u", user, "--"] + env + cmd)
         return sh(env + cmd)
+
+    def cli_bytes(self, *args):
+        return subprocess.run([sys.executable, "-m", "studio.cli"] + list(args), env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     # ---- the premise: the console user really cannot read the data ---------------------------
     def test_console_user_cannot_read_media_or_hls_directly(self):
@@ -162,6 +167,48 @@ class PreviewBridgePermissionTests(unittest.TestCase):
         r = self.cli("frame", "none")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout.split("\0")[:4], ["mime", "", "data", ""])
+
+    def test_video_proxy_distinguishes_missing_media_and_emits_playable_bytes(self):
+        missing = self.cli_bytes("proxy", "missing.mp4")
+        self.assertEqual((missing.returncode, missing.stdout), (44, b""))
+
+        valid = self.cli_bytes("proxy", "clip.mp4")
+        self.assertEqual(valid.returncode, 0, valid.stderr.decode("utf-8", "replace"))
+        out = self.base + "/proxy-valid.mp4"
+        with open(out, "wb") as fh:
+            fh.write(valid.stdout)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream=codec_name,width,height", "-of", "json", out],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(probe.returncode, 0, probe.stderr.decode("utf-8", "replace"))
+        self.assertIn(b'"codec_name": "h264"', probe.stdout)
+
+    def test_flask_hardened_bridge_returns_404_or_verified_playable_video(self):
+        """Exercise the production fallback: Flask cannot use a direct path; root CLI drops to the media owner."""
+        from webapp.studio import preview
+        from webapp.test_console import FakeEngine, login, make_app
+
+        engine = FakeEngine({})
+        engine.proxy_argv = lambda asset: [sys.executable, "-m", "studio.cli", "proxy", asset]
+        state = tempfile.mkdtemp(prefix="route-", dir=self.base)
+        self.addCleanup(shutil.rmtree, state, True)
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            app, _ = make_app(state, engine=engine, config={"STUDIO_ENABLED": True})
+            client = app.test_client()
+            login(client)
+            with mock.patch.object(preview, "open_proxy", return_value=None):
+                missing = client.get("/console/studio/media/missing.mp4/play.mp4")
+                valid = client.get("/console/studio/media/clip.mp4/play.mp4")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual((valid.status_code, valid.mimetype), (200, "video/mp4"), repr(valid.data[:200]))
+        out = self.base + "/route-valid.mp4"
+        with open(out, "wb") as fh:
+            fh.write(valid.data)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream=codec_name", "-of", "json", out],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(probe.returncode, 0, probe.stderr.decode("utf-8", "replace"))
+        self.assertIn(b'"codec_name": "h264"', probe.stdout)
 
 
 if __name__ == "__main__":

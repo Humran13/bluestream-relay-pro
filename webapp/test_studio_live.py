@@ -18,6 +18,14 @@ from webapp.test_studio_workspace import WS
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def mp4_box(kind, payload=b""):
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+FMP4 = (mp4_box(b"ftyp", b"isom\0\0\0\1isom") + mp4_box(b"moov", b"init") +
+        mp4_box(b"moof", b"fragment") + mp4_box(b"mdat", b"video" * 100))
+
+
 class StructureTests(unittest.TestCase):
     def fp(self, *ov, **kw):
         return Project("p", kw.get("kind", "media"), kw.get("ref", "a.mp4"), list(ov)).structure_fingerprint()
@@ -248,14 +256,32 @@ class VideoPreviewTests(WS):
         self.assertIn("ultrafast", tc)
         self.assertIn("scale=-2:540", tc)
 
+    def test_preview_service_failures_are_not_reported_as_missing_media(self):
+        with mock.patch.object(preview, "safe_media_path", return_value="/managed/loop.mp4"), \
+                mock.patch.object(preview, "_run_completed", side_effect=PermissionError("service account missing")):
+            with self.assertRaises(preview.ProxyError) as raised:
+                preview.start_proxy("loop.mp4")
+        self.assertEqual((raised.exception.kind, raised.exception.http_status), ("unavailable", 503))
+
+        with mock.patch.object(preview, "safe_media_path", return_value="/managed/loop.mp4"), \
+                mock.patch.object(preview, "_run_completed", side_effect=subprocess.TimeoutExpired(["python"], 5)):
+            with self.assertRaises(preview.ProxyError) as raised:
+                preview.start_proxy("loop.mp4")
+        self.assertEqual((raised.exception.kind, raised.exception.http_status), ("timeout", 504))
+
     def test_route_is_authenticated_validated_and_streams_video_mp4(self):
         self.assertEqual(self.app.test_client().get("/console/studio/media/loop.mp4/play.mp4").status_code, 401)
         for bad in ("..%2Fx.mp4", "logo.png", "song.mp3", "notes.txt"):
             self.assertEqual(self.client.get("/console/studio/media/%s/play.mp4" % bad).status_code, 404, bad)
+        self.assertEqual(self.client.get("/console/studio/media/ghost.mp4/play.mp4").status_code, 404)
 
         class Proc:
             def __init__(self):
-                self.stdout, self.killed = io.BytesIO(b"\x00\x00\x00\x18ftypmp42" + b"x" * 100000), False
+                self.stdout, self.killed = io.BytesIO(FMP4), False
+            def poll(self):
+                return None
+            def terminate(self):
+                self.killed = True
             def kill(self):
                 self.killed = True
             def wait(self, timeout=None):
@@ -266,12 +292,60 @@ class VideoPreviewTests(WS):
             body = r.get_data()
         self.assertEqual((r.status_code, r.mimetype), (200, "video/mp4"))
         self.assertEqual(r.headers["Cache-Control"], "no-store")
-        self.assertTrue(body.startswith(b"\x00\x00\x00\x18ftyp"))
+        self.assertEqual(body, FMP4)
         self.assertTrue(proc.killed)                                          # the process never outlives the request
 
-    def test_missing_file_is_a_clean_404_and_concurrency_is_capped(self):
-        with mock.patch.object(preview, "open_proxy", return_value=None):
-            self.assertEqual(self.client.get("/console/studio/media/loop.mp4/play.mp4").status_code, 404)
+    def test_hardened_bridge_errors_are_known_before_http_200_and_resources_are_released(self):
+        self.engine.proxy_argv = lambda asset: ["trusted-bridge", "studio_proxy", asset]
+
+        class Proc:
+            def __init__(self, code, data=b""):
+                self.stdout, self.code, self.closed = io.BytesIO(data), code, False
+            def poll(self):
+                return self.code
+            def terminate(self):
+                self.closed = True
+            def kill(self):
+                self.closed = True
+            def wait(self, timeout=None):
+                return self.code
+
+        # Repeated failures exercise slot release; a leak would turn the third request into 429.
+        for code, status in ((preview.PROXY_EXIT_NOT_FOUND, 404), (preview.PROXY_EXIT_INVALID, 422),
+                             (preview.PROXY_EXIT_UNAVAILABLE, 503), (preview.PROXY_EXIT_FAILED, 502)):
+            proc = Proc(code)
+            with mock.patch.object(preview, "open_proxy", return_value=None), mock.patch("subprocess.Popen", return_value=proc):
+                r = self.client.get("/console/studio/media/loop.mp4/play.mp4")
+            self.assertEqual(r.status_code, status, code)
+            self.assertTrue(proc.closed, code)
+            self.assertTrue(proc.stdout.closed, code)
+
+        # A privileged bridge that really emits fMP4 remains playable after those failures.
+        proc = Proc(0, FMP4)
+        with mock.patch.object(preview, "open_proxy", return_value=None), mock.patch("subprocess.Popen", return_value=proc):
+            r = self.client.get("/console/studio/media/loop.mp4/play.mp4")
+            self.assertEqual((r.status_code, r.get_data()), (200, FMP4))
+        self.assertTrue(proc.closed)
+
+    def test_bridge_start_failure_is_503_and_malformed_encoder_output_is_502(self):
+        self.engine.proxy_argv = lambda asset: ["trusted-bridge", "studio_proxy", asset]
+        with mock.patch.object(preview, "open_proxy", return_value=None), \
+                mock.patch("subprocess.Popen", side_effect=OSError("not installed")):
+            self.assertEqual(self.client.get("/console/studio/media/loop.mp4/play.mp4").status_code, 503)
+
+        class BadProc:
+            def __init__(self):
+                self.stdout = io.BytesIO(mp4_box(b"ftyp", b"isom"))
+            def poll(self):
+                return 1
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                return 1
+        with mock.patch.object(preview, "open_proxy", return_value=None), mock.patch("subprocess.Popen", return_value=BadProc()):
+            self.assertEqual(self.client.get("/console/studio/media/loop.mp4/play.mp4").status_code, 502)
+
+    def test_concurrency_is_capped(self):
 
         # no free preview slot: a clear 429, never an unbounded number of FFmpeg processes
         import tempfile

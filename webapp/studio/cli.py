@@ -437,12 +437,14 @@ def cmd_thumb(asset):
 
 def cmd_proxy(media):
     """Editor video preview: fragmented MP4 of one Media Library video on stdout (run by web-ctl as root; FFmpeg runs as the media owner)."""
-    started = preview.open_proxy(media)
-    if started is None:
-        sys.stderr.write("studio: no preview available\n")
-        return 1
+    try:
+        started = preview.start_proxy(media)
+    except preview.ProxyError as exc:
+        sys.stderr.write("studio: preview unavailable (%s)\n" % exc.kind)
+        return exc.exit_status
     proc, _mode = started
     out = sys.stdout.buffer
+    written = 0
     try:
         while True:
             chunk = proc.stdout.read(65536)
@@ -450,12 +452,13 @@ def cmd_proxy(media):
                 break
             out.write(chunk)
             out.flush()
+            written += len(chunk)
     except (BrokenPipeError, OSError):
         pass                                   # the browser went away: stop encoding at once
     finally:
-        proc.kill()
-        proc.wait()
-    return 0
+        code = preview.proxy_returncode(proc)
+        preview.terminate_proxy(proc)
+    return 0 if written or code == 0 else preview.PROXY_EXIT_FAILED
 
 
 def cmd_plan(name):

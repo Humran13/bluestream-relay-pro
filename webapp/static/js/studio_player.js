@@ -10,7 +10,7 @@
 
   function create(canvas, bar, opts) {
     opts = opts || {};
-    var video = el("video", "ws-video"), badge = el("div", "ws-vstate"), hls = null, retryTimer = null, retries = 0, spec = { mode: "none" };
+    var video = el("video", "ws-video"), badge = el("div", "ws-vstate"), hls = null, retryTimer = null, resumeTimer = null, playAttempt = 0, retries = 0, spec = { mode: "none" };
     video.setAttribute("playsinline", ""); video.muted = true; video.autoplay = true; video.preload = "auto";
     video.hidden = true; badge.setAttribute("aria-live", "polite");
     canvas.insertBefore(video, canvas.firstChild); canvas.appendChild(badge);
@@ -41,17 +41,38 @@
     }
 
     function teardown() {
-      clearTimeout(retryTimer);
+      playAttempt++; // invalidate a pending play() rejection from the old source
+      clearTimeout(retryTimer); clearTimeout(resumeTimer);
       if (hls) { try { hls.destroy(); } catch (e) { /* ignore */ } hls = null; }
       try { video.pause(); } catch (e) { /* ignore */ }
       video.removeAttribute("src"); try { video.load(); } catch (e) { /* ignore */ }
     }
-    function tryPlay() { var p = video.play(); if (p && p.catch) { p.catch(function () { /* autoplay blocked: user presses Play */ setState("paused"); }); } }
+    function tryPlay() {
+      var attempt = ++playAttempt, p = video.play();
+      if (p && p.catch) {
+        p.catch(function () {
+          // Firefox may reject the old source's play promise after load() has
+          // already selected a stopped relay. Never let that stale callback
+          // overwrite the new source's authoritative status.
+          if (attempt === playAttempt && (spec.mode === "file" || spec.mode === "hls")) { setState("paused"); }
+        });
+      }
+    }
 
     function startFile(url) {
+      clearTimeout(resumeTimer);
       setState("loading");
       video.src = url + (url.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now();
       tryPlay();
+    }
+
+    function recoverStalledFile() {
+      if (spec.mode !== "file" || video.paused) { return; }
+      var stalledAt = video.currentTime;
+      clearTimeout(resumeTimer);
+      resumeTimer = setTimeout(function () {
+        if (spec.mode === "file" && !video.paused && video.currentTime <= stalledAt + 0.05) { startFile(spec.url); }
+      }, 1500);
     }
     function startHls(url) {
       setState("loading");
@@ -79,7 +100,8 @@
 
     video.addEventListener("playing", function () { setState("playing"); });
     video.addEventListener("pause", function () { if (!video.ended && st.state === "playing") { setState("paused"); } });
-    video.addEventListener("waiting", function () { if (st.state === "playing") { setState("loading"); } });
+    video.addEventListener("waiting", function () { if (st.state === "playing") { setState("loading"); } recoverStalledFile(); });
+    video.addEventListener("stalled", recoverStalledFile);
     video.addEventListener("loadedmetadata", function () { setState(st.state, st.detail); });
     video.addEventListener("ended", function () {
       if (spec.mode === "file" && st.loop) { startFile(spec.url); } else { setState("ended"); }
@@ -88,7 +110,30 @@
       if (spec.mode === "file") { setState("error", "This video cannot be previewed here (unreadable, unsupported, or too many previews are open). The stream itself is not affected."); }
       else if (spec.mode === "hls" && !hls) { scheduleRetry("The stream is not reachable."); }
     });
-    bPlay.addEventListener("click", function () { if (video.paused) { tryPlay(); } else { video.pause(); } });
+    bPlay.addEventListener("click", function () {
+      if (video.paused) {
+        var resumeAt = video.currentTime;
+        tryPlay();
+        // Some browsers cancel an unknown-length streaming response while a
+        // file preview is paused. If Play unpauses the element but no media
+        // time advances, reopen this preview (with startFile's cache buster)
+        // instead of leaving a misleading, permanently stalled Play state.
+        if (spec.mode === "file") {
+          clearTimeout(resumeTimer);
+          resumeTimer = setTimeout(function () {
+            if (spec.mode === "file" && !video.paused && video.currentTime <= resumeAt + 0.05) { startFile(spec.url); }
+          }, 1000);
+        }
+      }
+      else {
+        video.pause();
+        // WebKit can emit "waiting" immediately before "pause". In that case
+        // the pause event's conservative state guard does not change the label,
+        // even though the element really is paused. A direct user action is
+        // authoritative, so reflect it synchronously in the local controls.
+        setState("paused");
+      }
+    });
     bRestart.addEventListener("click", function () { if (spec.mode === "file") { startFile(spec.url); } });
     bLoop.addEventListener("click", function () { st.loop = !st.loop; bLoop.textContent = "Loop: " + (st.loop ? "on" : "off"); bLoop.setAttribute("aria-pressed", st.loop ? "true" : "false"); });
     bMute.addEventListener("click", function () { st.muted = !st.muted; video.muted = st.muted; bMute.textContent = st.muted ? "Preview muted" : "Preview sound on"; bMute.setAttribute("aria-pressed", st.muted ? "true" : "false"); });

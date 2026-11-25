@@ -829,44 +829,61 @@ def register_api(console, find_relay, engine_of):
             return Response("sign in", status=401)
         if not preview.ASSET_RE.match(asset or "") or media.classify(asset) != "video":
             return Response("not found", status=404)
+        rows = library()
+        if rows is not None and asset not in {row.get("name") for row in rows if isinstance(row, dict)}:
+            # The web account cannot stat the production media directory.  The
+            # engine's privileged listing is therefore the safe preflight for
+            # a definitely absent asset; an unavailable listing is not treated
+            # as absence and the checked proxy bridge remains authoritative.
+            return Response("not found", status=404)
         if not play_slots.acquire(blocking=False):
             return Response("Too many previews are open. Close another Studio tab and retry.", status=429)
-        proc = None
+        proc, startup = None, b""
+        cleanup_lock, cleaned = threading.Lock(), [False]
+
+        def cleanup():
+            with cleanup_lock:
+                if cleaned[0]:
+                    return
+                cleaned[0] = True
+            preview.terminate_proxy(proc)
+            play_slots.release()
+
         try:
             started = preview.open_proxy(asset)           # works where this user can read the file
             if started:
                 proc = started[0]
             else:
                 try:                                       # hardened VPS: read-only privileged bridge, raw stdout
-                    proc = subprocess.Popen(engine_of().proxy_argv(asset), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    proc = subprocess.Popen(engine_of().proxy_argv(asset), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                            close_fds=True, start_new_session=(os.name == "posix"))
                 except Exception as exc:                  # EngineError, AttributeError (no bridge), OSError
                     current_app.logger.info("studio play unavailable for '%s': %s", asset, exc)
-                    proc = None
-            if proc is None:
-                play_slots.release()
-                return Response("This video cannot be previewed (missing or unreadable).", status=404)
+                    raise preview.proxy_error("unavailable") from exc
+            startup = preview.await_proxy_ready(proc)
+        except preview.ProxyError as exc:
+            cleanup()
+            current_app.logger.info("studio play refused for '%s': %s", asset, exc.kind)
+            return Response(str(exc), status=exc.http_status)
         except Exception:
-            play_slots.release()
+            cleanup()
             raise
 
         def gen():
             deadline = time.monotonic() + 6 * 3600
             try:
+                yield startup
                 while time.monotonic() < deadline:
                     chunk = proc.stdout.read(65536)
                     if not chunk:
                         break
                     yield chunk
             finally:                                        # also runs when the browser disconnects
-                try:
-                    proc.kill()
-                    proc.stdout.close()                    # closes the pipe: the privileged bridge's next write fails and it stops FFmpeg
-                    proc.wait(timeout=5)
-                except Exception:                           # noqa: BLE001
-                    pass
-                play_slots.release()
-        return Response(stream_with_context(gen()), mimetype="video/mp4",
-                        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+                cleanup()
+        response = Response(stream_with_context(gen()), mimetype="video/mp4",
+                            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        response.call_on_close(cleanup)
+        return response
 
     def _hls_urls(kind, name):
         """Public HLS URL of a relay/playlist from the engine's trusted server config (never the Host header)."""
