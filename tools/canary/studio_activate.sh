@@ -17,7 +17,7 @@
 #    and is never reported as successful unless every file was restored byte-for-byte and the dashboard is healthy.
 set -u
 umask 022
-EXPECT="cb8876a5ed28893cf833cf46b6bc88c8efbb5260"        # the code commit that was tested; deployed paths must match it exactly
+EXPECT="f69a87d40475f3dd6f1c970674903a0f33227bda"        # the code commit that was tested; deployed paths must match it exactly
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${BS_ACT_SRC:-$(cd "$HERE/../.." && pwd)}"
 ROOTFS="${BS_ACT_ROOT:-}"                                 # test hook only: prefix for every system path
