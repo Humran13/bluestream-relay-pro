@@ -34,7 +34,7 @@ DEFAULTS = {
         "layer_down": "Ctrl+ArrowDown",
     },
     "advanced": {
-        "status_poll_s": 5,           # how often stream status is refreshed (2-60 s)
+        "status_poll_s": 10,          # how often stream status is refreshed while a stream runs (2-60 s); idle streams are polled half as often
         "text_preview_s": 5,          # how often live text (clock/countdown) previews refresh (2-60 s)
         "video_thumbs": True,         # load video thumbnails in the media browser
     },

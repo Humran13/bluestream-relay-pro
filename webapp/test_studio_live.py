@@ -269,6 +269,25 @@ class VideoPreviewTests(WS):
                 preview.start_proxy("loop.mp4")
         self.assertEqual((raised.exception.kind, raised.exception.http_status), ("timeout", 504))
 
+    def test_preview_is_paced_only_with_options_this_ffmpeg_really_has(self):
+        class R:
+            def __init__(self, out):
+                self.stdout = out
+        for out, want in (("-readrate <float> -readrate_initial_burst <double>", ["-readrate", "2", "-readrate_initial_burst", "8"]),
+                          ("-readrate <float>", ["-readrate", "2"]), ("-re  read at native rate", [])):
+            preview._PACING.clear()
+            with mock.patch.object(preview.subprocess, "run", return_value=R(out)):
+                self.assertEqual(preview.pacing_args(), want, out)
+        preview._PACING.clear()
+        with mock.patch.object(preview.subprocess, "run", side_effect=OSError("no ffmpeg")):
+            self.assertEqual(preview.pacing_args(), [])                          # unknown -> unpaced, never a broken command
+        preview._PACING.clear()
+        preview._PACING["ffmpeg"] = ["-readrate", "2"]
+        a = preview.proxy_args("/m/a.mp4", "copy")
+        self.assertEqual(a[a.index("-readrate"):a.index("-readrate") + 2], ["-readrate", "2"])
+        self.assertLess(a.index("-readrate"), a.index("-i"))                      # an INPUT option: must precede -i
+        preview._PACING.clear()
+
     def test_route_is_authenticated_validated_and_streams_video_mp4(self):
         self.assertEqual(self.app.test_client().get("/console/studio/media/loop.mp4/play.mp4").status_code, 401)
         for bad in ("..%2Fx.mp4", "logo.png", "song.mp3", "notes.txt"):
@@ -437,6 +456,61 @@ class VideoPreviewRealTests(unittest.TestCase):
     def test_unknown_and_non_video_files_are_refused(self):
         self.assertIsNone(preview.open_proxy("missing.mp4"))
         self.assertIsNone(preview.open_proxy("notes.txt"))
+
+
+class BridgeLoadTests(WS):
+    """The editor polls the privileged bridge every few seconds. Each `sudo web-ctl` call costs ~150-250 ms of CPU (measured), so repeated
+    identical READS are shared for a few seconds - and any mutation clears the sharing so the UI never shows pre-change state."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.dict(os.environ, {"BLUESTREAM_STUDIO_BRIDGE_CACHE": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+        from webapp.test_console import login, make_app
+        os.makedirs(self._tmp.name + "/second")
+        self.app, _ = make_app(self._tmp.name + "/second", engine=self.engine)
+        self.client = self.app.test_client()
+        login(self.client)
+        self.reads = []
+        self.payloads["relay_list"] = [{"name": "ws", "type": "studio", "active": "yes", "health": "HEALTHY"}]
+        self.engine.read = lambda op, *v: (self.reads.append(op), {"studio_health": {"state": "HEALTHY"}, "relay_publisher_status": []}[op])[1]
+        self.project()
+
+    def poll(self):
+        return self.client.get("/console/studio/ws/status.json").get_json()
+
+    def test_repeated_polls_share_the_bridge_reads(self):
+        for _ in range(5):
+            self.assertTrue(self.poll()["ok"])
+        self.assertEqual(self.engine.calls.count("relay_list"), 1)
+        self.assertEqual(self.reads.count("studio_health"), 1)
+        self.assertEqual(self.reads.count("relay_publisher_status"), 1)
+
+    def test_a_mutation_clears_the_sharing_at_once(self):
+        self.poll()
+        self.payloads["relay_list"] = [{"name": "ws", "type": "studio", "active": "no", "health": "STOPPED"}]
+        self.assertTrue(self.poll()["stream"]["active"])                      # still within the sharing window: the old picture
+        self.jpost("/console/studio/ws/stream.json", {"action": "stop"})       # a mutation
+        self.assertFalse(self.poll()["stream"]["active"])                     # fresh immediately, never pre-change state
+
+    def test_a_failing_read_is_never_cached(self):
+        self.payloads["relay_list"] = RuntimeError("bridge down")
+        self.assertFalse(self.poll()["stream"]["exists"])
+        self.payloads["relay_list"] = [{"name": "ws", "type": "studio", "active": "yes", "health": "HEALTHY"}]
+        self.assertTrue(self.poll()["stream"]["exists"])
+
+    def test_it_can_be_switched_off(self):
+        with mock.patch.dict(os.environ, {"BLUESTREAM_STUDIO_BRIDGE_CACHE": "0"}):
+            from webapp.test_console import login, make_app
+            os.makedirs(self._tmp.name + "/third")
+            app, _ = make_app(self._tmp.name + "/third", engine=self.engine)
+            c = app.test_client()
+            login(c)
+        before = self.engine.calls.count("relay_list")
+        for _ in range(3):
+            c.get("/console/studio/ws/status.json")
+        self.assertEqual(self.engine.calls.count("relay_list") - before, 3)
 
 
 class ForensicsScriptTests(unittest.TestCase):

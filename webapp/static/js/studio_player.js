@@ -50,11 +50,16 @@
     function tryPlay() {
       var attempt = ++playAttempt, p = video.play();
       if (p && p.catch) {
-        p.catch(function () {
+        p.catch(function (err) {
           // Firefox may reject the old source's play promise after load() has
           // already selected a stopped relay. Never let that stale callback
           // overwrite the new source's authoritative status.
-          if (attempt === playAttempt && (spec.mode === "file" || spec.mode === "hls")) { setState("paused"); }
+          if (attempt !== playAttempt || !(spec.mode === "file" || spec.mode === "hls")) { return; }
+          if (st.state === "error" || st.state === "disconnected") { return; }
+          // A source the browser cannot open (a 4xx/5xx answer, a file that is not a video) rejects play() with NotSupportedError
+          // and sets video.error; Edge reports that here BEFORE (or without) an error event. That is an ERROR, not a "paused" video.
+          if (video.error || (err && err.name === "NotSupportedError")) { onMediaError(); return; }
+          setState("paused");
         });
       }
     }
@@ -106,10 +111,11 @@
     video.addEventListener("ended", function () {
       if (spec.mode === "file" && st.loop) { startFile(spec.url); } else { setState("ended"); }
     });
-    video.addEventListener("error", function () {
+    function onMediaError() {
       if (spec.mode === "file") { setState("error", "This video cannot be previewed here (unreadable, unsupported, or too many previews are open). The stream itself is not affected."); }
       else if (spec.mode === "hls" && !hls) { scheduleRetry("The stream is not reachable."); }
-    });
+    }
+    video.addEventListener("error", onMediaError);
     bPlay.addEventListener("click", function () {
       if (video.paused) {
         var resumeAt = video.currentTime;

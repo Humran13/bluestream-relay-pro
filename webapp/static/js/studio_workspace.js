@@ -988,7 +988,7 @@
   }
   function schedulePoll() {
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(function () { (document.hidden ? Promise.resolve() : pollStatus()).then(schedulePoll); }, Math.max(2, settings.advanced.status_poll_s) * 1000);
+    pollTimer = setTimeout(function () { (document.hidden ? Promise.resolve() : pollStatus()).then(schedulePoll); }, Math.max(2, settings.advanced.status_poll_s) * (stream.active ? 1 : 2) * 1000);   // every poll costs privileged bridge calls: idle streams half as often
   }
   var textPoll = null;
   function scheduleTextPoll() { clearInterval(textPoll); textPoll = setInterval(function () { if (!document.hidden) { refreshTexts(); } }, Math.max(2, settings.advanced.text_preview_s) * 1000); }

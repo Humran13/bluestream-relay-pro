@@ -5,6 +5,9 @@ Label: **V1 feature set implemented; release gate PENDING. NOT beta-ready.**
 Open gates (see RELEASE_CHECKLIST.md): B staging VPS, C benchmark + 72 h soak, D payments provider, E sign-off of
 sandbox/isolation on a real host.
 
+## Round 13 (OBS-workflow verification) - TESTED LOCALLY, NOT ON THE VPS
+Verified with real media in real browsers (Edge, Firefox): library video plays and loops, existing streams show moving video, project opens in the workspace, layers can be added over the playing background, selection/properties work. Fixed: editor CPU waste (bridge read cache, slower/idle polling, paced + thread-capped preview), Edge error-state misreport, smoke-test fragility. Details: STUDIO_LIVE_RELEASE.md (Round 13), TESTS.md. Dino/destinations never touched. NOT verified: the deployed VPS, real YouTube, GPU, 72 h.
+
 ## Live production round (round 11, branch `feature/studio-live-compositor`) - TESTED LOCALLY, NOT ON THE VPS
 Diagnosis: a real server-side compositor already existed (one FFmpeg decode+compose+encode per Studio stream; text/countdown via sidecar files). What was
 missing: proof, a playing picture in the editor, and a clear line between WATCHING a stream and CHANGING what viewers see. Design and limits:

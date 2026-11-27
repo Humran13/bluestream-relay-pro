@@ -48,6 +48,15 @@ shutil.copy(FIX / "motion.mp4", tmp + "/media/motion.mp4")    # a real, moving H
 for name in ("loop.mp4", "intro.webm", "song.mp3"):         # placeholders: listed, not decoded here
     with open(tmp + "/media/" + name, "wb") as fh:
         fh.write(b"\x00" * 1024)
+if shutil.which("ffmpeg") and os.environ.get("E2E_REAL_MEDIA") == "1":
+    # REAL media so the real preview proxy (stream copy AND the 540p transcode) is exercised by a real browser
+    import subprocess
+    ff = ["ffmpeg", "-v", "error", "-y"]
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=5", "-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-c:v", "libx264",
+                         "-pix_fmt", "yuv420p", "-g", "25", "-c:a", "aac", "-shortest", tmp + "/media/loop.mp4"], check=True)
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=5", "-c:v", "libvpx", "-b:v", "800k", tmp + "/media/intro.webm"], check=True)
+    with open(tmp + "/media/broken.mp4", "wb") as fh:
+        fh.write(os.urandom(4096))                              # listed but not a video: must fail clearly, never spin forever
 
 
 class E2EEngine(FakeEngine):
@@ -131,7 +140,7 @@ payloads = {
     "playlist_list": [{"name": "promo", "active": "yes", "health": "HEALTHY"}],
     "snapshot": {"domain": "127.0.0.1:4874", "https_configured": "no"},
     "media_list": [{"name": "logo.png", "size": 2048}, {"name": "badge.png", "size": 1024}, {"name": "banner.png", "size": 4096},
-                   {"name": "loop.mp4", "size": 5 * 1024 * 1024}, {"name": "motion.mp4", "size": 157100}, {"name": "intro.webm", "size": 900000}, {"name": "song.mp3", "size": 3000000}],
+                   {"name": "loop.mp4", "size": 5 * 1024 * 1024}, {"name": "motion.mp4", "size": 157100}, {"name": "broken.mp4", "size": 4096}, {"name": "intro.webm", "size": 900000}, {"name": "song.mp3", "size": 3000000}],
     "destination_list": [{"name": "yt-main", "display_name": "YouTube main", "platform": "youtube", "server_url": "rtmps://a.rtmps.youtube.com/live2/<redacted>",
                           "enabled": "yes", "has_stream_key": "yes", "attached_count": "0"}],
 }
@@ -171,4 +180,4 @@ if not shutil.which("ffmpeg"):
     preview.open_proxy = lambda asset: (_Clip(), "copy") if asset == "motion.mp4" else None
 
 print("studio e2e server ready; admin password:", ADMIN_PASSWORD, "state:", state_dir, flush=True)
-app.run(host="127.0.0.1", port=int(os.environ.get("STUDIO_E2E_PORT", "4874")), threaded=True)
+app.run(host=os.environ.get("STUDIO_E2E_HOST", "127.0.0.1"), port=int(os.environ.get("STUDIO_E2E_PORT", "4874")), threaded=True)

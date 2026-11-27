@@ -140,3 +140,12 @@ relay show clear states; the Studio output plays in "Live output" mode; staged r
 Deployment self-test `studio_smoke.py`: 37/37. Full Python suite in the container as non-root: all pass except one test that only works when pytest is started in
 `webapp/` (as CI does).
 Not covered: a real VPS, real YouTube, real GPU, browser-source renderer on a real host, 72 h.
+## Round 13 - OBS-workflow verification (local, container, NOT a VPS)
+Real-backend browser tests (`E2E_REAL_MEDIA=1`, server next to real FFmpeg 6.1, Edge + Firefox; bundled Chromium/WebKit cannot decode H.264 -> skipped, UNTESTED there):
+H.264 file stream-copied at 1280x720 with measured motion and continuous looping over 2 loop boundaries; VP8 file via 540p transcode; text/image/countdown/video layers added over the
+playing background, each selectable with exactly one highlight in canvas and list, properties editable, layers persist after reload; undecodable file shows a clear error + Retry and a
+good file plays afterwards; no uncaught page errors or console errors in any of them.
+Efficiency (`tools/docker/proxy_cpu_probe.py`, one core): preview copy 62 % -> 4 %, 540p transcode 287 % -> 60 %. Bridge cache: repeated polls share reads, mutation clears, failures not cached (`BridgeLoadTests`).
+Encoded output / integration re-run in the container as non-root: `test_studio_output_frames`, `test_studio_inplace_stack`, `test_studio_inplace`, `test_studio_live` (BS_INPLACE=1) = 70 passed, 1 skipped
+(in-place: one platform session, one publisher start, stall 1.1-3.3 s, breaker recovery 4.9 s, A/V -33..+22 ms; CPU copy 1.7 % vs composed 40-69 %).
+Deployment self-test `studio_smoke.py`: 38/38 against the real-media container server.

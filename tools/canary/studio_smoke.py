@@ -59,6 +59,25 @@ class Client:
     def get(self, path):
         return self.request("GET", path)
 
+    def head(self, path, n=262144, timeout=40):
+        """First `n` bytes of a (possibly endless) streaming response, then hang up. -> (status, content-type, bytes)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        headers = {"Host": "127.0.0.1"}
+        if self.cookie:
+            headers["Cookie"] = "session=" + self.cookie
+        try:
+            conn.request("GET", path, headers=headers)
+            r = conn.getresponse()
+            data = b""
+            while len(data) < n:
+                chunk = r.read(min(65536, n - len(data)))
+                if not chunk:
+                    break
+                data += chunk
+            return r.status, r.getheader("Content-Type", ""), data
+        finally:
+            conn.close()
+
     def jget(self, path):
         s, _, body = self.get(path)
         try:
@@ -123,6 +142,20 @@ def roundtrip(c):
         check("Studio: video preview of a missing file is a clean 404", s == 404, "HTTP %d" % s)
         s, d = c.jget("/console/studio/capabilities.json")
         check("Studio: capabilities answer without running any encoder test", s == 200 and d.get("ok") is True and any(e.get("id") == "libx264" for e in d.get("encoders", [])), "HTTP %d" % s)
+        s, d = c.jget("/console/studio/media.json?kind=video")
+        vids = d.get("items", []) if s == 200 and isinstance(d, dict) else []
+        if vids:
+            tried = []
+            for vid in vids[:3]:                       # one unreadable file in the library must not fail the check: any playable one proves the path
+                st, ctype, data = c.head("/console/studio/media/%s/play.mp4" % vid["name"])
+                tried.append("%s=HTTP %d/%d bytes" % (vid["name"], st, len(data)))
+                if st == 200 and ctype.startswith("video/mp4") and b"ftyp" in data[:64] and len(data) > 1000:
+                    break
+            else:
+                st = 0
+            check("Studio: video preview of an existing Media Library video delivers playable MP4 bytes (not an empty 200)", st == 200, "; ".join(tried))
+        else:
+            print("SKIP  video preview: the Media Library has no video yet (upload one and re-run the smoke test)")
         s, d = c.jget("/console/studio/settings.json")
         check("Studio: settings API answers", s == 200 and d.get("ok") is True, "HTTP %d" % s)
         s, d = c.jpost("%s/publish.json" % page, {}, page)

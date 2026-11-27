@@ -20,6 +20,8 @@ function mkpng(w, h) {
 }
 
 async function login(page) {
+  // EVERY test also fails on an uncaught script error in the page (the console is part of the product)
+  if (!page.__errs) { page.__errs = []; page.on("pageerror", (e) => page.__errs.push(String(e && e.message || e))); }
   await page.goto(BASE + "/console/login");
   await page.fill('input[name="username"]', "admin");
   await page.fill('input[name="password"]', PASSWORD);
@@ -58,6 +60,7 @@ const rowAct = async (page, text, label) => { const row = page.locator("#ws-laye
 const saveDraft = async (page) => { await page.click("#ws-save"); await expect(page.locator("#ws-dirty")).toBeHidden(); };
 
 test.describe("Studio workspace", () => {
+  test.afterEach(async ({ page }) => { expect(page.__errs || [], "uncaught script errors in the page").toEqual([]); });
   test.describe.configure({ timeout: 90000 });
 
   test("layout: toolbar, media, canvas, properties, layers, stream and controls", async ({ page }) => {
@@ -638,6 +641,105 @@ test.describe("Studio workspace", () => {
     await page.click("#ws-activate");
     await page.locator(".sdlg .btn", { hasText: /Restart .* and continue/ }).click();
     await expect(page.locator(".toast.success", { hasText: "The overlays are on air" })).toBeVisible({ timeout: 20000 });
+  });
+
+  // ---- REAL backend media (E2E_REAL_MEDIA=1: the server runs next to real FFmpeg, so the REAL preview proxy serves real files) -------------
+  const REAL = process.env.E2E_REAL_MEDIA === "1";
+  /** Collects uncaught page errors and console errors (resource 404s for thumbnails of deliberately broken files are not script errors). */
+  const watchErrors = (page) => { const e = []; page.on("pageerror", (x) => e.push("pageerror: " + x.message)); page.on("console", (m) => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) { e.push("console: " + m.text()); } }); return e; };
+  const timeOf = (page) => page.locator("video.ws-video").evaluate((v) => v.currentTime);
+
+  test("REAL media: an H.264 file plays by stream copy, loops continuously, with no script errors", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    expect(await v.evaluate((e) => [e.videoWidth, e.videoHeight])).toEqual([1280, 720]);            // copy path: untouched resolution
+    expect(await motion(page)).toBeGreaterThan(2);
+    // the 5 s clip loops: playback passes the boundary and keeps moving, repeatedly
+    for (let round = 0; round < 2; round++) {
+      await expect.poll(() => timeOf(page), { timeout: 20000 }).toBeGreaterThan(3.5);
+      await expect.poll(() => v.evaluate((e) => e.currentTime < 2.5 && !e.paused && e.readyState >= 2), { timeout: 20000 }).toBe(true);
+      expect(await motion(page)).toBeGreaterThan(2);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: a non-H.264 file is converted once for the preview (540p) and plays", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="intro.webm"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 30000 }).toBe(true);
+    expect(await v.evaluate((e) => e.videoHeight)).toBe(540);
+    expect(await motion(page)).toBeGreaterThan(2);
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: layers are added, selected, highlighted and edited while the background video keeps playing", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    const name = await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    const t0 = await timeOf(page);
+    await addSource(page, "Text");
+    await prop(page, "text").fill("LIVE TEXT");
+    await page.locator('#ws-media .smb-card[data-name="logo.png"]').click(); await page.click("text=Add as image layer");
+    await addSource(page, "Countdown");
+    await page.locator('#ws-media .smb-card[data-name="motion.mp4"]').click(); await page.click("text=Add as video overlay");
+    expect(await layerCount(page)).toBe(4);
+    // every layer can be selected from the canvas: exactly one is highlighted, in the canvas AND in the list, and its properties follow
+    const expectKind = ["Text", "Image", "Countdown", "Video"];
+    for (let i = 0; i < 4; i++) {
+      await page.locator("#ws-layers .lrow:not(.base)").nth(3 - i).locator(".lname").click();
+      await expect(page.locator("#ws-canvas .ly.sel")).toHaveCount(1);
+      await expect(page.locator('#ws-canvas .ly.sel')).toHaveAttribute("data-i", String(i));
+      await expect(page.locator("#ws-layers .lrow.sel")).toHaveCount(1);
+      await expect(page.locator("#ws-props .phead")).toContainText(expectKind[i]);
+    }
+    // the picture layers really show pictures (real thumbnails of the real files)
+    await expect.poll(() => page.locator("#ws-canvas .ly-image img.ly-img").evaluate((e) => e.naturalWidth)).toBeGreaterThan(0);
+    await expect.poll(() => page.locator("#ws-canvas .ly-video img.ly-img").evaluate((e) => e.naturalWidth)).toBeGreaterThan(0);
+    await expect(page.locator("#ws-canvas .ly-countdown")).toContainText(/\d\d:\d\d:\d\d/);
+    // edits show immediately, and through all of it the background video kept playing
+    await page.locator("#ws-layers .lrow:not(.base)").nth(3).locator(".lname").click();
+    await prop(page, "text").fill("CHANGED");
+    await expect(page.locator("#ws-canvas .ly-text")).toContainText("CHANGED");
+    expect(await v.evaluate((e) => !e.paused && e.readyState >= 2)).toBe(true);
+    expect(await timeOf(page)).not.toBe(t0);
+    expect(await motion(page)).toBeGreaterThan(2);
+    // saved and reopened: the layers persist (the workspace opens directly on the project)
+    await saveDraft(page);
+    await page.goto(BASE + "/console/studio/" + name);
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    const kinds = await page.evaluate(() => window.studioWorkspace.project.overlays.map((o) => o.kind));
+    expect(kinds).toEqual(["text", "image", "countdown", "video"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: a file that is listed but cannot be decoded fails clearly instead of spinning forever", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="broken.mp4"]').click();
+    await page.click("text=Use as background");
+    await expect(page.locator(".ws-vstate")).toContainText(/cannot be previewed|cannot be played/, { timeout: 20000 });
+    await expect(page.locator("#ws-vbar >> text=Retry")).toBeVisible();
+    // and a good file still plays afterwards
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    await expect.poll(() => page.locator("video.ws-video").evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
   });
 
   test("a logged-out visitor is sent to the login page and the JSON API answers 401", async ({ page, request }) => {

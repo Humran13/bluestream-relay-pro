@@ -157,7 +157,89 @@ def media_refs(project):
     return refs
 
 
-def register_api(console, find_relay, engine_of):
+class _BridgeCache:
+    """Short-lived cache for the READ-ONLY privileged bridge calls the editor repeats every few seconds.
+
+    Measured: one `sudo web-ctl <op>` costs ~150-250 ms of CPU even on a fast machine (it loads the whole bash engine), and an open
+    editor polls 3-5 of them every 5 s; two open tabs double it. A few seconds of sharing removes almost all of that load without
+    making the picture stale. Any MUTATING engine call clears the cache at once, so the UI never shows pre-change state.
+    BLUESTREAM_STUDIO_BRIDGE_CACHE=0 disables it (tests)."""
+    TTL = {"relay_list": 3.0, "playlist_list": 5.0, "snapshot": 30.0, "destination_list": 10.0, "media_list": 5.0,
+           "studio_health": 4.0, "relay_publisher_status": 4.0, "relay_swap_ready": 15.0, "relay_destinations_get": 10.0}
+
+    def __init__(self):
+        import threading
+        self.lock, self.items = threading.Lock(), {}
+        self.on = os.environ.get("BLUESTREAM_STUDIO_BRIDGE_CACHE", "1") != "0"
+
+    def get(self, key, ttl, fn):
+        if not self.on or ttl <= 0:
+            return fn()
+        now = time.monotonic()
+        with self.lock:
+            hit = self.items.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+        value = fn()                              # exceptions are never cached
+        with self.lock:
+            if len(self.items) > 256:
+                self.items.clear()
+            self.items[key] = (now + ttl, value)
+        return value
+
+    def clear(self):
+        with self.lock:
+            self.items.clear()
+
+    def wrap(self, eng):
+        return _CachedEngine(eng, self)
+
+
+class _CachedEngine:
+    def __init__(self, eng, cache):
+        self._e, self._c = eng, cache
+
+    def call(self, op, *a, **k):
+        return self._c.get(("call", op), _BridgeCache.TTL.get(op, 0), lambda: self._e.call(op, *a, **k))
+
+    def read(self, op, *values, **k):
+        return self._c.get(("read", op, values), _BridgeCache.TTL.get(op, 0), lambda: self._e.read(op, *values, **k))
+
+    def __getattr__(self, name):
+        from ..engine import ALLOWED_MUTATION_OPERATIONS
+        attr = getattr(self._e, name)
+        if not callable(attr):
+            return attr
+        if name in ALLOWED_MUTATION_OPERATIONS:
+            def mutate(*a, **k):
+                try:
+                    return attr(*a, **k)
+                finally:
+                    self._c.clear()                # whatever happened, what the UI shows next must come from the real state
+            return mutate
+        if name in _BridgeCache.TTL:
+            return lambda *a, **k: self._c.get(("m", name, a), _BridgeCache.TTL[name], lambda: attr(*a, **k))
+        return attr
+
+
+def register_api(console, find_relay_raw, engine_raw):
+    cache = _BridgeCache()
+
+    def engine_of():
+        return cache.wrap(engine_raw())
+
+    def find_relay(name):
+        """(row, unavailable): same contract as the dashboard's helper, but through the shared read cache."""
+        try:
+            relays = engine_of().call("relay_list") or []
+        except Exception as exc:                   # noqa: BLE001 - EngineError and friends
+            current_app.logger.warning("relay_list unavailable: %s", exc)
+            return None, True
+        for row in relays:
+            if isinstance(row, dict) and row.get("name") == name:
+                return row, False
+        return None, False
+
     _snap_cache = {}    # per app: the public-address snapshot, refreshed at most once a minute
     def jerr(message, code=400, **extra):
         return jsonify(ok=False, error=message, **extra), code

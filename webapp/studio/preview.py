@@ -295,14 +295,39 @@ def proxy_mode(codecs):
     return "copy" if ok else "transcode"
 
 
+_PACING = {}
+
+
+def pacing_args(ffmpeg="ffmpeg"):
+    """Read the source at about 2x real time (after an 8 s burst so playback starts at once) instead of as fast as the disk allows.
+    A browser only needs ~1x; unpaced, a long file is streamed/transcoded flat out until the browser's buffer fills, which is pure waste
+    on a small VPS. Only options this FFmpeg really has are used (older builds simply stay unpaced), probed once."""
+    if ffmpeg not in _PACING:
+        out = ""
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-h", "long"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        args = []
+        if "readrate" in out:
+            args += ["-readrate", "2"]
+            if "readrate_initial_burst" in out:
+                args += ["-readrate_initial_burst", "8"]
+        _PACING[ffmpeg] = args
+    return list(_PACING[ffmpeg])
+
+
 def proxy_args(path, mode, ffmpeg="ffmpeg"):
     """FFmpeg argv producing a progressive-playable FRAGMENTED MP4 on stdout. `copy` costs almost nothing; `transcode`
-    is a single 540p ultrafast encode that runs ONLY while a browser is watching."""
-    base = [ffmpeg, "-v", "error", "-nostdin", "-i", path]
+    is a single 540p ultrafast encode that runs ONLY while a browser is watching (and is paced, see pacing_args)."""
+    # A transcode may use at most 2 threads (x264 otherwise spreads over EVERY core: measured 287% of a core unpaced on an 8-core box,
+    # which on a 2-vCPU VPS would starve the live streams). Pacing + the thread cap bound the preview's CPU; copy needs neither.
+    cap = ["-threads", "2"] if mode != "copy" else []
+    base = [ffmpeg, "-v", "error", "-nostdin"] + pacing_args(ffmpeg) + cap + ["-i", path]
     if mode == "copy":
         media = ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]
     else:
-        media = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:540", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+        media = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:540", "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-crf", "30",
                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k"]
     return base + media + ["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]
 

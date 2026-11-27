@@ -34,7 +34,7 @@ class Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         d = self._tmp.name
-        env = {"BLUESTREAM_STUDIO_DIR": d + "/studio", "BLUESTREAM_ETC_DIR": d + "/etc"}
+        env = {"BLUESTREAM_STUDIO_DIR": d + "/studio", "BLUESTREAM_ETC_DIR": d + "/etc", "BLUESTREAM_STUDIO_BRIDGE_CACHE": "0"}
         if self.enabled:
             env["BLUESTREAM_STUDIO_ENABLED"] = "1"
         env["BLUESTREAM_STUDIO_PUBKEY_HEX"] = PK.hex()
