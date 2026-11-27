@@ -15,8 +15,9 @@ import time
 from datetime import datetime, timezone
 
 from . import ffmpeg as sff
-from . import browsercap, entitlement, health, preview, netguard, nowplaying, planner, runtime, store, widgets
+from . import browsercap, capabilities, entitlement, health, preview, netguard, nowplaying, planner, runtime, store, widgets
 from . import model
+from . import overlay as ovl
 from .model import NAME_RE, ValidationError
 
 
@@ -117,6 +118,18 @@ def _attach_progress(args, relay, wait=5.0):
     return args
 
 
+def _load_avg():
+    """1-minute load for admission control. BLUESTREAM_STUDIO_TEST_LOAD is a TEST-ONLY hook (a busy CI runner must not make
+    the frame tests flaky); production never sets it."""
+    forced = os.environ.get("BLUESTREAM_STUDIO_TEST_LOAD")
+    if forced is not None:
+        try:
+            return float(forced)
+        except ValueError:
+            pass
+    return os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
+
+
 def cmd_argv(relay, name):
     # Backend enforcement: a Studio stream cannot start without a valid
     # entitlement, whatever the UI shows. (Free Relay/Playlist never reach here.)
@@ -135,9 +148,14 @@ def cmd_argv(relay, name):
     except (ValidationError, OSError, ValueError) as exc:
         sys.stderr.write("studio: cannot prepare project: %s\n" % exc)
         return 2
+    if plan.path != planner.DIRECT:
+        ok_e, why_e = capabilities.encoder_usable(project.profile.encoder)
+        if not ok_e:
+            sys.stderr.write("studio: encoder %s is not usable: %s (it is never switched automatically)\n" % (project.profile.encoder, why_e))
+            return 6
     ok, why = planner.admit(plan, runtime.running_live_encodes(exclude=relay),
                             max_live_encodes=int(os.environ.get("BLUESTREAM_STUDIO_MAX_LIVE", "1")),
-                            cpu_cores=os.cpu_count() or 4, load_avg=os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0)
+                            cpu_cores=os.cpu_count() or 4, load_avg=_load_avg())
     if not ok:
         sys.stderr.write("studio: refused: %s\n" % why)
         return 3
@@ -158,6 +176,11 @@ def cmd_argv(relay, name):
                                    has_audio=True if live else bool(info.acodec),
                                    loop_file=not live)
     args = _attach_progress(args, relay)
+    try:
+        with open(os.path.join(wd, "plan"), "w", encoding="utf-8") as fh:
+            fh.write(plan.path)
+    except OSError:
+        pass
     sys.stderr.write("studio: plan=%s (%s)\n" % (plan.path, "; ".join(plan.reasons)))
     # The supervisor runs `ffmpeg "${FFMPEG_ARGS[@]}"`, so emit ARGUMENTS only (no executable name).
     # (Emitting argv[0] made a real relay exec `ffmpeg ffmpeg ...`; found by the Docker end-to-end run.)
@@ -174,18 +197,113 @@ def _supervisor_status(relay):
     return {"state": kv.get("STATE", ""), "detail": kv.get("DETAIL", ""), "attempt": kv.get("ATTEMPT", "")}
 
 
+def cmd_overlay_argv(relay, tokens, ts_offset=0.0, reason="start"):
+    """Compose the project's overlays onto relay `relay`'s OWN source. `tokens` = the input options + `-i <source>` of the plain relay.
+    Exit codes (every non-zero makes run-relay fall back to the ORIGINAL stream-copy command): 2 invalid, 3 admission refused,
+    6 encoder unusable, 7 circuit breaker tripped, 8 overlays not active / nothing to draw (plain copy is cheaper)."""
+    import dataclasses
+    mk = ovl.read_marker(relay)
+    if not mk or not mk["enabled"]:
+        return 8
+    try:
+        project = store.load_published(mk["project"])
+    except (ValidationError, OSError, ValueError) as exc:
+        sys.stderr.write("studio: overlay project unavailable: %s\n" % exc)
+        return 2
+    if project.target_relay != relay:
+        sys.stderr.write("studio: project '%s' is not bound to relay '%s'\n" % (mk["project"], relay))
+        return 2
+    if not project.visible_overlays():
+        sys.stderr.write("studio: no visible overlays: the stream stays in plain copy mode\n")
+        return 8
+    ok, why = ovl.allow_start(relay, mk["nonce"], reason=reason)
+    if not ok:
+        sys.stderr.write("studio: %s\n" % why)
+        return 7
+    ok_e, why_e = capabilities.encoder_usable(project.profile.encoder)
+    if not ok_e:
+        sys.stderr.write("studio: encoder %s is not usable: %s (the plain stream is kept)\n" % (project.profile.encoder, why_e))
+        return 6
+    if any(o.kind == "browser" for o in project.overlays):
+        ok_b, why_b = browsercap.usable()
+        if not ok_b:
+            sys.stderr.write("studio: browser source unavailable: %s\n" % why_b)
+            return 2
+    plan = planner.Plan(planner.LIVE, ("overlays on an existing stream",))
+    okk, whyk = planner.admit(plan, runtime.running_live_encodes(exclude=relay),
+                              max_live_encodes=int(os.environ.get("BLUESTREAM_STUDIO_MAX_LIVE", "1")),
+                              cpu_cores=os.cpu_count() or 4, load_avg=_load_avg())
+    if not okk:
+        sys.stderr.write("studio: refused: %s\n" % whyk)
+        return 3
+    try:
+        i = len(tokens) - 1 - tokens[::-1].index("-i")
+        source = tokens[i + 1]
+    except (ValueError, IndexError):
+        return 2
+    live = not os.path.isfile(source)
+    info = runtime.probe_source(source, live)
+    p = project.profile
+    w = p.width or (((info.width or 1280) // 2) * 2)
+    h = p.height or (((info.height or 720) // 2) * 2)
+    f = p.fps or (int(round(info.fps)) if info.fps and 10 <= info.fps <= 60 else 30)
+    prof = dataclasses.replace(p, width=w, height=h, fps=f)
+    wd = _workdir(relay)
+    _write_static_text(project, wd)
+    try:
+        args = sff.build_overlay_args(project, tokens, _out_url(relay), wd, runtime.media_dir(), prof,
+                                      has_audio=bool(info.acodec) if info.vcodec else True, ts_offset=ts_offset)
+    except ValidationError as exc:
+        sys.stderr.write("studio: cannot compose: %s\n" % exc)
+        return 2
+    args = _attach_progress(args, relay, wait=2.0)
+    try:
+        with open(os.path.join(wd, "plan"), "w", encoding="utf-8") as fh:
+            fh.write("overlay-live-composition")
+    except OSError:
+        pass
+    sys.stderr.write("studio: overlays on '%s' (revision %d): %dx%d@%d, encoder %s\n" % (relay, project.revision, w, h, f, prof.encoder))
+    sys.stdout.buffer.write(b"\0".join(a.encode() for a in args[1:]) + b"\0")
+    return 0
+
+
+def _published_mtime(name):
+    try:
+        return os.stat(os.path.join(store.studio_dir(), name + ".json")).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _read_plan(wd):
+    try:
+        with open(os.path.join(wd, "plan"), encoding="utf-8") as fh:
+            return fh.read(40).strip()
+    except OSError:
+        return ""
+
+
 def cmd_widgets(relay, name):
     """Sidecar: refresh live text ~1/s, hold the live-slot lease, and publish real
     health (progress listener + process stats + supervisor state)."""
     stop = []
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    inplace = name == "@overlay"
+    if inplace:
+        mk = ovl.read_marker(relay)
+        if not mk:
+            sys.stderr.write("studio: no overlay switch for '%s'\n" % relay)
+            return 2
+        name = mk["project"]
     project = store.load_published(name)
     wd = _workdir(relay)
     run = runtime.run_dir()
-    dynamic = any(o.dynamic for o in project.visible_overlays())
+    dynamic = inplace or any(o.dynamic for o in project.visible_overlays())
+    healthy_since = None
     if dynamic:
         runtime.take_live_lease(relay)
+    struct0 = project.structure_fingerprint()
+    applied_rev, pending_restart, pub_mtime = project.revision, False, _published_mtime(name)
     tracker = health.Tracker()
     server = health.ProgressServer(tracker)
     server.start()
@@ -196,11 +314,32 @@ def cmd_widgets(relay, name):
         data, last = {}, {}
         tick = 0
         while not stop:
+            m = _published_mtime(name)
+            if m != pub_mtime:
+                pub_mtime = m
+                try:
+                    newer = store.load_published(name)
+                    if newer.structure_fingerprint() == struct0:
+                        project, applied_rev, pending_restart = newer, newer.revision, False   # hot: content only, no restart
+                        data, last = {}, {}
+                    else:
+                        pending_restart = True                                                    # structure changed: needs a restart
+                except (ValidationError, OSError, ValueError):
+                    pass
             _refresh_data(project, data, last)
             _write_static_text(project, wd, data=data)
             if tick % 2 == 0:
                 pid = health.find_ffmpeg_pid(out_url)
-                health.write_health(run, relay, tracker.snapshot(sampler.sample(pid), _supervisor_status(relay)))
+                snap = tracker.snapshot(sampler.sample(pid), _supervisor_status(relay))
+                snap.update(revision=applied_rev, pending_restart="yes" if pending_restart else "", plan=_read_plan(wd))
+                if inplace:
+                    if snap.get("state") == "HEALTHY":
+                        healthy_since = healthy_since or time.monotonic()
+                        if time.monotonic() - healthy_since >= ovl.HEALTHY_AFTER_S:
+                            ovl.mark_healthy(relay)
+                    else:
+                        healthy_since = None
+                health.write_health(run, relay, snap)
             tick += 1
             # monotonic sleep aligned to wall-clock seconds so timers don't drift
             time.sleep(1.0 - (time.time() % 1.0))
@@ -216,13 +355,14 @@ def cmd_widgets(relay, name):
 
 
 HEALTH_KEYS = ("state", "detail", "speed", "fps", "frames", "dropped_frames", "restarts",
-               "cpu_cores", "rss_mb", "last_failure", "supervisor_attempt", "output_seconds")
+               "cpu_cores", "rss_mb", "last_failure", "supervisor_attempt", "output_seconds",
+               "revision", "pending_restart", "plan")
 
 
 def health_pairs(relay):
     """key/value pairs for web-ctl (every value bounded and stripped of control chars)."""
     doc = health.read_health(runtime.run_dir(), relay)
-    pairs = []
+    pairs = [("overlay", ovl.state(relay))]
     for k in HEALTH_KEYS:
         v = doc.get(k)
         v = "" if v is None else str(v)
@@ -295,6 +435,32 @@ def cmd_thumb(asset):
     return _emit_image("image/png", data)
 
 
+def cmd_proxy(media):
+    """Editor video preview: fragmented MP4 of one Media Library video on stdout (run by web-ctl as root; FFmpeg runs as the media owner)."""
+    try:
+        started = preview.start_proxy(media)
+    except preview.ProxyError as exc:
+        sys.stderr.write("studio: preview unavailable (%s)\n" % exc.kind)
+        return exc.exit_status
+    proc, _mode = started
+    out = sys.stdout.buffer
+    written = 0
+    try:
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            written += len(chunk)
+    except (BrokenPipeError, OSError):
+        pass                                   # the browser went away: stop encoding at once
+    finally:
+        code = preview.proxy_returncode(proc)
+        preview.terminate_proxy(proc)
+    return 0 if written or code == 0 else preview.PROXY_EXIT_FAILED
+
+
 def cmd_plan(name):
     project = store.load_published(name)
     src_in, live, info, plan = make_plan(project)
@@ -307,9 +473,26 @@ def cmd_plan(name):
 def main(argv):
     try:
         cmd = argv[1]
+        if cmd == "overlay-argv" and NAME_RE.match(argv[2]):
+            rest, off, reason = argv[3:], 0.0, "start"
+            while len(rest) >= 2 and rest[0] in ("--ts-offset", "--reason"):
+                if rest[0] == "--ts-offset":
+                    try:
+                        off = float(rest[1])
+                    except ValueError:
+                        return 2
+                    if not 0.0 <= off <= 4.0e6:
+                        return 2
+                else:
+                    reason = rest[1]
+                    if reason not in ("start", "swap", "retry"):
+                        return 2
+                rest = rest[2:]
+            toks = rest[1:] if rest and rest[0] == "--" else None
+            return cmd_overlay_argv(argv[2], toks, off, reason) if toks else 2
         if cmd in ("argv", "widgets"):
             relay, name = argv[2], argv[3]
-            if not (NAME_RE.match(relay) and NAME_RE.match(name)):
+            if not (NAME_RE.match(relay) and (NAME_RE.match(name) or (cmd == "widgets" and name == "@overlay"))):
                 return 2
             return cmd_argv(relay, name) if cmd == "argv" else cmd_widgets(relay, name)
         if cmd == "plan" and NAME_RE.match(argv[2]):
@@ -318,6 +501,8 @@ def main(argv):
             return cmd_frame(argv[2])
         if cmd == "thumb" and model.ASSET_RE.match(argv[2]):
             return cmd_thumb(argv[2])
+        if cmd == "proxy" and model.ASSET_RE.match(argv[2]):
+            return cmd_proxy(argv[2])
         if cmd == "install-id":
             print(entitlement.get_install_id(create=True))
             return 0

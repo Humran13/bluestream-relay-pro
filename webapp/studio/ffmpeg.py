@@ -7,6 +7,24 @@ from .model import ValidationError
 SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.-]{1,200}$")
 BUS_RE = re.compile(r"^rtmp://127\.0\.0\.1(:\d{2,5})?/[A-Za-z0-9_-]{1,64}/[a-z0-9_-]{1,48}$")
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+# Fonts a layer may choose. Only files that really exist on the server are used; anything else falls back to the default.
+FONT_FILES = {
+    "DejaVu Sans": DEFAULT_FONT,
+    "DejaVu Sans Bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "DejaVu Serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "DejaVu Sans Mono": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+}
+
+
+def available_fonts():
+    import os
+    return [name for name, path in FONT_FILES.items() if os.path.isfile(path)]
+
+
+def font_for(name, default):
+    import os
+    path = FONT_FILES.get(name)
+    return path if path and os.path.isfile(path) else default
 
 
 def _px(frac, total):
@@ -46,13 +64,21 @@ def _sf(p):
     return "" if p.scaler == "bicubic" else ":flags=%s" % p.scaler
 
 
-def _encode_opts(p):
+def _video_encode_opts(p):
+    if p.encoder == "h264_nvenc":
+        # Constant-bitrate low-latency H.264 on the GPU; the filter graph itself still runs on the CPU.
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
+                "-b:v", "%dk" % p.video_kbps, "-maxrate", "%dk" % p.video_kbps, "-bufsize", "%dk" % (p.video_kbps * 2),
+                "-g", str(p.gop), "-bf", "0", "-pix_fmt", "yuv420p", "-r", str(p.fps)]
     return ["-c:v", "libx264", "-preset", p.preset, "-profile:v", "high",
             "-b:v", "%dk" % p.video_kbps, "-maxrate", "%dk" % p.video_kbps,
             "-bufsize", "%dk" % (p.video_kbps * 2),
             "-g", str(p.gop), "-keyint_min", str(p.gop), "-sc_threshold", "0",
-            "-pix_fmt", "yuv420p", "-r", str(p.fps),
-            "-c:a", "aac", "-b:a", "%dk" % p.audio_kbps, "-ar", "44100", "-ac", "2"]
+            "-pix_fmt", "yuv420p", "-r", str(p.fps)]
+
+
+def _encode_opts(p):
+    return _video_encode_opts(p) + ["-c:a", "aac", "-b:a", "%dk" % p.audio_kbps, "-ar", "44100", "-ac", "2"]
 
 
 def _source_input(project, source, loop_file):
@@ -111,9 +137,15 @@ def _compose(project, workdir, assets_dir, fontfile, has_audio, src_inputs, firs
             f = "[%s][im%d]overlay=%d:%d:shortest=1[%s]" % (last, idx, x, y, nxt)
         else:  # text, clock, countdown, ticker: all read an atomically replaced file
             tf = text_file_path(workdir, i)
-            xexpr = "w-mod(t*120,w+text_w)" if o.kind == "ticker" else str(x)
-            f = ("[%s]drawtext=fontfile=%s:textfile=%s:reload=1:fontsize=%d:fontcolor=%s:x='%s':y=%d[%s]"
-                 % (last, fontfile, tf, o.size, _color(o.color, o.opacity), xexpr, y, nxt))
+            ff = font_for(o.font, fontfile)
+            _check_path(ff)
+            bw = _px(o.w, p.width)
+            xexpr = {"center": "%d+(%d-text_w)/2" % (x, bw), "right": "%d+%d-text_w" % (x, bw)}.get(o.align, str(x))
+            if o.kind == "ticker":
+                xexpr = "w-mod(t*120,w+text_w)"
+            box = (":box=1:boxcolor=%s:boxborderw=10" % _color(o.bg_color, o.bg_opacity)) if o.bg_opacity > 0 else ""
+            f = ("[%s]drawtext=fontfile=%s:textfile=%s:reload=1:fontsize=%d:fontcolor=%s:x='%s':y=%d%s[%s]"
+                 % (last, ff, tf, o.size, _color(o.color, o.opacity), xexpr, y, box, nxt))
         chain.append(f)
         last = nxt
     return extra_args, ";".join(chain), last, extra
@@ -222,3 +254,35 @@ def build_copy_args(source, output_url, loop_file=False, ffmpeg="ffmpeg"):
     args += _source_input(None, source, loop_file)
     return args + ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "copy",
                    "-f", "flv", output_url]
+
+
+def build_overlay_args(project, input_tokens, output_url, workdir, assets_dir, profile, has_audio,
+                       fontfile=DEFAULT_FONT, ffmpeg="ffmpeg", ts_offset=0.0):
+    """Compose overlays onto the relay's OWN source: `input_tokens` are exactly the input options + `-i <source>` the plain relay would
+    use (same loop / reconnect / resolver handling), so the picture is identical apart from the overlays. One decode, one encode.
+    The source's audio is stream-copied (never re-encoded); a source without audio gets silent AAC so platforms accept the stream.
+    `profile` is the EFFECTIVE profile (match-source already resolved to real numbers)."""
+    import dataclasses
+    _check_bus(output_url)
+    toks = list(input_tokens)
+    if not toks or len(toks) > 40 or any((not isinstance(t, str)) or "\x00" in t for t in toks) or "-i" not in toks[:-1]:
+        raise ValidationError("invalid source arguments")
+    if not (160 <= profile.width <= 3840 and 90 <= profile.height <= 2160 and profile.width % 2 == 0 and profile.height % 2 == 0
+            and 10 <= profile.fps <= 60 and 500 <= profile.video_kbps <= 20000):
+        raise ValidationError("invalid output size")
+    for path in (workdir, assets_dir, fontfile):
+        _check_path(path)
+    for o in project.overlays:
+        o.validate()
+    p2 = dataclasses.replace(project, profile=profile)
+    args = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "warning", "-nostats", "-progress", "pipe:2"] + toks
+    extra_args, graph, last, extra = _compose(p2, workdir, assets_dir, fontfile, has_audio, 1, 1, None)
+    args += extra_args
+    if has_audio:
+        amap, ain = ["-map", "0:a:0?", "-c:a", "copy"], []
+    else:
+        amap = ["-map", "%d:a" % (1 + extra), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest"]
+        ain = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+    shift = ["-output_ts_offset", "%.3f" % ts_offset] if ts_offset > 0 else []
+    args += ain + ["-filter_complex", graph, "-map", "[%s]" % last] + amap + _video_encode_opts(profile) + shift + ["-f", "flv", output_url]
+    return args

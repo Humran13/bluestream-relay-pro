@@ -7,10 +7,6 @@
     <div class="ws-proj"><a class="ws-back" href="{{ state.urls.projects }}" title="All Studio projects">&laquo; Projects</a>
       <span class="ws-pname" title="Current project">{{ project.name }}</span>
       <span id="ws-dirty" class="ws-dirty" hidden>Unsaved changes</span></div>
-    <div class="ws-view" role="group" aria-label="Preview or Program view">
-      <button type="button" class="seg" data-view="draft" aria-pressed="true" title="Edit the draft">Preview</button>
-      <button type="button" class="seg" data-view="program" aria-pressed="false" title="See what is applied to live (read-only)">Program</button>
-    </div>
     <div class="ws-panels" role="group" aria-label="Show or hide panels">
       <button type="button" class="seg" data-toggle="left" aria-expanded="true" title="Show or hide the Media panel">Media</button>
       <button type="button" class="seg" data-toggle="right" aria-expanded="true" title="Show or hide the Properties panel">Properties</button>
@@ -21,18 +17,26 @@
       <button type="button" id="ws-apply" class="btn btn-apply" title="Apply the saved draft to the live stream">Apply to Live</button>
       <button type="button" id="ws-settings" class="btn btn-secondary" title="Studio settings">Settings</button>
     </div>
+    <div id="ws-inplace" class="ws-inplace" role="status" hidden></div>
   </header>
 
-  <aside class="ws-left" aria-label="Media Library">
-    <div class="pan-head"><h2>Media</h2>
-      <button type="button" class="ibtn" data-toggle="left" aria-expanded="true" aria-label="Collapse media panel" title="Collapse">&lsaquo;</button></div>
+  <aside class="ws-left" aria-label="Media and sources">
+    <div class="pan-head"><div class="tabs" role="tablist" aria-label="Left panel">
+        <button type="button" role="tab" class="tab on" id="tab-media" aria-selected="true" data-ltab="media">Media</button>
+        <button type="button" role="tab" class="tab" id="tab-sources" aria-selected="false" data-ltab="sources">Live sources</button></div>
+      <button type="button" class="ibtn" data-toggle="left" aria-expanded="true" aria-label="Collapse left panel" title="Collapse">&lsaquo;</button></div>
     <div id="ws-media" class="ws-media"></div>
     <div id="ws-mactions" class="ws-mactions" aria-live="polite"></div>
+    <div id="ws-sources" class="ws-media" hidden></div>
   </aside>
   <div class="split split-v split-l" data-split="wl" role="separator" aria-orientation="vertical" aria-label="Resize media panel"></div>
 
   <section class="ws-center" aria-label="Preview canvas">
-    <div id="ws-programbar" class="ws-programbar" hidden><span class="live-dot"></span> PROGRAM (live, read-only) <span id="ws-programrev"></span></div>
+    <div id="ws-monbar" class="ws-monbar" role="group" aria-label="What the canvas shows">
+      <button type="button" class="seg" data-mon="source" aria-pressed="true" title="Edit over the source video">Edit view</button>
+      <button type="button" class="seg" data-mon="output" aria-pressed="false" disabled title="Watch the Studio stream's actual output (HLS, delayed)">Live output</button>
+      <span id="ws-monnote" class="muted"></span>
+    </div>
     <div class="ws-stage">
       <div id="ws-canvas" class="ws-canvas" role="group" aria-label="16:9 output canvas. Layers can be moved with the arrow keys.">
         <img id="ws-bg" class="ws-bg" alt="" hidden>
@@ -41,6 +45,7 @@
         <div id="ws-guides" class="ws-guides" aria-hidden="true"></div>
       </div>
     </div>
+    <div id="ws-vbar" class="ws-vbar" aria-label="Preview playback controls (they never affect a live stream)"></div>
     <div id="ws-live" class="visually-hidden" aria-live="polite"></div>
     <p class="ws-hint">Drag to move, drag the handles to resize, arrow keys nudge (Shift = coarse, Alt = resize). The preview is a still of your source; it never encodes video.</p>
   </section>
@@ -81,6 +86,8 @@
   <div id="ws-toasts" class="ws-toasts"></div>
 </div>
 <script type="application/json" id="studio-state">{{ state|tojson }}</script>
+<script src="{{ url_for('static', filename='js/thirdparty/hls.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/studio_player.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/studio_workspace.js') }}" defer></script>
 {% endblock %}

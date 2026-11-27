@@ -20,6 +20,8 @@ function mkpng(w, h) {
 }
 
 async function login(page) {
+  // EVERY test also fails on an uncaught script error in the page (the console is part of the product)
+  if (!page.__errs) { page.__errs = []; page.on("pageerror", (e) => page.__errs.push(String(e && e.message || e))); }
   await page.goto(BASE + "/console/login");
   await page.fill('input[name="username"]', "admin");
   await page.fill('input[name="password"]', PASSWORD);
@@ -35,7 +37,11 @@ async function project(page, template = "blank") {
   await page.selectOption('select[name="source_kind"]', "media");
   await page.click("#sr-browse");
   await page.locator(".sdlg .smb-card").first().waitFor();
-  await page.locator('.sdlg .smb-card[data-name="loop.mp4"]').click();
+  // a re-render (thumbnails/library refresh) can swallow a click on a slow engine: retry until the card really is selected
+  await expect(async () => {
+    await page.locator('.sdlg .smb-card[data-name="loop.mp4"]').click();
+    await expect(page.locator('.sdlg .smb-card[data-name="loop.mp4"]')).toHaveAttribute("aria-selected", "true", { timeout: 1500 });
+  }).toPass({ timeout: 20000 });
   await page.click(".sdlg-foot .btn:not(.btn-secondary)");
   await expect(page.locator("#sr")).toHaveValue("loop.mp4");
   await page.selectOption('select[name="template"]', template);
@@ -54,11 +60,12 @@ const rowAct = async (page, text, label) => { const row = page.locator("#ws-laye
 const saveDraft = async (page) => { await page.click("#ws-save"); await expect(page.locator("#ws-dirty")).toBeHidden(); };
 
 test.describe("Studio workspace", () => {
+  test.afterEach(async ({ page }) => { expect(page.__errs || [], "uncaught script errors in the page").toEqual([]); });
   test.describe.configure({ timeout: 90000 });
 
   test("layout: toolbar, media, canvas, properties, layers, stream and controls", async ({ page }) => {
     await project(page);
-    for (const sel of ["#ws-save", "#ws-apply", "#ws-settings", '[data-view="draft"]', '[data-view="program"]', "#ws-media", "#ws-canvas", "#ws-props", "#ws-layers", "#ws-status", "#ws-ctl", "#ws-add"]) {
+    for (const sel of ["#ws-save", "#ws-apply", "#ws-settings", "#ws-media", "#ws-canvas", "#ws-props", "#ws-layers", "#ws-status", "#ws-ctl", "#ws-add", "#ws-monbar"]) {
       await expect(page.locator(sel).first(), sel).toBeVisible();
     }
     await expect(page.locator(".ws-brand")).toContainText("BlueStream Studio");
@@ -79,7 +86,10 @@ test.describe("Studio workspace", () => {
     }
     const all = items.join("|").toLowerCase();
     for (const fake of ["screen", "window capture", "game", "camera", "capture device", "display"]) { expect(all).not.toContain(fake); }
-    expect(all).not.toContain("browser source");   // gated off until its sandbox is verified
+    expect(all).toContain("browser source (not available)");   // visible, but honest: it needs the isolated renderer enabled on the server
+    await page.getByRole("menuitem", { name: /Browser source/ }).click({ force: true });
+    await expect(page.locator(".toast.error")).toContainText("Browser source is not available");
+    await page.click("#ws-add");
     await expect(page.locator("#ws-menu .mnote")).toContainText("not offered");
     await page.keyboard.press("Escape");
     await expect(page.locator("#ws-menu")).toBeHidden();
@@ -244,7 +254,7 @@ test.describe("Studio workspace", () => {
     await page.locator(".sset-pane select").first().selectOption("light");
     await page.getByLabel("Draw safe areas").check();
     await page.locator(".sset-tab", { hasText: "Output" }).click();
-    await expect(page.locator(".sset-pane")).toContainText("Hardware (NVENC) (unavailable)");
+    await expect(page.locator(".sset-pane")).toContainText("NVIDIA H.264 (h264_nvenc)");
     await expect(page.locator('.sset-pane option[value="h264_nvenc"]')).toHaveAttribute("disabled", "");
     await page.getByLabel("Video bitrate (kbps)").fill("2500");
     await page.locator(".sset-tab", { hasText: "Audio" }).click();
@@ -313,24 +323,61 @@ test.describe("Studio workspace", () => {
     await expect(page.locator("#ws-ctl")).toContainText("Start Streaming");
   });
 
-  test("Apply to Live creates a revision; Program shows exactly what is live, read-only", async ({ page }) => {
-    const name = await project(page);
+  test("one editable canvas: no Preview/Program switch; the state chain tells draft, applied, pipeline and output apart", async ({ page }) => {
+    await project(page);
+    await expect(page.locator('[data-view="program"]')).toHaveCount(0);
     await addSource(page, "Text");
     await prop(page, "text").fill("LIVE LAYER");
-    await expect(page.locator('[data-view="program"]')).toBeVisible();
+    await expect(page.locator("#ws-status .chain")).toContainText("has unsaved edits");
     await page.click("#ws-apply");                                                         // saves the draft first, then applies
     await expect(page.locator(".toast.success", { hasText: "Revision 1 applied" })).toBeVisible();
+    const chain = page.locator("#ws-status .chain");
+    await expect(chain).toContainText("saved");
+    await expect(chain).toContainText("revision 1");
+    await expect(chain).toContainText("no Studio stream yet");                             // applied is NOT on air: said plainly
+    await expect(page.locator('[data-mon="output"]')).toBeDisabled();
     await addSource(page, "Clock");                                                         // a draft change after applying
-    await page.click('[data-view="program"]');
-    await expect(page.locator("#ws-programbar")).toContainText("PROGRAM");
-    expect(await page.locator("#ws-canvas .ly").count()).toBe(1);                            // the live revision has 1 layer, the draft 2
-    await expect(page.locator("#ws-canvas .ly").first()).toContainText("LIVE LAYER");
-    await expect(page.locator("#ws-props")).toContainText("read-only");
-    await page.click('[data-view="draft"]');
-    expect(await page.locator("#ws-canvas .ly").count()).toBe(2);
-    await saveDraft(page);
-    const st = await page.evaluate(async (n) => (await fetch("/console/studio/" + n + "/status.json")).json(), name).catch(() => null);
-    expect(st === null || st.published_revision === 1).toBe(true);
+    await page.click("#ws-save");
+    await expect(page.locator("#ws-status .chain")).toContainText("your draft differs");
+  });
+
+  test("stream running: content-only changes apply LIVE with no restart; structural changes ask first and verify the new revision", async ({ page }) => {
+    await project(page, "ticker");
+    await page.click("#ws-ctl >> text=Create Stream");
+    await page.click("#ws-start");
+    await expect(page.locator("#ws-status .chain")).toContainText("running revision 1");
+    await expect(page.locator("#ws-status .chain")).toContainText("live-composition");
+    // content only (ticker text): hot
+    await page.locator("#ws-layers .lrow", { hasText: "Ticker" }).locator(".lname").click();
+    await prop(page, "text").fill("Breaking news");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "no interruption" })).toBeVisible();
+    await expect(page.locator(".sdlg")).toHaveCount(0);                                     // no confirmation: nothing is interrupted
+    // structural (a new layer): explicit confirmation, then the new revision must come up
+    await addSource(page, "Clock");
+    await page.click("#ws-apply");
+    await expect(page.locator(".sdlg")).toContainText("controlled restart of this Studio stream");
+    await page.locator(".sdlg .btn", { hasText: "Apply and restart" }).click();
+    await expect(page.locator(".toast.success", { hasText: /is running \(live-composition\)/ })).toBeVisible({ timeout: 20000 });
+  });
+
+  test("a restart whose new pipeline never becomes healthy is rolled back automatically to the previous layout", async ({ page }) => {
+    await page.addInitScript(() => { window.__bsVerifyTries = 3; window.__bsVerifyMs = 400; });
+    const name = "ws-fail-" + uid();
+    await login(page);
+    await page.goto(BASE + "/console/studio");
+    await page.fill('input[name="name"]', name);
+    await page.selectOption('select[name="source_kind"]', "media");
+    await page.fill("#sr", "loop.mp4");
+    await page.selectOption('select[name="template"]', "ticker");
+    await Promise.all([page.waitForURL(new RegExp("/console/studio/" + name)), page.click("text=Create project")]);
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    await page.click("#ws-ctl >> text=Create Stream");
+    await page.click("#ws-start");
+    await addSource(page, "Clock");
+    await page.click("#ws-apply");
+    await page.locator(".sdlg .btn", { hasText: "Apply and restart" }).click();
+    await expect(page.locator(".toast.error", { hasText: "put back on air automatically" })).toBeVisible({ timeout: 20000 });
   });
 
   test("background source can be chosen from the Media Library and existing streams/playlists are offered honestly", async ({ page }) => {
@@ -344,7 +391,11 @@ test.describe("Studio workspace", () => {
     expect(src[0]).toBe("slideshow"); expect(src[1].split(",").sort()).toEqual(["badge.png", "logo.png"]);
     await expect(page.locator("#ws-props")).toContainText("Seconds per image");
     await addSource(page, "Existing BlueStream stream");
-    await expect(page.locator(".toast.error")).toContainText("no existing stream");            // none exist in this fixture: say so
+    await expect(page.locator(".sdlg")).toContainText("Use an existing stream");              // choose from the REAL list (dino, sleepy, ghost)
+    await page.locator(".sdlg select").selectOption("dino");
+    await page.locator(".sdlg .btn", { hasText: "Use this" }).click();
+    const src2 = await page.evaluate(() => [window.studioWorkspace.project.source_kind, window.studioWorkspace.project.source_ref]);
+    expect(src2).toEqual(["relay", "dino"]);
   });
 
   test("mobile viewport: one column, no horizontal scroll, canvas fits", async ({ browser }) => {
@@ -356,6 +407,339 @@ test.describe("Studio workspace", () => {
     expect(cb.width).toBeLessThanOrEqual(390);
     await expect(page.locator("#ws-layers")).toBeVisible();
     await ctx.close();
+  });
+
+  // ---- real video in the canvas (H.264 playback needs a browser with proprietary codecs: Edge/Chrome/Safari/Firefox on a normal OS) ----
+  const canH264 = (page) => page.evaluate(() => !!document.createElement("video").canPlayType('video/mp4; codecs="avc1.42E01E"') && !!(window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')));
+  /** Mean absolute difference between two frames of the canvas <video> (drawn to a scratch canvas): > 0 means real motion. */
+  const motion = (page) => page.evaluate(async () => {
+    const v = document.querySelector("video.ws-video"), c = document.createElement("canvas"); c.width = 160; c.height = 90;
+    const g = c.getContext("2d"), grab = () => { g.drawImage(v, 0, 0, 160, 90); return g.getImageData(0, 0, 160, 90).data; };
+    const a = grab(); await new Promise((r) => setTimeout(r, 700)); const b = grab(); let d = 0; for (let i = 0; i < a.length; i += 4) { d += Math.abs(a[i] - b[i]); }
+    return d / (a.length / 4);
+  });
+
+  test("Mode A: a Media Library video PLAYS in the canvas (real motion, not a still), with local-only controls and a loop that continues", async ({ page }) => {
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="motion.mp4"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect(v).toBeVisible();
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 20000 }).toBe(true);
+    await expect(page.locator(".ws-vstate")).toContainText("Playing");
+    expect(await motion(page)).toBeGreaterThan(2);                                          // frames differ: it is moving
+    expect(await v.evaluate((e) => [e.videoWidth, e.videoHeight])).toEqual([320, 180]);
+    // overlays sit on top of the playing video
+    await addSource(page, "Text");
+    expect(await page.evaluate(() => document.elementFromPoint(...(() => { const r = document.querySelector("#ws-canvas .ly").getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()).closest(".ly") !== null)).toBe(true);
+    // local controls never reach the server's stream endpoints
+    const writes = []; page.on("request", (r) => { if (r.method() === "POST" && /stream\.json|\/relays\/|publish/.test(r.url())) { writes.push(r.url()); } });
+    await page.click("#ws-vbar >> text=Pause");
+    await expect.poll(() => v.evaluate((e) => e.paused)).toBe(true);
+    await page.click("#ws-vbar >> text=Play");
+    await expect.poll(() => v.evaluate((e) => !e.paused)).toBe(true);
+    await page.click("#ws-vbar >> text=Preview muted");
+    await expect.poll(() => v.evaluate((e) => e.muted)).toBe(false);
+    expect(writes).toEqual([]);
+    // loop: the 6 s clip ends and playback continues from the start
+    await expect.poll(() => v.evaluate((e) => e.currentTime), { timeout: 15000 }).toBeGreaterThan(3);
+    await expect.poll(() => v.evaluate((e) => e.currentTime < 2 && !e.paused && e.readyState >= 2), { timeout: 20000 }).toBe(true);
+    await page.click("#ws-vbar >> text=Loop: on");
+    await expect(page.locator("#ws-vbar")).toContainText("Loop: off");
+  });
+
+  test("Mode C: an existing running relay is monitored live and read-only; stopped and unreachable ones say so", async ({ page }) => {
+    await project(page);
+    const writes = []; page.on("request", (r) => { if (r.method() !== "GET" && !/save\.json|preview-text|status/.test(r.url())) { writes.push(r.method() + " " + r.url()); } });
+    await page.click("#tab-sources");
+    await expect(page.locator("#ws-sources .srcrow", { hasText: "dino" })).toContainText("RUNNING");
+    await expect(page.locator("#ws-sources .srcrow", { hasText: "sleepy" })).toContainText("STOPPED");
+    await expect(page.locator("#ws-sources")).toContainText("Watching a stream is read-only");
+    // stopped relay: clear message, no pretend picture
+    await page.locator("#ws-sources .srcrow", { hasText: "sleepy" }).getByRole("button", { name: "Source for a new stream" }).click();
+    await expect(page.locator(".ws-vstate")).toContainText("stopped");
+    await expect(page.locator("video.ws-video")).toBeHidden();
+    // unreachable (running but its HLS is gone): disconnected + retry, never a fake still
+    await page.locator("#ws-sources .srcrow", { hasText: "ghost" }).getByRole("button", { name: "Source for a new stream" }).click();
+    test.skip(!(await canH264(page)), "H.264/MSE unavailable: the playing-stream part is UNTESTED in this browser");
+    await expect(page.locator(".ws-vstate")).toContainText(/Disconnected|not reachable/, { timeout: 20000 });
+    await expect(page.locator("#ws-vbar >> text=Retry")).toBeVisible();
+    // running relay: its real HLS plays
+    await page.locator("#ws-sources .srcrow", { hasText: "dino" }).getByRole("button", { name: "Source for a new stream" }).click();
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    await expect(page.locator(".ws-vstate")).toContainText("LIVE");
+    await expect(page.locator(".ws-vstate")).toContainText("behind");
+    expect(await motion(page)).toBeGreaterThan(2);
+    await expect(page.locator("#ws-props")).toContainText("Studio is only WATCHING it");
+    expect(writes).toEqual([]);                                                              // monitoring changed nothing anywhere
+  });
+
+  test("the Studio stream's actual output can be watched (Live output) once it runs", async ({ page }) => {
+    await project(page, "ticker");
+    await expect(page.locator('[data-mon="output"]')).toBeDisabled();
+    await page.click("#ws-ctl >> text=Create Stream");
+    await page.click("#ws-start");
+    await expect(page.locator('[data-mon="output"]')).toBeEnabled({ timeout: 15000 });
+    await page.click('[data-mon="output"]');
+    await expect(page.locator("#ws-monnote")).toContainText("burned into this video");
+    await expect(page.locator("#ws-canvas .ly")).toHaveCount(0);                             // no double drawing: the overlays are IN the video
+    test.skip(!(await canH264(page)), "H.264/MSE unavailable: playback of the output is UNTESTED in this browser");
+    await expect.poll(() => page.locator("video.ws-video").evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    await expect(page.locator(".ws-vstate")).toContainText("Studio output");
+    await page.click('[data-mon="source"]');
+    expect(await page.locator("#ws-canvas .ly").count()).toBeGreaterThan(0);
+  });
+
+  test("layers: double-click renames, lock stops dragging and disables position fields", async ({ page }) => {
+    await project(page);
+    await addSource(page, "Text");
+    const row0 = page.locator("#ws-layers .lrow:not(.base)").first();
+    await row0.hover(); await row0.locator('[aria-label="Rename layer"]').click();
+    await page.locator("#ws-layers .lrename").fill("Channel title");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#ws-layers .lrow:not(.base) .lname")).toHaveText("Channel title");
+    await page.locator("#ws-layers .lrow:not(.base)").locator('[aria-label="Lock layer"]').click();
+    const before = await box(page, 0), b = await layer(page, 0).boundingBox();
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down();
+    await page.mouse.move(b.x + b.width / 2 + 120, b.y + b.height / 2 + 60, { steps: 5 }); await page.mouse.up();
+    expect(await box(page, 0)).toEqual(before);                                              // locked: did not move
+    await expect(prop(page, "x")).toBeDisabled();
+    await expect(page.locator("#ws-props")).toContainText("locked");
+    await saveDraft(page);
+    const kept = await page.evaluate(() => [window.studioWorkspace.project.overlays[0].label, window.studioWorkspace.project.overlays[0].locked]);
+    expect(kept).toEqual(["Channel title", true]);
+    await page.locator("#ws-layers .lrow:not(.base)").locator('[aria-label="Unlock layer"]').click();
+    await expect(prop(page, "x")).toBeEnabled();
+  });
+
+  test("text properties: font, alignment and background box persist; countdown can be set to a duration from now", async ({ page }) => {
+    const name = await project(page);
+    await addSource(page, "Text");
+    await page.locator('#ws-props [aria-label="Text alignment"] >> text=Center').click();
+    await prop(page, "bg_opacity").fill("0.6");
+    await expect(page.locator("#ws-props select[data-key=font]")).toBeVisible();
+    await addSource(page, "Countdown");
+    await page.getByLabel("Min", { exact: true }).fill("5");
+    await page.click("text=Start from now");
+    const t = await page.evaluate(() => window.studioWorkspace.project.overlays[1]);
+    const secs = (Date.parse(t.target + "Z") - Date.now()) / 1000;
+    expect(t.tz).toBe("UTC"); expect(secs).toBeGreaterThan(280); expect(secs).toBeLessThan(310);
+    await saveDraft(page);
+    await page.goto(BASE + "/console/studio/" + name);
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    const saved = await page.evaluate(() => window.studioWorkspace.project.overlays.map((o) => [o.kind, o.align, o.bg_opacity]));
+    expect(saved).toEqual([["text", "center", 0.6], ["countdown", "left", 0]]);
+  });
+
+  test("encoder choice: NVIDIA is untested until you test it and is never selected automatically; software stays the default", async ({ page }) => {
+    await project(page);
+    await page.click("#ws-settings");
+    await page.locator(".sset-tab", { hasText: "Output" }).click();
+    const sel = page.locator('.sset-pane select[aria-label="Encoder"]');
+    await expect(sel).toHaveValue("libx264");
+    await expect(page.locator('.sset-pane option[value="h264_nvenc"]')).toHaveAttribute("disabled", "");
+    await expect(page.locator(".sset-pane")).toContainText(/Not tested yet|NVIDIA H\.264 \(h264_nvenc\):/);
+    await page.getByRole("button", { name: "Test NVIDIA encoding" }).click();
+    await expect(page.locator(".toast", { hasText: /NVENC/ })).toBeVisible({ timeout: 30000 });
+    // on a machine without a working GPU encoder the option stays unavailable and says why; software remains selected
+    const nvOk = await page.locator('.sset-pane option[value="h264_nvenc"]').evaluate((o) => !o.disabled);
+    if (!nvOk) { await expect(page.locator(".sset-pane")).toContainText("NVIDIA H.264 (h264_nvenc):"); }
+    await expect(sel).toHaveValue("libx264");
+  });
+
+  test("Mode B: a playlist can be created from Media Library videos in a chosen order and then used as the source", async ({ page }) => {
+    await project(page);
+    await page.click("#tab-sources");
+    await page.click("text=Create a playlist from Media Library videos");
+    await page.locator('.sdlg .smb-card[data-name="motion.mp4"]').click();
+    await page.keyboard.down("Control"); await page.locator('.sdlg .smb-card[data-name="intro.webm"]').click(); await page.keyboard.up("Control");
+    await page.locator(".sdlg-foot .btn", { hasText: "Use selected" }).click();
+    await page.getByLabel("Playlist name").fill("pl-" + uid().replace(/[^a-z0-9-]/g, ""));
+    await page.locator('.sdlg [aria-label="Move later"]').first().click();
+    await page.locator(".sdlg .btn", { hasText: "Create playlist" }).click();
+    await expect(page.locator(".toast.success", { hasText: "created" })).toBeVisible();
+  });
+
+  // ---- Edit an EXISTING stream (in place): its own picture, its own destinations, overlays only when activated ----------------
+  async function existing(page, prefix = "ex") {
+    const relay = prefix + "-" + uid();
+    await login(page);
+    await page.request.get(BASE + "/__e2e/relay/" + relay);
+    await page.goto(BASE + "/console/studio");
+    await page.locator('[data-edit="' + relay + '"]').click();
+    await page.waitForURL(new RegExp("/console/studio/" + relay + "-overlay"));
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    return relay;
+  }
+
+  test("Edit existing stream: opens from the Studio page as a DRAFT with the stream's own controls, no second stream, no destination switching", async ({ page }) => {
+    const relay = await existing(page);
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await expect(page.locator("#ws-inplace")).toContainText(relay);
+    await expect(page.locator("#ws-ctl")).toContainText("Activate overlays on '" + relay + "'");
+    for (const gone of ["Create Stream", "Start Streaming", "Stop Streaming"]) { await expect(page.locator("#ws-ctl")).not.toContainText(gone); }
+    await expect(page.locator("#ws-apply")).toHaveText("Save as ready");
+    await expect(page.locator("#ws-status .chain")).toContainText("the stream is unchanged");
+    await page.click("#ws-canvas");                                                         // background row: read-only explanation
+    await page.locator("#ws-layers .lrow.base .lname").click();
+    await expect(page.locator("#ws-props")).toContainText("Its name, source, destinations and stream keys are not changed");
+    await expect(page.locator("#ws-props select")).toHaveCount(0);                          // the source cannot be changed here
+    await page.click("#ws-settings");
+    await page.locator(".sset-tab", { hasText: "Stream" }).click();
+    await expect(page.locator(".sset-pane input[type=checkbox]:not([disabled])")).toHaveCount(0);   // destinations are shown, never edited here
+    await page.locator(".sdlg-foot .btn", { hasText: "Cancel" }).click();
+    const again = await page.evaluate(async (u) => (await fetch(u, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": document.getElementById("ws").dataset.csrf }, body: JSON.stringify({ action: "start" }) })).status,
+      "/console/studio/" + relay + "-overlay/stream.json");
+    expect(again).toBe(409);                                                                // Studio cannot start/stop or create a publisher for it
+  });
+
+  test("Edit existing stream: save as ready is NOT on air; Activate switches the picture (swap), Apply is hot or confirmed, Remove returns to plain copy", async ({ page }) => {
+    const relay = await existing(page);
+    await addSource(page, "Text");
+    await prop(page, "text").fill("ON AIR");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "NOT on air" })).toBeVisible();
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await page.click("#ws-activate");
+    await expect(page.locator(".toast.success", { hasText: "The overlays are on air" })).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("#ws-inplace")).toContainText("ON AIR");
+    await expect(page.locator("#ws-ctl")).toContainText("Remove overlays");
+    await expect(page.locator("#ws-status .chain")).toContainText("overlays are on air");
+    await expect(page.locator("#ws-apply")).toHaveText("Apply to Live");
+    // content-only edit: live, no dialog
+    await prop(page, "text").fill("NEW HEADLINE");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "no interruption" })).toBeVisible();
+    await expect(page.locator(".sdlg")).toHaveCount(0);
+    // moving the layer changes the picture: confirmation that says what happens, then it must come up healthy
+    await prop(page, "x").fill("40");
+    await page.click("#ws-apply");
+    await expect(page.locator(".sdlg")).toContainText("destination connections stay up");
+    await page.locator(".sdlg .btn", { hasText: "Switch now" }).click();
+    await expect(page.locator(".toast.success", { hasText: /is running \(overlay-live-composition\)/ })).toBeVisible({ timeout: 20000 });
+    // remove: back to stream copy, same stream
+    await page.click("text=Remove overlays");
+    await expect(page.locator(".toast.success", { hasText: "stream-copy mode" })).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");
+    await expect(page.locator("#ws-ctl")).toContainText("Activate overlays");
+    expect(relay.length).toBeGreaterThan(2);
+  });
+
+  test("Edit existing stream: a stream started before the update needs an explicit one-time restart; declining changes nothing", async ({ page }) => {
+    await existing(page, "oldsup");
+    await addSource(page, "Text");
+    await page.click("#ws-apply");
+    await expect(page.locator(".toast.success", { hasText: "NOT on air" })).toBeVisible();
+    await expect(page.locator("#ws-ctl")).toContainText("FIRST activation needs one restart");
+    await page.click("#ws-activate");
+    await expect(page.locator(".sdlg")).toContainText("restarted once");
+    await expect(page.locator(".sdlg")).toContainText("same stream key");
+    await page.locator(".sdlg .btn", { hasText: "Cancel" }).click();
+    await expect(page.locator("#ws-inplace")).toContainText("DRAFT ONLY");                  // declined: nothing happened
+    await page.click("#ws-activate");
+    await page.locator(".sdlg .btn", { hasText: /Restart .* and continue/ }).click();
+    await expect(page.locator(".toast.success", { hasText: "The overlays are on air" })).toBeVisible({ timeout: 20000 });
+  });
+
+  // ---- REAL backend media (E2E_REAL_MEDIA=1: the server runs next to real FFmpeg, so the REAL preview proxy serves real files) -------------
+  const REAL = process.env.E2E_REAL_MEDIA === "1";
+  /** Collects uncaught page errors and console errors (resource 404s for thumbnails of deliberately broken files are not script errors). */
+  const watchErrors = (page) => { const e = []; page.on("pageerror", (x) => e.push("pageerror: " + x.message)); page.on("console", (m) => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) { e.push("console: " + m.text()); } }); return e; };
+  const timeOf = (page) => page.locator("video.ws-video").evaluate((v) => v.currentTime);
+
+  test("REAL media: an H.264 file plays by stream copy, loops continuously, with no script errors", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    expect(await v.evaluate((e) => [e.videoWidth, e.videoHeight])).toEqual([1280, 720]);            // copy path: untouched resolution
+    expect(await motion(page)).toBeGreaterThan(2);
+    // the 5 s clip loops: playback passes the boundary and keeps moving, repeatedly
+    for (let round = 0; round < 2; round++) {
+      await expect.poll(() => timeOf(page), { timeout: 20000 }).toBeGreaterThan(3.5);
+      await expect.poll(() => v.evaluate((e) => e.currentTime < 2.5 && !e.paused && e.readyState >= 2), { timeout: 20000 }).toBe(true);
+      expect(await motion(page)).toBeGreaterThan(2);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: a non-H.264 file is converted once for the preview (540p) and plays", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="intro.webm"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 30000 }).toBe(true);
+    expect(await v.evaluate((e) => e.videoHeight)).toBe(540);
+    expect(await motion(page)).toBeGreaterThan(2);
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: layers are added, selected, highlighted and edited while the background video keeps playing", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    const errors = watchErrors(page);
+    const name = await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    const v = page.locator("video.ws-video");
+    await expect.poll(() => v.evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
+    const t0 = await timeOf(page);
+    await addSource(page, "Text");
+    await prop(page, "text").fill("LIVE TEXT");
+    await page.locator('#ws-media .smb-card[data-name="logo.png"]').click(); await page.click("text=Add as image layer");
+    await addSource(page, "Countdown");
+    await page.locator('#ws-media .smb-card[data-name="motion.mp4"]').click(); await page.click("text=Add as video overlay");
+    expect(await layerCount(page)).toBe(4);
+    // every layer can be selected from the canvas: exactly one is highlighted, in the canvas AND in the list, and its properties follow
+    const expectKind = ["Text", "Image", "Countdown", "Video"];
+    for (let i = 0; i < 4; i++) {
+      await page.locator("#ws-layers .lrow:not(.base)").nth(3 - i).locator(".lname").click();
+      await expect(page.locator("#ws-canvas .ly.sel")).toHaveCount(1);
+      await expect(page.locator('#ws-canvas .ly.sel')).toHaveAttribute("data-i", String(i));
+      await expect(page.locator("#ws-layers .lrow.sel")).toHaveCount(1);
+      await expect(page.locator("#ws-props .phead")).toContainText(expectKind[i]);
+    }
+    // the picture layers really show pictures (real thumbnails of the real files)
+    await expect.poll(() => page.locator("#ws-canvas .ly-image img.ly-img").evaluate((e) => e.naturalWidth)).toBeGreaterThan(0);
+    await expect.poll(() => page.locator("#ws-canvas .ly-video img.ly-img").evaluate((e) => e.naturalWidth)).toBeGreaterThan(0);
+    await expect(page.locator("#ws-canvas .ly-countdown")).toContainText(/\d\d:\d\d:\d\d/);
+    // edits show immediately, and through all of it the background video kept playing
+    await page.locator("#ws-layers .lrow:not(.base)").nth(3).locator(".lname").click();
+    await prop(page, "text").fill("CHANGED");
+    await expect(page.locator("#ws-canvas .ly-text")).toContainText("CHANGED");
+    expect(await v.evaluate((e) => !e.paused && e.readyState >= 2)).toBe(true);
+    expect(await timeOf(page)).not.toBe(t0);
+    expect(await motion(page)).toBeGreaterThan(2);
+    // saved and reopened: the layers persist (the workspace opens directly on the project)
+    await saveDraft(page);
+    await page.goto(BASE + "/console/studio/" + name);
+    await page.waitForFunction(() => !!window.studioWorkspace);
+    const kinds = await page.evaluate(() => window.studioWorkspace.project.overlays.map((o) => o.kind));
+    expect(kinds).toEqual(["text", "image", "countdown", "video"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("REAL media: a file that is listed but cannot be decoded fails clearly instead of spinning forever", async ({ page }) => {
+    test.skip(!REAL, "needs the real-backend server (E2E_REAL_MEDIA=1)");
+    await project(page);
+    test.skip(!(await canH264(page)), "this browser build cannot decode H.264 (UNTESTED here, not passed)");
+    await page.locator('#ws-media .smb-card[data-name="broken.mp4"]').click();
+    await page.click("text=Use as background");
+    await expect(page.locator(".ws-vstate")).toContainText(/cannot be previewed|cannot be played/, { timeout: 20000 });
+    await expect(page.locator("#ws-vbar >> text=Retry")).toBeVisible();
+    // and a good file still plays afterwards
+    await page.locator('#ws-media .smb-card[data-name="loop.mp4"]').click();
+    await page.click("text=Use as background");
+    await expect.poll(() => page.locator("video.ws-video").evaluate((e) => e.readyState >= 2 && e.currentTime > 0.3), { timeout: 25000 }).toBe(true);
   });
 
   test("a logged-out visitor is sent to the login page and the JSON API answers 401", async ({ page, request }) => {

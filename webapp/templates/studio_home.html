@@ -19,27 +19,19 @@
   <p class="muted">Payments are not live yet: licence keys are issued by the vendor. See docs/bluestream/COMMERCIAL.md.</p>
 </section>{% endif %}
 
-<section class="card">
-  <h2>Projects</h2>
-  {% if projects %}
-  <div class="table-wrap"><table>
-    <thead><tr><th>Name</th><th>Overlays</th><th>State</th><th></th></tr></thead>
-    <tbody>
-    {% for p in projects %}
-      <tr>
-        <td>{{ p.name }}</td><td>{{ p.overlays }}</td>
-        <td>{% if p.broken %}<span class="badge badge-failed">DAMAGED</span>{% elif p.unpublished %}<span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span>{% else %}<span class="badge badge-healthy">PUBLISHED</span>{% endif %}</td>
-        <td><a class="btn btn-sm" href="{{ url_for('console.studio_edit', name=p.name) }}">Open</a></td>
-      </tr>
-    {% endfor %}
-    </tbody></table></div>
-  {% else %}<p class="empty-state">No Studio projects yet.</p>{% endif %}
+{% if licence_ok %}
+<section class="card" id="existing-streams">
+  <h2>Edit an existing stream</h2>
+  <p class="muted">Open a stream you already run (for example your 24/7 channel), watch it here and add overlays to its own broadcast. Nothing changes on the stream until you activate; its destinations and keys are never touched.</p>
+  {% if source_lists.relay %}<div class="exlist">{% for r in source_lists.relay %}
+    <form method="post" action="#" class="exrow" data-relay="{{ r }}"><span class="sn">{{ r }}</span><button type="button" class="btn btn-sm" data-edit="{{ r }}">Edit this stream</button></form>
+  {% endfor %}</div>{% else %}<p class="empty-state">No other streams exist yet.</p>{% endif %}
+  <p id="ex-msg" class="muted" role="status"></p>
 </section>
 
-{% if licence_ok %}
 <section class="card">
   <h2>New project</h2>
-  <form method="post" action="{{ url_for('console.studio_new_post') }}" class="studio-form" id="studio-new"
+  <form method="post" action="{{ url_for('console.studio_new_post') }}" class="studio-form" id="studio-new" data-overlay-new-url="{{ url_for('console.studio_overlay_new') }}" data-projects-url="{{ url_for('console.studio_home') }}"
         data-csrf="{{ csrf_token() }}" data-media-url="{{ url_for('console.studio_media_json') }}" data-upload-url="{{ url_for('console.studio_media_upload') }}"
         data-thumb-url="{{ url_for('console.studio_media_thumb', asset='__A__') }}" data-asset-url="{{ url_for('console.studio_asset', asset='__A__') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -70,6 +62,23 @@
   <p class="muted">{{ browser_gate }}</p>
 </section>
 {% endif %}
+<section class="card">
+  <h2>Projects</h2>
+  {% if projects %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>Overlays</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td>{{ p.name }}</td><td>{{ p.overlays }}</td>
+        <td>{% if p.broken %}<span class="badge badge-failed">DAMAGED</span>{% elif p.unpublished %}<span class="badge badge-reconnecting">UNPUBLISHED CHANGES</span>{% else %}<span class="badge badge-healthy">PUBLISHED</span>{% endif %}</td>
+        <td><a class="btn btn-sm" href="{{ url_for('console.studio_edit', name=p.name) }}">Open</a></td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% else %}<p class="empty-state">No Studio projects yet.</p>{% endif %}
+</section>
+
 <script src="{{ url_for('static', filename='js/studio_picker.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/studio_home.js') }}" defer></script>
 {% endblock %}

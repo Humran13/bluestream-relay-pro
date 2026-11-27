@@ -559,6 +559,8 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                     # service, never a browser-supplied command
                     "playlist_schedule_set",
                     "playlist_schedule_clear",
+                    # in-place Studio overlays: SIGUSR1 to the relay supervisor (only if it catches it); no browser-supplied command
+                    "relay_swap_source",
                 }
             ),
         )
@@ -576,6 +578,7 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
                 "studio_health",
                 "studio_frame",
                 "studio_thumb",
+                "relay_swap_ready",
             }),
         )
         client = EngineClient(production=True)

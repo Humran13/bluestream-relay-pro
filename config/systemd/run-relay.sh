@@ -201,4 +201,9 @@ if [ "$RELAY_TYPE" = "studio" ]; then
     trap 'kill "$STUDIO_WIDGETS_PID" 2>/dev/null; wait "$STUDIO_WIDGETS_PID" 2>/dev/null' EXIT
 fi
 
+# Overlay sidecar (started on demand by lib/relay.sh when Studio overlays are switched on) is tied to this unit's lifetime.
+if [ "$RELAY_TYPE" != "studio" ]; then
+    trap 'relay_overlay_stop_sidecar' EXIT
+fi
+
 bs_supervise_run relay "$RELAY_NAME" "$RELAY_FINITE_OK" "$RELAY_RESTART_SEC" _relay_build_for_supervisor "$RELAY_RETRY_FOREVER"

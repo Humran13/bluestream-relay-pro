@@ -931,6 +931,7 @@ class EngineClientTests(unittest.TestCase):
             "relay_set_continuous",
             "relay_create_studio",
             "relay_publisher_takeover",
+            "relay_swap_source",
             "media_import_staged",
             # GUI-1D.1: fixed-argv playlist creation
             "playlist_create",
@@ -987,6 +988,7 @@ class EngineClientTests(unittest.TestCase):
                     "relay_set_continuous",
             "relay_create_studio",
             "relay_publisher_takeover",
+            "relay_swap_source",
                     "media_import_staged",
                     "playlist_create",
                     "playlist_cache_clear_unused",

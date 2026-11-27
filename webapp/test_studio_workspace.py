@@ -346,16 +346,33 @@ class CapacityAndPipelineTests(unittest.TestCase):
         self.assertEqual(capabilities.assess(p(1920, 1080, 60), 4)["level"], "block")
         self.assertEqual(capabilities.assess(p(1920, 1080, 30, "ultrafast"), 4)["level"], "warn")
 
-    def test_nvenc_is_never_offered_as_selectable(self):
-        with mock.patch.object(capabilities, "_ffmpeg_encoders", return_value={"libx264", "h264_nvenc"}), \
-                mock.patch.object(capabilities, "gpu_present", return_value=True):
+    def test_nvenc_is_selectable_only_after_a_real_initialisation_test(self):
+        class R:  # a fake `ffmpeg -c:v h264_nvenc` run
+            def __init__(self, rc, err=""):
+                self.returncode, self.stderr = rc, err
+        with mock.patch.object(capabilities, "_ffmpeg_encoders", return_value={"libx264", "h264_nvenc"}),                 mock.patch.object(capabilities.shutil, "which", return_value="/usr/bin/ffmpeg"):
+            ok, why = capabilities.probe_nvenc(force=True, runner=lambda argv: R(0))
+            self.assertTrue(ok)
+            ok, why = capabilities.probe_nvenc(force=True, runner=lambda argv: R(1, "[h264_nvenc] Cannot load libcuda.so.1"))
+            self.assertFalse(ok)
+            self.assertIn("libcuda", why)
+            ok, why = capabilities.probe_nvenc(force=True, runner=lambda argv: R(1, "No NVENC capable devices found"))
+            self.assertIn("No NVENC-capable", why)
+            # listing the encoder is NOT proof: the listed-but-failing case must stay unselectable
             enc = {e["id"]: e for e in capabilities.encoders()}
-        self.assertTrue(enc["libx264"]["selectable"])
+            self.assertFalse(enc["h264_nvenc"]["selectable"])
+            self.assertTrue(enc["libx264"]["selectable"])
+            def boom(argv):
+                raise subprocess.TimeoutExpired(argv, 15)
+            self.assertFalse(capabilities.probe_nvenc(force=True, runner=boom)[0])
+        capabilities._NV["res"] = None
+
+    def test_page_loads_never_run_the_nvenc_test(self):
+        capabilities._NV["res"] = None
+        with mock.patch.object(capabilities, "probe_nvenc", side_effect=AssertionError("probe on page load")):
+            enc = {e["id"]: e for e in capabilities.summary(probe=False)["encoders"]}
+        self.assertTrue(enc["h264_nvenc"]["untested"])
         self.assertFalse(enc["h264_nvenc"]["selectable"])
-        self.assertIn("does not use it yet", enc["h264_nvenc"]["why"])
-        with mock.patch.object(capabilities, "_ffmpeg_encoders", return_value={"libx264"}), \
-                mock.patch.object(capabilities, "gpu_present", return_value=False):
-            self.assertIn("No NVIDIA GPU", {e["id"]: e for e in capabilities.encoders()}["h264_nvenc"]["why"])
 
     def test_default_scaler_keeps_existing_filter_graphs_identical_and_lanczos_is_applied(self):
         def graph(scaler):

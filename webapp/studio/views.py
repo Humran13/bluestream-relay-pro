@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from flask import Response, abort, current_app, flash, redirect, render_template, request, send_file, session, url_for
 
+from . import ffmpeg as ffmpeg_mod
 from . import api, browsercap, capabilities, entitlement, feedback, preview, store, templates_lib, widgets
 from . import settings as ui_settings
 from .model import NAME_RE, KINDS, Overlay, Project, ValidationError
@@ -213,7 +214,7 @@ def register(console, find_relay, engine_of):
         lists = _source_lists()
         state = {
             "name": name, "project": api.project_to_json(project), "published": published,
-            "texts": api.render_texts(project.overlays), "kinds": kinds,
+            "texts": api.render_texts(project.overlays), "kinds": kinds, "fonts": ffmpeg_mod.available_fonts(),
             "defaults": {k: api.new_layer(k) for k in kinds}, "settings": ui_settings.load(),
             "capabilities": capabilities.summary(project.profile), "sources": lists,
             "stream_exists": relay is not None, "unavailable": bool(unavailable),
@@ -225,6 +226,15 @@ def register(console, find_relay, engine_of):
                 "publish": url_for("console.studio_publish_json", name=name),
                 "status": url_for("console.studio_status_json", name=name),
                 "takeover": url_for("console.studio_takeover_json", name=name),
+                "revert": url_for("console.studio_revert_live", name=name),
+                "overlayNew": url_for("console.studio_overlay_new"),
+                "overlayActivate": url_for("console.studio_overlay_activate", name=name),
+                "overlayDeactivate": url_for("console.studio_overlay_deactivate", name=name),
+                "monitor": url_for("console.studio_monitor_json", name=name),
+                "play": url_for("console.studio_media_play", asset="__A__"),
+                "sources": url_for("console.studio_sources_json"),
+                "playlistCreate": url_for("console.studio_playlist_create"),
+                "capabilities": url_for("console.studio_capabilities"),
                 "stream": url_for("console.studio_stream_json", name=name),
                 "destinations": url_for("console.studio_destinations_get", name=name),
                 "previewText": url_for("console.studio_preview_text", name=name),

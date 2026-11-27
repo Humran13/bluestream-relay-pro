@@ -54,6 +54,8 @@ ALLOWED_READ_OPERATIONS = frozenset(
         # read-only preview images (JPEG frame of a project source / PNG thumbnail of a media image)
         "studio_frame",
         "studio_thumb",
+        # in-place Studio overlays: can this relay's running supervisor swap its FFmpeg on demand? (read-only)
+        "relay_swap_ready",
     }
 )
 
@@ -84,6 +86,8 @@ ALLOWED_MUTATION_OPERATIONS = frozenset(
         "relay_set_continuous",
         "relay_create_studio",
         "relay_publisher_takeover",
+        # in-place Studio overlays: ask the relay's supervisor to replace its FFmpeg now (destination publishers stay connected)
+        "relay_swap_source",
         "media_import_staged",
         # GUI-1D.1: fixed-argv playlist creation (validated in
         # _validate_mutation_values before any subprocess is started).
@@ -477,6 +481,7 @@ class EngineClient:
             "playlist_publisher_status",
             "studio_health",
             "studio_frame",
+            "relay_swap_ready",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")
@@ -494,6 +499,28 @@ class EngineClient:
     def studio_thumb(self, media: str):
         """PNG bytes of a Media Library image (None when unavailable)."""
         return self._decode_image(self.read("studio_thumb", media, timeout=25), "image/png")
+
+    def relay_swap_ready(self, name: str) -> dict:
+        """{"active","ready","reason"} - can the running relay replace its FFmpeg on demand? (read-only)"""
+        doc = self.read("relay_swap_ready", name)
+        return doc if isinstance(doc, dict) else {}
+
+    def relay_swap_source(self, name: str):
+        """Ask the relay's supervisor (SIGUSR1) to replace its FFmpeg NOW. Destination publishers stay connected."""
+        return self._mutation("relay_swap_source", name)
+
+    def proxy_argv(self, media: str):
+        """argv of the RAW editor-preview bridge (fragmented MP4 on stdout) for one Media Library video.
+
+        Not a JSON operation: the caller streams the child's stdout to the browser and kills it when the
+        browser leaves. The name is validated here and again by web-ctl; it never reaches a shell."""
+        if not valid_media_name(media):
+            raise EngineError("invalid media name", code="INVALID_MEDIA")
+        if self._production:
+            return [SUDO_PATH, "-n", INSTALLED_WEB_CTL, "studio_proxy", media]
+        if not self._web_ctl.is_file():
+            raise EngineError("engine bridge not found")
+        return [self._bash, str(self._web_ctl), "studio_proxy", media]
 
     @staticmethod
     def _decode_image(doc, mime):
@@ -562,6 +589,7 @@ class EngineClient:
             "playlist_start", "playlist_stop", "playlist_restart",
             # GUI-5A: safe delete of one stopped stream / stopped playlist.
             "relay_delete", "playlist_delete",
+            "relay_swap_source",
         ):
             if len(values) != 1 or not valid_target_name(values[0]):
                 raise EngineError("invalid target name", code="INVALID_NAME")

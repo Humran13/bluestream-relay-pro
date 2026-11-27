@@ -5,6 +5,22 @@ Label: **V1 feature set implemented; release gate PENDING. NOT beta-ready.**
 Open gates (see RELEASE_CHECKLIST.md): B staging VPS, C benchmark + 72 h soak, D payments provider, E sign-off of
 sandbox/isolation on a real host.
 
+## Round 13 (OBS-workflow verification) - TESTED LOCALLY, NOT ON THE VPS
+Verified with real media in real browsers (Edge, Firefox): library video plays and loops, existing streams show moving video, project opens in the workspace, layers can be added over the playing background, selection/properties work. Fixed: editor CPU waste (bridge read cache, slower/idle polling, paced + thread-capped preview), Edge error-state misreport, smoke-test fragility. Details: STUDIO_LIVE_RELEASE.md (Round 13), TESTS.md. Dino/destinations never touched. NOT verified: the deployed VPS, real YouTube, GPU, 72 h.
+
+## Live production round (round 11, branch `feature/studio-live-compositor`) - TESTED LOCALLY, NOT ON THE VPS
+Diagnosis: a real server-side compositor already existed (one FFmpeg decode+compose+encode per Studio stream; text/countdown via sidecar files). What was
+missing: proof, a playing picture in the editor, and a clear line between WATCHING a stream and CHANGING what viewers see. Design and limits:
+`STUDIO_ARCHITECTURE.md`; release plan, impact table, rollback, limitations: `STUDIO_LIVE_RELEASE.md`.
+Done (each has automated evidence, see TESTS.md): single editable canvas with a REAL playing `<video>` (uploaded video via an on-demand copy/540p preview,
+existing relay/playlist and the Studio's own output via read-only HLS with loading/disconnected/retry states; local pause/restart/loop/mute never touch a
+stream); Live-sources tab (monitor an existing relay without touching it; Dino is never started/stopped/restarted); create playlists from Media Library videos;
+layer lock/rename/reorder/hide; text font/alignment/background box; countdown to a time or for a duration (absolute server-side moment); honest state chain
+(draft saved / applied / pipeline running revision N / output healthy); hot apply for text content (no restart), staged restart with confirmation,
+health verification and AUTOMATIC rollback for structural changes; encoder choice with a REAL NVENC init test (never automatic, never silently switched);
+frame-level proof that text, rect, PNG, countdown, PiP video are in the encoded output; read-only restart forensics script for the 630-restart signal.
+Still open: browser-source renderer enabled on a real host; real NVENC hardware encode; 72 h soak; VPS install. Production deployment: NOT performed.
+
 ## Studio workspace redesign (round 10, OBS-inspired) - TESTED LOCALLY, NOT ON THE VPS
 Replaced the stacked admin form with a broadcasting workspace inside the SAME dashboard (same URL, login and session; no second app):
 toolbar (project, unsaved-changes flag, Save Draft, Apply to Live, Preview/Program, Settings), left Media panel, centre 16:9 canvas, right

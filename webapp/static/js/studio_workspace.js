@@ -14,6 +14,7 @@
   var natural = {};            // media name -> natural height/width ratio (from the loaded preview image)
   var published = S.published, unpublished = S.unpublished, capacity = (S.capabilities || {}).assessment || null;
   var missing = [];
+  var INPLACE = !!P.target_relay, inplaceRaw = null;   // INPLACE: these overlays go onto the EXISTING stream named in P.target_relay
   var $ = function (s, r) { return (r || root).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || root).querySelectorAll(s)); };
 
@@ -30,7 +31,7 @@
     return e;
   }
   var ICONS = {
-    video: "M3 6h13v12H3zM16 10l5-3v10l-5-3", image: "M3 4h18v16H3zM3 16l5-5 4 4 3-3 6 6M16 9h.01", slideshow: "M6 7h14v11H6zM3 4h14",
+    video: "M3 6h13v12H3zM16 10l5-3v10l-5-3", unlock: "M6 11h12v9H6zM8 11V8a4 4 0 0 1 7.5-2", pencil: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4", image: "M3 4h18v16H3zM3 16l5-5 4 4 3-3 6 6M16 9h.01", slideshow: "M6 7h14v11H6zM3 4h14",
     text: "M5 5h14M12 5v14M9 19h6", rect: "M4 4h16v16H4z", clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
     countdown: "M5 3h14M5 21h14M7 3v4l5 5-5 5v4M17 3v4l-5 5 5 5v4", countup: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5h4",
     pomodoro: "M12 6a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM12 2v4M12 10v4l2 2", ticker: "M3 8h18v8H3zM7 12h6",
@@ -101,8 +102,10 @@
   var canEdit = !!S.can_edit;
 
   // ---- dirty state ---------------------------------------------------------
+  var lastDirty = false;
   function touch() {
     dirty = snapshot() !== saved;
+    if (dirty !== lastDirty) { lastDirty = dirty; if (root.dataset.ready) { renderStatus(); } }
     var badge = $("#ws-dirty"); badge.hidden = !dirty; $("#ws-save").disabled = !dirty || !canEdit || busy;
     root.classList.toggle("is-dirty", dirty);
   }
@@ -115,7 +118,9 @@
   var NAMES = { text: "Text", image: "Image", rect: "Color", clock: "Clock", countdown: "Countdown", countup: "Countup", pomodoro: "Pomodoro",
                 ticker: "Ticker", nowplaying: "Now Playing", data: "Data", video: "Video", browser: "Browser" };
   function layerName(o) { return o.label || ((NAMES[o.kind] || o.kind) + ((o.kind === "image" || o.kind === "video") && o.asset ? ": " + o.asset : "")); }
-  function canvasAspect() { return P.profile.width / P.profile.height; }
+  function outW() { return P.profile.width || (playerInfo && playerInfo.width) || 1280; }
+  function outH() { return P.profile.height || (playerInfo && playerInfo.height) || 720; }
+  function canvasAspect() { return outW() / outH(); }
   function aspectOf(o) {
     if (o.kind === "browser") { return o.view_h / o.view_w; }
     var a = natural[o.asset]; return a ? a * (o.crop_h / o.crop_w) : null;
@@ -134,7 +139,7 @@
     b.w = clamp(b.w, 0.02, 1); b.h = clamp(b.h, 0.02, 1); b.x = clamp(b.x, 0, 1 - b.w); b.y = clamp(b.y, 0, 1 - b.h);
     o.x = r4(b.x); o.y = r4(b.y); o.w = r4(b.w); o.h = r4(b.h);
   }
-  function active() { return view === "program" && published ? published : P; }
+  function active() { return P; }
   function shown() { return active().overlays; }
 
   // ---- canvas ----------------------------------------------------------------
@@ -143,20 +148,57 @@
     var q = "?kind=" + encodeURIComponent(p.source_kind) + "&ref=" + encodeURIComponent(p.source_ref) + "&bg=" + encodeURIComponent(p.background);
     return U.sourceFrame + q;
   }
-  var bgKey = "";
+  var bgKey = "", mon = "source", live = { relays: [], playlists: [] }, playerInfo = { mode: "none", state: "idle" };
+  var player = StudioPlayer.create(canvas, $("#ws-vbar"), { onState: function (i) {
+    var dimsChanged = playerInfo && (playerInfo.width !== i.width || playerInfo.height !== i.height);
+    playerInfo = i; if (sel === -2) { refreshSourceInfo(); }
+    if (dimsChanged && !P.profile.width) { canvas.style.aspectRatio = outW() + " / " + outH(); $$(".ly", canvas).forEach(function (n) { paintLayer(+n.dataset.i); }); }
+  } });
+  function hlsFor(kind, ref) {
+    var list = kind === "relay" ? live.relays : live.playlists, row = list.filter(function (r) { return r.name === ref; })[0];
+    return row || null;
+  }
+  function bgSpec() {
+    var p = P;
+    if (mon === "output") {
+      return stream.hls_url && stream.active ? { mode: "hls", url: stream.hls_url, label: "Studio output" } : { mode: "none", message: "The Studio stream is not running, so there is no live output to watch." };
+    }
+    if (INPLACE) {
+      var ip = stream.inplace || {}, comp = ip.marker === "on" && stream.plan === "overlay-live-composition";
+      if (stream.exists && !stream.active) { return { mode: "none", message: "'" + p.source_ref + "' is stopped, so there is no live picture. Start it on the Streams page; Studio will not start it for you." }; }
+      if (comp && inplaceRaw) { return { mode: "file", url: inplaceRaw }; }          // the loop file WITHOUT the layers that are burned into the stream
+      var u = stream.hls_url || (hlsFor("relay", p.source_ref) || {}).hls_url;
+      return u ? { mode: "hls", url: u, label: p.source_ref + (comp ? " (on air, with the published layers)" : "") } : { mode: "none", message: "Looking for the stream\u2026" };
+    }
+    if (p.source_kind === "media") { return p.source_ref ? { mode: "file", url: U.play.replace("__A__", encodeURIComponent(p.source_ref)) } : { mode: "none", message: "Choose a video from the Media panel." }; }
+    if (p.source_kind === "relay" || p.source_kind === "playlist") {
+      var row = hlsFor(p.source_kind, p.source_ref);
+      if (!p.source_ref) { return { mode: "none", message: "Choose a live source." }; }
+      if (!row) { return { mode: "none", message: "That " + p.source_kind + " was not found. It may have been deleted." }; }
+      if (!row.active) { return { mode: "none", message: "'" + row.name + "' is stopped: there is no live picture. Start it on the Streams page; Studio will not start it for you." }; }
+      return { mode: "hls", url: row.hls_url, label: row.name };
+    }
+    return { mode: "still" };
+  }
   function paintBackground() {
-    var p = active(), key = p.source_kind + "|" + p.source_ref + "|" + p.background, bg = $("#ws-bg"), note = $("#ws-bgnote");
+    var p = active(), spec = bgSpec(), key = JSON.stringify(spec) + "|" + p.background + "|" + p.source_ref, bg = $("#ws-bg"), note = $("#ws-bgnote");
     if (key === bgKey) { return; }
     bgKey = key;
-    if (p.source_kind === "audio" && /^#[0-9a-fA-F]{6}$/.test(p.background)) { bg.removeAttribute("src"); canvas.style.background = p.background; note.hidden = true; return; }
-    canvas.style.background = "";
-    note.hidden = true; bg.hidden = false;
-    bg.onerror = function () { bg.hidden = true; note.hidden = false; note.textContent = p.source_kind === "relay" || p.source_kind === "playlist" ?
-      "Preview appears while the source stream is running." : "No preview frame is available for this source."; };
-    bg.onload = function () { bg.hidden = false; note.hidden = true; };
-    if (p.source_ref) { bg.src = srcFrameUrl(p); } else { bg.hidden = true; note.hidden = false; note.textContent = "Choose a source."; }
+    note.hidden = true; canvas.style.background = "";
+    if (spec.mode === "still") {
+      player.load({ mode: "none" });
+      if (p.source_kind === "audio" && /^#[0-9a-fA-F]{6}$/.test(p.background)) { bg.removeAttribute("src"); bg.hidden = true; canvas.style.background = p.background; return; }
+      bg.hidden = false;
+      bg.onerror = function () { bg.hidden = true; note.hidden = false; note.textContent = "No picture is available for this source."; };
+      bg.onload = function () { bg.hidden = false; note.hidden = true; };
+      if (p.source_ref) { bg.src = srcFrameUrl(p); } else { bg.hidden = true; note.hidden = false; note.textContent = "Choose a source."; }
+      return;
+    }
+    bg.hidden = true; bg.removeAttribute("src");
+    player.load(spec);
   }
-  var scaleFont = function (o) { return (o.size / P.profile.height * 100).toFixed(3) + "cqh"; };
+  function refreshSourceInfo() { if (sel === -2 && mon === "source") { buildProps(); } }
+  var scaleFont = function (o) { return (o.size / outH() * 100).toFixed(3) + "cqh"; };
 
   function layerEl(o, i, live) {
     var kind = o.kind, e = h("div", { class: "ly ly-" + kind + (LOCKED[kind] ? " locked" : ""), "data-i": i, tabindex: live ? "0" : "-1", role: "button",
@@ -196,13 +238,20 @@
     e.classList.toggle("sel", view === "draft" && i === sel);
   }
   function renderCanvas() {
-    var ro = view === "program";
-    canvas.classList.toggle("program", ro); canvas.style.aspectRatio = P.profile.width + " / " + P.profile.height;
+    var ro = mon === "output";
+    canvas.classList.toggle("program", ro); canvas.style.aspectRatio = outW() + " / " + outH();
     $$(".ly", canvas).forEach(function (n) { n.remove(); });
-    shown().forEach(function (o, i) { var e = layerEl(o, i, !ro && canEdit); canvas.insertBefore(e, guides); paintLayer(i); });
+    var ipn = stream.inplace || {}, dupHidden = INPLACE && ipn.marker === "on" && stream.plan === "overlay-live-composition" && !inplaceRaw;
+    if (!ro) {
+      shown().forEach(function (o, i) {
+        // the on-air picture already contains the PUBLISHED layers: draw only what differs, or they would appear twice
+        if (dupHidden && published && published.overlays[i] && JSON.stringify(published.overlays[i]) === JSON.stringify(o)) { return; }
+        var e = layerEl(o, i, canEdit && !o.locked); canvas.insertBefore(e, guides); paintLayer(i);
+      });
+    }
     paintBackground();
-    $("#ws-programbar").hidden = !ro;
-    if (ro) { $("#ws-programrev").textContent = "Live revision " + (published ? published.revision : "-"); }
+    var note = $("#ws-monnote");
+    note.textContent = ro ? "Actual encoded output of the Studio stream, about 10 s behind. Layers are already burned into this video." : "";
     canvas.classList.toggle("safe", !!settings.general.safe_areas); canvas.classList.toggle("grid", !!settings.general.show_grid);
   }
   function syncBox() { if (sel >= 0) { $$("[data-key]", $("#ws-props")).forEach(syncInput); } }
@@ -234,6 +283,7 @@
     var e = ev.target.closest(".ly"); if (!e || e.classList.contains("hidden")) { select(-2, true); return; }
     var i = +e.dataset.i, o = P.overlays[i], hnd = ev.target.closest(".hnd");
     select(i, false);
+    if (o.locked) { say("Layer " + (i + 1) + " is locked. Unlock it in the layer list to move it."); return; }
     drag = { i: i, mode: hnd ? "resize:" + hnd.dataset.h : "move", sx: ev.clientX, sy: ev.clientY, rect: canvas.getBoundingClientRect(), start: box(o), id: ev.pointerId, moved: false };
     try { e.setPointerCapture(ev.pointerId); } catch (x) { /* ignore */ }
     ev.preventDefault();
@@ -277,6 +327,7 @@
   canvas.addEventListener("keydown", function (ev) {
     var e = ev.target.closest(".ly"); if (!e || view !== "draft" || !canEdit) { return; }
     var i = +e.dataset.i, o = P.overlays[i], step = ev.shiftKey ? 0.05 : 0.005, b = box(o);
+    if (o.locked) { return; }
     var dx = ev.key === "ArrowRight" ? step : ev.key === "ArrowLeft" ? -step : 0, dy = ev.key === "ArrowDown" ? step : ev.key === "ArrowUp" ? -step : 0;
     if (ev.ctrlKey || ev.metaKey) { return; }
     if (!dx && !dy) { if (ev.key === "Enter" || ev.key === " ") { select(i, false); ev.preventDefault(); } return; }
@@ -333,6 +384,14 @@
   }
 
   // ---- layers list ------------------------------------------------------------
+  function renameLayer(i, btn) {
+    var o = P.overlays[i]; if (!o || !canEdit) { return; }
+    var inp = h("input", { type: "text", class: "lrename", value: o.label || "", maxlength: 40, "aria-label": "Layer name", placeholder: NAMES[o.kind] || o.kind });
+    function done(commit) { if (commit && inp.value !== (o.label || "")) { setLayer(i, "label", inp.value.slice(0, 40), false); } renderLayers(); }
+    inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { done(true); } else if (e.key === "Escape") { done(false); } e.stopPropagation(); });
+    inp.addEventListener("blur", function () { done(true); });
+    btn.replaceWith(inp); inp.focus(); inp.select();
+  }
   function renderLayers() {
     var ul = $("#ws-layers"); ul.innerHTML = "";
     var arr = shown();
@@ -342,12 +401,15 @@
         var eye = ibtn(o.visible ? "eye" : "eyeoff", o.visible ? "Hide layer" : "Show layer", function (e) { e.stopPropagation(); if (view !== "draft" || !canEdit) { return; } setLayer(i, "visible", !o.visible); renderLayers(); });
         eye.setAttribute("aria-pressed", o.visible ? "true" : "false");
         row.appendChild(eye); row.appendChild(h("span", { class: "lic" }, [icon(o.kind === "rect" ? "rect" : o.kind)]));
-        var nm = h("button", { type: "button", class: "lname", text: layerName(o), onclick: function () { if (view === "draft") { select(i); } } });
-        row.appendChild(nm);
+        var nm = h("button", { type: "button", class: "lname", text: layerName(o), title: "Click to select, double-click to rename", onclick: function () { if (sel !== i) { select(i); } },
+          ondblclick: function () { renameLayer(i, nm); } });
+        var lk = ibtn(o.locked ? "lock" : "unlock", o.locked ? "Unlock layer" : "Lock layer", function (e) { e.stopPropagation(); if (!canEdit) { return; } setLayer(i, "locked", !o.locked, true); renderCanvas(); renderLayers(); });
+        lk.setAttribute("aria-pressed", o.locked ? "true" : "false");
+        row.appendChild(nm); row.appendChild(lk);
         if (view === "draft" && canEdit) {
           var act = h("span", { class: "lact" }, [
             ibtn("up", "Move layer up (in front)", function () { moveLayer(i, 1); }), ibtn("down", "Move layer down (behind)", function () { moveLayer(i, -1); }),
-            ibtn("copy", "Duplicate layer", function () { dupLayer(i); }), ibtn("trash", "Remove layer", function () { removeLayer(i); }, "danger")]);
+            ibtn("pencil", "Rename layer", function () { renameLayer(i, nm); }), ibtn("copy", "Duplicate layer", function () { dupLayer(i); }), ibtn("trash", "Remove layer", function () { removeLayer(i); }, "danger")]);
           row.appendChild(act);
         }
         ul.appendChild(row);
@@ -438,7 +500,17 @@
       var tf = [];
       if (k === "text" || k === "ticker" || k === "nowplaying" || k === "data") { tf.push(fld(k === "data" ? "Text (use {value})" : k === "nowplaying" ? "Prefix text" : "Text", textInput("text", { area: k === "text" || k === "ticker", max: 500 }))); }
       tf.push(fld("Size (px at output height)", numInput("size", { min: 8, max: 400, step: 1, int: true })));
-      tf.push(h("p", { class: "fh", text: "Font: DejaVu Sans, the font installed on the server for live text." }));
+      var fonts = S.fonts && S.fonts.length ? S.fonts : ["DejaVu Sans"];
+      var fsel = h("select", { "data-key": "font" }, fonts.map(function (f) { return h("option", { value: f, text: f, selected: f === o.font }); }));
+      fsel.addEventListener("change", function () { setLayer(sel, "font", fsel.value, false); });
+      tf.push(fld("Font", fsel, "Fonts installed on the server. The live text is rendered with these."));
+      tf.push(h("div", { class: "aligns", role: "group", "aria-label": "Text alignment" }, ["left", "center", "right"].map(function (a) {
+        var b = h("button", { type: "button", class: "btn btn-sm " + (o.align === a ? "" : "btn-secondary"), text: a.charAt(0).toUpperCase() + a.slice(1), "aria-pressed": o.align === a ? "true" : "false",
+          onclick: function () { setLayer(sel, "align", a, true); } }); return b; })));
+      tf.push(fld("Background box colour", colorInput("bg_color")));
+      tf.push(fld("Background opacity (0 = transparent)", (function () {
+        var n2 = h("input", { type: "number", "data-key": "bg_opacity", min: 0, max: 1, step: 0.05, value: o.bg_opacity });
+        n2.addEventListener("input", function () { var v = parseFloat(n2.value); if (!isNaN(v)) { setLayer(sel, "bg_opacity", clamp(v, 0, 1), false); } }); return n2; })()));
       props.appendChild(section("Text", tf));
     }
     if (k === "image" || k === "video") {
@@ -455,7 +527,22 @@
         ti.addEventListener("input", function () { if (ti.value) { setLayer(sel, "target", ti.value.length === 16 ? ti.value + ":00" : ti.value, false); } });
         tkids.push(fld(k === "pomodoro" ? "Cycle starts at" : k === "countdown" ? "Counts down to" : "Counts up from", ti));
       }
-      if (k === "countdown") { tkids.push(fld("When finished show", textInput("finished_text", { max: 100 }))); }
+      if (k === "countdown") {
+        tkids.push(fld("When finished show", textInput("finished_text", { max: 100 })));
+        var dur = { d: 0, h: 0, m: 10, s: 0 };
+        function durInput(key, label, max) { var i = h("input", { type: "number", min: 0, max: max, value: dur[key], "aria-label": label }); i.addEventListener("input", function () { dur[key] = Math.max(0, parseInt(i.value, 10) || 0); }); return fld(label, i); }
+        tkids.push(h("p", { class: "fh", text: "Or count down a fixed duration. The end time is stored as an exact moment on the server, so it stays correct if you close the browser or the stream restarts." }));
+        tkids.push(row([durInput("d", "Days", 365), durInput("h", "Hours", 23), durInput("m", "Min", 59), durInput("s", "Sec", 59)]));
+        tkids.push(h("div", { class: "aligns" }, [h("button", { type: "button", class: "btn btn-sm", text: "Start from now", onclick: function () {
+          var secs = dur.d * 86400 + dur.h * 3600 + dur.m * 60 + dur.s; if (secs < 1) { toast("Enter a duration first.", "error"); return; }
+          var t = new Date(Date.now() + secs * 1000), pad = function (v) { return (v < 10 ? "0" : "") + v; };
+          var iso = t.getUTCFullYear() + "-" + pad(t.getUTCMonth() + 1) + "-" + pad(t.getUTCDate()) + "T" + pad(t.getUTCHours()) + ":" + pad(t.getUTCMinutes()) + ":" + pad(t.getUTCSeconds());
+          setLayer(sel, "tz", "UTC", false); setLayer(sel, "target", iso, true); toast("Countdown set to end in " + secs + " s. Save, then Apply to Live to start it on air.", "info"); } }),
+          h("button", { type: "button", class: "btn btn-sm btn-secondary", text: "Reset (same duration)", onclick: function () {
+          var secs = dur.d * 86400 + dur.h * 3600 + dur.m * 60 + dur.s; if (secs < 1) { return; }
+          var t = new Date(Date.now() + secs * 1000), pad = function (v) { return (v < 10 ? "0" : "") + v; };
+          setLayer(sel, "tz", "UTC", false); setLayer(sel, "target", t.getUTCFullYear() + "-" + pad(t.getUTCMonth() + 1) + "-" + pad(t.getUTCDate()) + "T" + pad(t.getUTCHours()) + ":" + pad(t.getUTCMinutes()) + ":" + pad(t.getUTCSeconds()), true); } })]));
+      }
       if (k === "pomodoro") { tkids.push(row([fld("Focus minutes", numInput("work_min", { min: 1, max: 600, int: true })), fld("Break minutes", numInput("break_min", { min: 1, max: 600, int: true }))])); }
       props.appendChild(section("Time", tkids));
     }
@@ -470,11 +557,22 @@
         row([fld("Viewport width", numInput("view_w", { min: 320, max: 1920, int: true })), fld("Viewport height", numInput("view_h", { min: 240, max: 1080, int: true }))]),
         fld("Capture every (s)", numInput("refresh_s", { min: 15, max: 3600, int: true })), fld("Extra allowed hosts", textInput("allowed_hosts", { max: 200 }))]));
     }
+    if (o.locked) { ["x", "y", "w", "h"].forEach(function (kk) { var f = $('[data-key="' + kk + '"]', props); if (f) { f.disabled = true; f.title = "Unlock the layer to change its position"; } }); props.insertBefore(h("p", { class: "fh pad", text: "This layer is locked: it cannot be moved or resized until you unlock it in the layer list." }), props.children[1] || null); }
     if (ro) { $$("input,select,textarea,button", props).forEach(function (n) { n.disabled = true; }); }
   }
 
   function buildSourceProps() {
     props.innerHTML = "";
+    if (INPLACE) {
+      var ipp = stream.inplace || {};
+      props.appendChild(h("div", { class: "phead" }, [h("span", { class: "lic" }, [icon("stream")]), h("strong", { text: "Existing stream: " + P.target_relay })]));
+      props.appendChild(section("What this edits", [
+        h("p", { class: "fh", text: "You are adding overlays to the broadcast of '" + P.target_relay + "' itself. Its name, source, destinations and stream keys are not changed by Studio." }),
+        h("p", { class: "fh", text: "Everything you do here is a DRAFT until you press Activate. While the overlays are off, the stream keeps its plain stream-copy mode (no encoding, almost no CPU)." }),
+        h("p", { class: "fh", text: "The picture keeps the stream's own size and frame rate; its audio is passed through untouched." }),
+        h("p", { class: "fh", text: ipp.marker === "on" ? "Overlays are ON AIR. Text changes apply live without interruption; moving or adding layers switches the picture source (a pause of about 2 seconds; destinations stay connected)." : "Overlays are not on air." })]));
+      return;
+    }
     var kindSel = h("select", {}, [["media", "Video file (loops)"], ["slideshow", "Image slideshow"], ["audio", "Audio file with background"], ["relay", "Existing BlueStream stream"], ["playlist", "Existing playlist"]].map(function (p) {
       return h("option", { value: p[0], text: p[1], selected: P.source_kind === p[0] }); }));
     props.appendChild(h("div", { class: "phead" }, [h("span", { class: "lic" }, [icon("lock")]), h("strong", { text: "Background source" })]));
@@ -503,6 +601,18 @@
           StudioMedia.pick({ title: "Choose a background image", kinds: ["image"], urls: U, csrf: csrf }).then(function (it) { if (it && it[0]) { P.background = it[0].name; bgKey = ""; touch(); renderCanvas(); buildSourceProps(); } }); } }));
         b.appendChild(h("label", { class: "chk" }, [(function () { var c = h("input", { type: "checkbox", checked: P.visualizer }); c.addEventListener("change", function () { P.visualizer = c.checked; touch(); }); return c; })(), " Live waveform (needs a live encode)"]));
       }
+    }
+    var k2 = P.source_kind;
+    if (k2 === "media" && P.source_ref) {
+      var pi = playerInfo || {};
+      props.appendChild(section("Playback (preview only)", [h("p", { class: "fh", text: "File: " + P.source_ref }),
+        h("p", { class: "fh", text: "Size: " + (pi.width ? pi.width + "\u00d7" + pi.height : "unknown until it starts") + " \u00b7 State: " + (pi.state || "idle") + (pi.detail ? " (" + pi.detail + ")" : "") }),
+        h("p", { class: "fh", text: "Use the controls under the canvas to pause, restart, loop or mute the preview. They never affect a live stream. The broadcast loops this file continuously." })]));
+    }
+    if (k2 === "relay" || k2 === "playlist") {
+      var rw = hlsFor(k2, P.source_ref);
+      props.appendChild(section("Monitoring (read-only)", [h("p", { class: "fh", text: rw ? ("'" + rw.name + "' is " + (rw.active ? "running" : "stopped") + ". Studio is only WATCHING it: nothing about it changes.") : "Choose a stream in the Live sources tab." }),
+        h("p", { class: "fh", text: "Your overlays are burned into a separate Studio output stream, never into '" + P.source_ref + "'. To put them on air for its viewers: Create the Studio stream (Controls), start it, then use the explicit \u201cSwitch to this stream\u201d on the destination. Studio never does that for you." })]));
     }
     if (!canEdit) { $$("input,select,textarea,button", props).forEach(function (n) { n.disabled = true; }); }
   }
@@ -547,14 +657,16 @@
     { g: "Streaming", items: [["stream", "Existing BlueStream stream", function () { chooseSource("relay"); }], ["playlist", "Existing playlist", function () { chooseSource("playlist"); }],
       ["audio", "Audio file (with background)", function () { chooseSource("audio"); }]] }
   ];
-  if (S.kinds.indexOf("browser") >= 0) { MENU.push({ g: "Advanced", items: [["browser", "Browser source", function () { addLayer("browser"); }]] }); }
+  MENU.push({ g: "Advanced", items: [["browser", "Browser source", function () { addLayer("browser"); }, S.kinds.indexOf("browser") >= 0 ? null : (S.browser_gate || "Not available on this server.")]] });
   var menuBtn = $("#ws-add"), menu = $("#ws-menu");
   function buildMenu() {
     menu.innerHTML = "";
     MENU.forEach(function (grp) {
       menu.appendChild(h("div", { class: "mg", text: grp.g, role: "presentation" }));
       grp.items.forEach(function (it) {
-        menu.appendChild(h("button", { type: "button", role: "menuitem", class: "mi", onclick: function () { closeMenu(); it[2](); } }, [icon(it[0], 18), h("span", { text: it[1] })]));
+        var off = !!it[3];
+        menu.appendChild(h("button", { type: "button", role: "menuitem", class: "mi" + (off ? " off" : ""), "aria-disabled": off ? "true" : null, title: off ? it[3] : null,
+          onclick: function () { if (off) { toast("Browser source is not available: " + it[3] + ".", "error"); return; } closeMenu(); it[2](); } }, [icon(it[0], 18), h("span", { text: it[1] + (off ? " (not available)" : "") })]));
       });
     });
     menu.appendChild(h("p", { class: "mnote", text: "Screen, window, game and camera capture are not offered: this server has no display or capture devices." }));
@@ -587,6 +699,78 @@
     mediaCtl = StudioMedia.mount($("#ws-media"), { urls: U, csrf: csrf, kinds: ["video", "image", "audio"], multi: false, thumbs: settings.advanced.video_thumbs, onSelect: mediaActions });
   }
 
+  // ---- live sources (existing relays and playlists) ----------------------------------------------------------------
+  function loadSources() {
+    var box = $("#ws-sources"); if (!live.loaded) { box.textContent = "Loading live sources\u2026"; }
+    return api(U.sources).then(function (d) {
+      if (d && d.ok) {
+        live = { relays: d.relays, playlists: d.playlists, loaded: true };
+        S.sources = { relay: d.relays.map(function (r) { return r.name; }), playlist: d.playlists.map(function (r) { return r.name; }) };
+        bgKey = ""; paintBackground();
+      } else { live.error = (d && d.error) || "Live sources could not be listed."; }
+      renderSources();
+    });
+  }
+  function editExisting(relayName) {
+    api(U.overlayNew, { relay: relayName }).then(function (d) {
+      if (!d || !d.ok) { toast((d && d.error) || "Could not open that stream.", "error"); return; }
+      if (dirty && !window.confirm("You have unsaved changes in this project. Leave without saving?")) { return; }
+      dirty = false; window.location.href = U.projects + "/" + encodeURIComponent(d.name);
+    });
+  }
+  function srcRow(kind, r) {
+    var cur = P.source_kind === kind && P.source_ref === r.name;
+    var row = h("div", { class: "srcrow" + (cur ? " cur" : "") }, [h("span", { class: "badge2 " + (r.active ? "ok" : "off"), text: r.active ? "RUNNING" : "STOPPED" }), h("span", { class: "sn", text: r.name })]);
+    if (kind === "relay" && !INPLACE) {
+      row.appendChild(h("button", { type: "button", class: "btn btn-sm", disabled: !canEdit, text: "Edit this stream", title: "Open it here with its picture and add overlays to ITS broadcast (nothing changes until you activate)",
+        onclick: function () { editExisting(r.name); } }));
+    }
+    if (!INPLACE) {
+      row.appendChild(h("button", { type: "button", class: "btn btn-sm btn-secondary", disabled: !canEdit || cur, text: cur ? "Current source" : (kind === "relay" ? "Source for a new stream" : "Use as source"),
+        title: kind === "relay" ? "Make a SEPARATE Studio stream that reads this one" : "", onclick: function () { setSource(kind, r.name); } }));
+    }
+    return row;
+  }
+  function renderSources() {
+    var box = $("#ws-sources"); box.innerHTML = "";
+    if (live.error) { box.appendChild(h("p", { class: "smb-status err", text: live.error })); }
+    box.appendChild(h("p", { class: "muted", text: "Choose what Studio reads. Watching a stream is read-only: it is not restarted or changed. Your overlays are published on a separate Studio output stream." }));
+    box.appendChild(h("h3", { class: "ws-h3", text: "Live streams" }));
+    if (!live.relays.length) { box.appendChild(h("p", { class: "muted", text: live.loaded ? "No other streams exist yet." : "" })); }
+    live.relays.forEach(function (r) { box.appendChild(srcRow("relay", r)); });
+    box.appendChild(h("h3", { class: "ws-h3", text: "Playlists" }));
+    if (!live.playlists.length) { box.appendChild(h("p", { class: "muted", text: live.loaded ? "No playlists yet." : "" })); }
+    live.playlists.forEach(function (r) { box.appendChild(srcRow("playlist", r)); });
+    box.appendChild(h("button", { type: "button", class: "btn btn-sm btn-secondary", disabled: !canEdit, text: "Create a playlist from Media Library videos\u2026", onclick: createPlaylist }));
+    box.appendChild(h("p", { class: "fh", text: "Playlists play their videos in order and loop (the Playlists page has start/stop and scheduling). Studio reads a running playlist like any other live stream." }));
+  }
+  function createPlaylist() {
+    StudioMedia.pick({ title: "Choose at least two videos for the playlist", kinds: ["video"], multi: true, urls: U, csrf: csrf, thumbs: settings.advanced.video_thumbs }).then(function (items) {
+      if (!items || items.length < 2) { if (items) { toast("A playlist needs at least two videos.", "error"); } return; }
+      var order = items.map(function (i) { return i.name; }), nameIn = h("input", { type: "text", maxlength: 48, placeholder: "my-playlist", "aria-label": "Playlist name" }), list = h("ol", { class: "plist" });
+      function draw() {
+        list.innerHTML = "";
+        order.forEach(function (n, i) {
+          list.appendChild(h("li", {}, [h("span", { class: "pn", text: n }), ibtn("up", "Move earlier", function () { if (i > 0) { var t = order[i - 1]; order[i - 1] = order[i]; order[i] = t; draw(); } }),
+            ibtn("down", "Move later", function () { if (i < order.length - 1) { var t = order[i + 1]; order[i + 1] = order[i]; order[i] = t; draw(); } }), ibtn("trash", "Remove", function () { order.splice(i, 1); draw(); }, "danger")]));
+        });
+      }
+      draw();
+      dialog("New playlist", h("div", {}, [fld("Name", nameIn, "Letters, digits, - and _ only."), h("p", { class: "fh", text: "Order = playback order. The playlist loops. Files are checked when the playlist starts." }), list]),
+        [{ label: "Cancel", value: null, secondary: true }, { label: "Create playlist", value: "ok", validate: function () { if (order.length < 2) { toast("A playlist needs at least two videos.", "error"); return false; } return true; } }]).then(function (v) {
+        if (v !== "ok") { return; }
+        api(U.playlistCreate, { name: nameIn.value.trim(), items: order }).then(function (d) { toast(d.ok ? d.message : (d.error || "Playlist not created."), d.ok ? "success" : "error"); if (d.ok) { loadSources(); } });
+      });
+    });
+  }
+  $$("[data-ltab]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var t = b.dataset.ltab; $$("[data-ltab]").forEach(function (x) { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b ? "true" : "false"); });
+      $("#ws-media").hidden = t !== "media"; $("#ws-mactions").hidden = t !== "media"; $("#ws-sources").hidden = t !== "sources";
+      if (t === "sources") { loadSources(); }
+    });
+  });
+
   // ---- live text previews ---------------------------------------------------------
   var textTimer = null;
   function queueTexts() { clearTimeout(textTimer); textTimer = setTimeout(refreshTexts, 350); }
@@ -615,19 +799,51 @@
     if (!canEdit) { return; }
     Promise.resolve(dirty ? save() : true).then(function (ok) {
       if (!ok) { return; }
-      var running = stream.active, ask = running && settings.general.confirm_apply;
-      return (ask ? confirmDialog("Apply to Live", "Applying restarts this stream (a short interruption for viewers). Only this stream restarts. Continue?", "Apply and restart", true) : Promise.resolve(true)).then(function (go) {
-        if (!go) { return; }
-        setBusy(true);
-        return api(U.publish, { restart: running }).then(function (d) {
-          setBusy(false);
-          if (!d.ok) { toast(d.error || "Apply failed.", "error"); return; }
-          published = clone(P); published.revision = d.revision; unpublished = false; toast(d.message, "success"); renderStatus(); renderCanvas();
-          pollStatus();
+      setBusy(true);
+      return api(U.publish, { restart: false }).then(function (d) {
+        if (d.ok) { return d; }
+        if (!d.needs_restart) { return d; }
+        setBusy(false);
+        var ask = settings.general.confirm_apply;
+        return (ask ? confirmDialog(d.kind === "swap" ? "Switch the picture on air" : d.kind === "unit-restart" ? "One-time restart needed" : "This changes the video pipeline",
+          d.error || "Applying restarts this Studio stream (viewers see a short interruption, about 10-20 s). Only this stream restarts; every other stream is untouched. If the new pipeline does not become healthy, the previous layout is put back automatically.",
+          d.kind === "swap" ? "Switch now" : "Apply and restart", true) : Promise.resolve(true)).then(function (go) {
+          if (!go) { return { cancelled: true }; }
+          setBusy(true);
+          return api(U.publish, { restart: true });
         });
+      }).then(function (d) {
+        setBusy(false);
+        if (!d || d.cancelled) { return; }
+        if (!d.ok) { toast(d.error || "Apply failed.", "error"); return; }
+        published = clone(P); published.revision = d.revision; unpublished = false; toast(d.message, "success"); renderStatus(); pollStatus();
+        if (d.mode === "restart" || d.mode === "swap" || d.mode === "unit-restart") { verifyRestart(d); }
       });
     });
   }
+  /* After a staged restart: wait for the NEW revision to run healthily; otherwise put the previous one back. */
+  function verifyRestart(d) {
+    var tries = 0, banner = toastSticky("Restarting the Studio stream with revision " + d.revision + "\u2026");
+    (function check() {
+      tries++;
+      api(U.status).then(function (r) {
+        if (r && r.ok) { stream = Object.assign({ exists: false, active: false, publishers: [] }, r.stream); renderStatus(); }
+        var okNow = stream.active && String(stream.revision) === String(d.revision) && (stream.state === "HEALTHY" || stream.state === "DEGRADED");
+        if (okNow) { banner.remove(); toast("Revision " + d.revision + " is running (" + stream.plan + "). Output healthy.", "success"); return; }
+        if (tries >= (window.__bsVerifyTries || 22)) {
+          banner.remove();
+          if (!d.previous) { toast("The new pipeline did not become healthy and there is no earlier revision to restore. Check the Streams page.", "error"); return; }
+          api(U.revert, { revision: d.previous }).then(function (rv) {
+            toast(rv.ok ? "The new pipeline did not become healthy within 45 s. The previous layout was put back on air automatically." : ("Automatic rollback failed: " + (rv.error || "see the Streams page") + "."), rv.ok ? "error" : "error");
+            pollStatus();
+          });
+          return;
+        }
+        setTimeout(check, window.__bsVerifyMs || 2000);
+      });
+    })();
+  }
+  function toastSticky(msg) { var t = h("div", { class: "toast info", role: "status", text: msg }); toastBox.appendChild(t); return t; }
 
   // ---- stream status and controls ----------------------------------------------------
   function badgeClass(s) { return { HEALTHY: "ok", LIVE: "ok", DEGRADED: "warn", STARTING: "warn", RECONNECTING: "warn", STALLED: "bad", FAILED: "bad", BLOCKED: "bad" }[s] || "off"; }
@@ -636,6 +852,19 @@
     var state = !stream.exists ? "NO STREAM" : stream.active ? (stream.state || "RUNNING") : "STOPPED";
     box.appendChild(h("div", { class: "srow" }, [h("span", { class: "badge2 " + (stream.exists && stream.active ? badgeClass(stream.state || "HEALTHY") : "off"), text: state }),
       h("span", { class: "muted", text: stream.detail || (stream.exists ? "" : "Press Create Stream to make this project streamable.") })]));
+    var chain = h("ul", { class: "chain", "aria-label": "From your edit to the picture viewers see" });
+    function link(ok, label, detail) { chain.appendChild(h("li", { class: ok === true ? "ok" : ok === false ? "no" : "wait" }, [h("strong", { text: label }), h("span", { text: " " + detail })])); }
+    link(!dirty, "Draft", dirty ? "has unsaved edits" : "saved");
+    var pubRev = published ? published.revision : 0;
+    link(!unpublished && pubRev > 0, "Applied", pubRev ? (unpublished ? "revision " + pubRev + " is live; your draft differs" : "revision " + pubRev) : "nothing applied yet");
+    if (INPLACE) { inplaceChain(link, pubRev); }
+    else if (!stream.exists) { link(null, "Pipeline", "no Studio stream yet"); }
+    else if (!stream.active) { link(null, "Pipeline", "stream stopped"); }
+    else { var running = stream.revision ? "running revision " + stream.revision + (stream.plan ? " (" + stream.plan + ")" : "") : "starting";
+      link(!stream.pending_restart && (!pubRev || String(stream.revision) === String(pubRev)), "Pipeline", running + (stream.pending_restart ? " - applied revision " + pubRev + " is waiting for a restart" : "")); }
+    link(stream.exists && stream.active ? (stream.state === "HEALTHY") : null, "Output", stream.exists && stream.active ? (stream.state || "starting") + (stream.speed ? ", encoder " + stream.speed + "x" : "") : "not on air");
+    box.appendChild(chain);
+    var mb = $('[data-mon="output"]'); if (mb) { mb.disabled = !(stream.active && stream.hls_url); if (mb.disabled && mon === "output") { mon = "source"; $$("[data-mon]").forEach(function (x) { x.setAttribute("aria-pressed", x.dataset.mon === "source" ? "true" : "false"); }); bgKey = ""; renderCanvas(); renderLayers(); } }
     var live = P.overlays.some(function (o) { return o.visible && DYNAMIC[o.kind]; }) || (P.source_kind === "audio" && P.visualizer);
     var tb = Math.round((p.video_kbps + p.audio_kbps) * 1000 * 86400 * 30 / 8 / 1e10) / 100;
     var kv = [["Encoder", "x264 · " + p.preset], ["Output", p.width + "×" + p.height + " @ " + p.fps + " fps"], ["Bitrate", p.video_kbps + " kbps video / " + p.audio_kbps + " kbps audio"],
@@ -660,12 +889,76 @@
     box.appendChild(pubs);
     // controls
     var c = $("#ws-ctl"); c.innerHTML = "";
-    if (!stream.exists) { c.appendChild(h("button", { type: "button", class: "btn ctl", disabled: !canEdit, onclick: createStream }, [icon("plus"), " Create Stream"])); }
+    if (INPLACE) { inplaceControls(c); }
+    else if (!stream.exists) { c.appendChild(h("button", { type: "button", class: "btn ctl", disabled: !canEdit, onclick: createStream }, [icon("plus"), " Create Stream"])); }
     else if (stream.active) { c.appendChild(h("button", { type: "button", id: "ws-stop", class: "btn btn-danger ctl", disabled: !canEdit, onclick: stopStream }, [icon("stop"), " Stop Streaming"])); }
     else { c.appendChild(h("button", { type: "button", id: "ws-start", class: "btn ctl go", disabled: !canEdit, onclick: startStream }, [icon("play"), " Start Streaming"])); }
     c.appendChild(h("button", { type: "button", class: "btn btn-secondary ctl", onclick: function () { openSettings("stream"); } }, [icon("gear"), " Settings"]));
+    if (!INPLACE && !stream.exists) { c.appendChild(h("p", { class: "fh", text: "Source (left) is what Studio reads; the output stream is what viewers see. Creating it never changes the source stream." })); }
     c.appendChild(h("p", { class: "fh", text: unpublished ? "Unapplied changes: the stream keeps using the last applied revision." : "Draft matches the applied revision." }));
     var apply = $("#ws-apply"); apply.classList.toggle("pending", !!unpublished);
+    if (INPLACE) { apply.textContent = (stream.inplace && stream.inplace.marker === "on") ? "Apply to Live" : "Save as ready"; apply.title = (stream.inplace && stream.inplace.marker === "on") ? "Apply the saved draft to the overlays that are on air" : "Save the layout as ready. It is NOT on air until you press Activate."; }
+    var banner = $("#ws-inplace");
+    if (banner) {
+      banner.hidden = !INPLACE;
+      if (INPLACE) {
+        var onAir = stream.inplace && stream.inplace.marker === "on";
+        banner.className = "ws-inplace " + (onAir ? "air" : "draft");
+        banner.textContent = onAir ? "EDITING '" + P.target_relay + "' \u00b7 overlays are ON AIR. Changes here are drafts until you apply them." :
+          "EDITING '" + P.target_relay + "' \u00b7 DRAFT ONLY. Nothing is on air until you press Activate; the stream is unchanged.";
+      }
+    }
+  }
+  function inplaceChain(link, pubRev) {
+    var ip = stream.inplace || { marker: "none", swap: {} }, comp = stream.active && stream.plan === "overlay-live-composition";
+    if (ip.marker === "on") {
+      link(comp, "On air", comp ? "overlays are on air (revision " + stream.revision + ")" : ip.overlay === "tripped" ? "SWITCHED OFF automatically: the compositor kept failing and the plain stream was restored" : stream.active ? "switch is on; the stream is changing over\u2026" : "switch is on; overlays start with the stream");
+    } else { link(null, "On air", "no overlays: the stream is unchanged (stream copy)"); }
+    link(stream.exists ? (stream.active ? true : null) : false, "Stream '" + P.target_relay + "'", !stream.exists ? "not found" : stream.active ? (comp ? "encoding with overlays" : "running in stream-copy mode") : "stopped");
+    link(stream.active ? stream.state === "HEALTHY" || (!comp && stream.health === "HEALTHY") : null, "Output", stream.active ? (comp ? (stream.state || "starting") + (stream.speed ? ", encoder " + stream.speed + "x" : "") : (stream.health || "running")) : "not on air");
+  }
+  function inplaceControls(c) {
+    var ip = stream.inplace || { marker: "none", swap: {} }, on = ip.marker === "on", relay = P.target_relay;
+    c.appendChild(h("div", { class: "srow" }, [h("span", { class: "badge2 " + (on ? "bad" : "off"), text: on ? "OVERLAYS ON AIR" : "DRAFT ONLY" })]));
+    if (on) { c.appendChild(h("button", { type: "button", class: "btn btn-danger ctl", disabled: !canEdit, onclick: function () { switchOverlays(false); } }, [icon("stop"), " Remove overlays"])); }
+    else { c.appendChild(h("button", { type: "button", id: "ws-activate", class: "btn ctl go", disabled: !canEdit, onclick: function () { switchOverlays(true); } }, [icon("play"), " Activate overlays on '" + relay + "'"])); }
+    c.appendChild(h("button", { type: "button", class: "btn btn-secondary ctl", onclick: function () { openSettings("output"); } }, [icon("gear"), " Output settings"]));
+    c.appendChild(h("p", { class: "fh", text: ip.swap && ip.swap.ready ? "Live switching is available: the destination connections stay up while the picture is replaced (a pause of about 2 s)." :
+      ip.swap && ip.swap.reason === "OLD_SUPERVISOR" ? "'" + relay + "' was started before this update: the FIRST activation needs one restart (you are asked first). Later changes will not." :
+      ip.swap && ip.swap.reason === "NOT_RUNNING" ? "'" + relay + "' is stopped: overlays will be on air when it starts." : "" }));
+    c.appendChild(h("p", { class: "fh", text: "Start and stop '" + relay + "' on the Streams page. Its destinations and keys are managed on the Destinations page." }));
+  }
+  /* Activate / remove overlays on the existing stream. Saves and applies first so what goes on air is exactly what you see; any failure
+     restores the previous state on the server, and a compositor that cannot stay up is switched off automatically (plain stream restored). */
+  function switchOverlays(on) {
+    if (!canEdit) { return; }
+    Promise.resolve(dirty ? save() : true).then(function (ok) {
+      if (!ok) { return; }
+      return Promise.resolve(on && unpublished ? api(U.publish, { restart: false }).then(function (d) { if (d.ok) { published = clone(P); published.revision = d.revision; unpublished = false; } return d.ok ? true : (toast(d.error || "Could not save the layout as ready.", "error"), false); }) : true);
+    }).then(function (ok) {
+      if (!ok) { return; }
+      return api(on ? U.overlayActivate : U.overlayDeactivate, {}).then(function (d) {
+        if (d.ok || !d.needs_restart) { return d; }
+        return confirmDialog("One-time restart needed", d.error, "Restart '" + P.target_relay + "' and continue", true).then(function (go) { return go ? api(on ? U.overlayActivate : U.overlayDeactivate, { confirm_restart: true }) : { cancelled: true }; });
+      }).then(function (d) {
+        if (!d || d.cancelled) { return; }
+        if (!d.ok) { toast(d.error || "That did not complete.", "error"); pollStatus(); return; }
+        toast(d.message, "success");
+        var t0 = 0, banner = toastSticky(on ? "Putting the overlays on air\u2026" : "Removing the overlays\u2026");
+        (function check() {
+          t0++;
+          api(U.status).then(function (r) {
+            if (r && r.ok) { stream = Object.assign({ exists: false, active: false, publishers: [] }, r.stream); renderStatus(); bgKey = ""; renderCanvas(); }
+            var comp = stream.plan === "overlay-live-composition" && stream.active, ipo = (stream.inplace || {}).overlay;
+            if (on && comp && (stream.state === "HEALTHY" || stream.state === "DEGRADED")) { banner.remove(); toast("The overlays are on air.", "success"); return; }
+            if (on && ipo === "tripped") { banner.remove(); toast("The compositor could not stay up, so the overlays were switched off automatically and the plain stream was restored. The stream itself was not interrupted for good.", "error"); return; }
+            if (!on && stream.active && !comp) { banner.remove(); toast("The overlays are off: '" + P.target_relay + "' is back in stream-copy mode.", "success"); return; }
+            if (t0 >= (window.__bsVerifyTries || 22)) { banner.remove(); toast("Still waiting for '" + P.target_relay + "' to change over. Check its state on the Streams page.", "error"); return; }
+            setTimeout(check, window.__bsVerifyMs || 2000);
+          });
+        })();
+      });
+    });
   }
   function streamAction(action, okMsg) {
     return api(U.stream, { action: action }).then(function (d) {
@@ -695,7 +988,7 @@
   }
   function schedulePoll() {
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(function () { (document.hidden ? Promise.resolve() : pollStatus()).then(schedulePoll); }, Math.max(2, settings.advanced.status_poll_s) * 1000);
+    pollTimer = setTimeout(function () { (document.hidden ? Promise.resolve() : pollStatus()).then(schedulePoll); }, Math.max(2, settings.advanced.status_poll_s) * (stream.active ? 1 : 2) * 1000);   // every poll costs privileged bridge calls: idle streams half as often
   }
   var textPoll = null;
   function scheduleTextPoll() { clearInterval(textPoll); textPoll = setInterval(function () { if (!document.hidden) { refreshTexts(); } }, Math.max(2, settings.advanced.text_preview_s) * 1000); }
@@ -737,9 +1030,22 @@
         else if (dests) { listDests(area); }
         else { area.textContent = "Loading destinations..."; api(U.destinations).then(function (d) { if (d.ok) { dests = d; destSel = d.attached.slice(); area.innerHTML = ""; listDests(area); } else { area.textContent = d.error || "Destinations could not be read."; } }); }
       } else if (tab === "output") {
-        var enc = h("select", { disabled: false }, (caps.encoders || []).map(function (e) { return h("option", { value: e.id, text: e.label + (e.available ? "" : " (unavailable)"), disabled: !e.selectable, selected: e.id === "libx264" }); }));
-        pane.appendChild(section("Streaming", [fld("Output mode", h("input", { value: "Simple", disabled: true })), fld("Encoder", enc, (caps.encoders || []).filter(function (e) { return !e.selectable; }).map(function (e) { return e.label + ": " + e.why; }).join(" ")),
-          fld("Encoder preset", selOf([["ultrafast", "ultrafast (lowest CPU)"], ["superfast", "superfast"], ["veryfast", "veryfast (default)"], ["faster", "faster (better quality)"]], draftProfile.preset, function (v) { draftProfile.preset = v; assess(); })),
+        var enc = h("select", { "aria-label": "Encoder" }), encNote = h("p", { class: "fh", "aria-live": "polite" }), testBtn = h("button", { type: "button", class: "btn btn-sm btn-secondary", text: "Test NVIDIA encoding" });
+        function fillEnc(list) {
+          enc.innerHTML = "";
+          list.forEach(function (e) {
+            enc.appendChild(h("option", { value: e.id, text: e.label + (e.untested ? " (not tested yet)" : e.selectable ? "" : " (unavailable)"), disabled: !e.selectable && e.id !== draftProfile.encoder, selected: e.id === draftProfile.encoder }));
+          });
+          encNote.textContent = list.filter(function (e) { return !e.selectable; }).map(function (e) { return e.label + ": " + e.why; }).join(" ") + " Stream copy is used automatically when no overlays or conversion are needed.";
+        }
+        fillEnc(caps.encoders || []);
+        enc.addEventListener("change", function () { draftProfile.encoder = enc.value; assess(); });
+        testBtn.addEventListener("click", function () {
+          testBtn.disabled = true; testBtn.textContent = "Testing (a few seconds)\u2026";
+          api(U.capabilities + "?probe=1").then(function (d) { testBtn.disabled = false; testBtn.textContent = "Test NVIDIA encoding"; if (d && d.ok) { caps.encoders = d.encoders; fillEnc(d.encoders); toast(d.encoders.filter(function (e) { return e.id === "h264_nvenc"; })[0].selectable ? "NVENC works on this server." : "NVENC is not usable here: see the note.", "info"); } });
+        });
+        pane.appendChild(section("Streaming", [fld("Output mode", h("input", { value: "Simple", disabled: true })), fld("Encoder", enc), encNote, testBtn,
+          fld("Encoder preset (software only)", selOf([["ultrafast", "ultrafast (lowest CPU)"], ["superfast", "superfast"], ["veryfast", "veryfast (default)"], ["faster", "faster (better quality)"]], draftProfile.preset, function (v) { draftProfile.preset = v; assess(); })),
           numField("Video bitrate (kbps)", function () { return draftProfile.video_kbps; }, function (v) { draftProfile.video_kbps = v; }, 1000, 12000, 100, "1000-12000. YouTube recommends 4500 kbps for 720p30 and 9000 kbps for 1080p30."), capNote]));
         pane.appendChild(h("p", { class: "muted", text: "This server: " + caps.cores + " CPU cores" + (caps.mem_mb ? ", " + Math.round(caps.mem_mb / 102.4) / 10 + " GB RAM" : "") + (caps.load != null ? ", load " + caps.load : "") + "." }));
         assess();
@@ -747,8 +1053,8 @@
         pane.appendChild(section("Audio", [fld("Audio bitrate (kbps)", selOf([64, 96, 128, 160, 192, 256, 320].map(function (b) { return [b, b + " kbps"]; }), draftProfile.audio_kbps, function (v) { draftProfile.audio_kbps = parseInt(v, 10); })),
           h("p", { class: "muted", text: "Output audio is AAC, 44.1 kHz stereo. A source without sound gets a silent track so platforms accept the stream. There is no mixer: Studio plays the source's own audio." })]));
       } else if (tab === "video") {
-        pane.appendChild(section("Canvas and output", [fld("Output resolution (canvas)", selOf((caps.resolutions || []).map(function (r) { return [r, r.replace("x", " × ")]; }), draftProfile.width + "x" + draftProfile.height, function (v) { var p = v.split("x"); draftProfile.width = +p[0]; draftProfile.height = +p[1]; assess(); })),
-          fld("Frame rate", selOf([24, 25, 30, 60].map(function (f) { return [f, f + " fps"]; }), draftProfile.fps, function (v) { draftProfile.fps = parseInt(v, 10); assess(); })),
+        pane.appendChild(section("Canvas and output", [fld("Output resolution (canvas)", selOf((INPLACE ? ["0x0"] : []).concat(caps.resolutions || []).map(function (r) { return [r, r === "0x0" ? "Same as the stream (recommended)" : r.replace("x", " × ")]; }), draftProfile.width + "x" + draftProfile.height, function (v) { var p = v.split("x"); draftProfile.width = +p[0]; draftProfile.height = +p[1]; assess(); })),
+          fld("Frame rate", selOf((INPLACE ? [0] : []).concat([24, 25, 30, 60]).map(function (f) { return [f, f === 0 ? "Same as the stream (recommended)" : f + " fps"]; }), draftProfile.fps, function (v) { draftProfile.fps = parseInt(v, 10); assess(); })),
           fld("Scaling filter", selOf([["bilinear", "Bilinear (fastest)"], ["bicubic", "Bicubic (default)"], ["lanczos", "Lanczos (sharpest)"]], draftProfile.scaler, function (v) { draftProfile.scaler = v; }), "Used when the source is a different size from the canvas."), capNote]));
         pane.appendChild(h("p", { class: "muted", text: "The canvas is the output size. Layer positions are stored as percentages, so changing resolution never moves them. Settings are checked against this server's CPU." }));
         assess();
@@ -773,7 +1079,7 @@
     function listDests(area) {
       if (!dests.destinations.length) { area.appendChild(h("p", { class: "muted", text: "No destinations exist yet. Add one on the Destinations page." })); return; }
       dests.destinations.forEach(function (d) {
-        var c = h("input", { type: "checkbox", checked: destSel.indexOf(d.name) >= 0, disabled: !d.enabled || !canEdit });
+        var c = h("input", { type: "checkbox", checked: destSel.indexOf(d.name) >= 0, disabled: !d.enabled || !canEdit || INPLACE });
         c.addEventListener("change", function () { var i = destSel.indexOf(d.name); if (c.checked && i < 0) { destSel.push(d.name); } if (!c.checked && i >= 0) { destSel.splice(i, 1); } });
         area.appendChild(h("label", { class: "dest" }, [c, h("span", { class: "dn", text: d.display_name }), h("span", { class: "dp", text: d.platform }), h("span", { class: "dk " + (d.has_stream_key ? "ok" : "bad"), text: d.has_stream_key ? "key saved" : "no key" }),
           h("span", { class: "du", text: d.enabled ? d.server_url : "disabled" })]));
@@ -790,7 +1096,7 @@
         if (!d.ok) { toast(d.error || "Settings not saved.", "error"); return; }
         settings = d.settings; applySettings(); toast("Settings saved.", "success");
       });
-      var dp = (dests && stream.exists && canEdit) ? api(U.destinations, { ids: destSel }).then(function (d) { toast(d.ok ? "Destinations saved." : (d.error || "Destinations not saved."), d.ok ? "success" : "error"); pollStatus(); }) : Promise.resolve();
+      var dp = (dests && stream.exists && canEdit && !INPLACE) ? api(U.destinations, { ids: destSel }).then(function (d) { toast(d.ok ? "Destinations saved." : (d.error || "Destinations not saved."), d.ok ? "success" : "error"); pollStatus(); }) : Promise.resolve();
       Promise.all([pr, dp]).then(function () { if (v === "apply") { openSettings(tab); } });
     });
   }
@@ -839,16 +1145,11 @@
   $("#ws-save").addEventListener("click", function () { save(); });
   $("#ws-apply").addEventListener("click", applyLive);
   $("#ws-settings").addEventListener("click", function () { openSettings("general"); });
-  $$("[data-view]").forEach(function (b) {
+  $$("[data-mon]").forEach(function (b) {
     b.addEventListener("click", function () {
-      if (b.dataset.view === "program" && !published) { toast("Nothing has been applied to live yet.", "info"); return; }
-      view = b.dataset.view; $$("[data-view]").forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+      if (b.disabled) { return; }
+      mon = b.dataset.mon; $$("[data-mon]").forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
       bgKey = ""; renderCanvas(); renderLayers(); buildProps();
-      if (view === "program") {
-        api(U.previewText, { layers: published.overlays }).then(function (d) {
-          if (d && d.ok && view === "program") { ptexts = d.texts; published.overlays.forEach(function (o, i) { if (TEXTY[o.kind]) { paintLayer(i); } }); }
-        });
-      }
     });
   });
   var rb = $("#ws-rollback"); if (rb) {
@@ -867,11 +1168,17 @@
 
   // ---- start ------------------------------------------------------------------------------
   buildMenu(); applyLayoutPrefs(); mountMedia();
+  root.dataset.ready = "1";
   document.documentElement.setAttribute("data-theme", settings.general.theme); try { window.localStorage.setItem("bs-theme", settings.general.theme); } catch (e) { /* ignore */ }
   saved = snapshot();
   renderCanvas(); renderLayers(); buildProps(); renderStatus(); touch();
   if (!canEdit) { toast("Studio is read-only: " + (S.licence_reason || "editing is not available") + ".", "error"); }
   pollStatus().then(schedulePoll); scheduleTextPoll(); refreshTexts();
+  if (P.source_kind === "relay" || P.source_kind === "playlist") { loadSources(); }
+  if (INPLACE) {
+    api(U.monitor).then(function (d) { if (d && d.ok && d.source && d.source.raw_url) { inplaceRaw = d.source.raw_url; bgKey = ""; renderCanvas(); } });
+    var lt = $("#tab-sources"); if (lt) { lt.hidden = true; }
+  }
   var tz = h("datalist", { id: "ws-tzs" }, ["UTC", "Europe/London", "Europe/Paris", "Europe/Berlin", "America/New_York", "America/Chicago", "America/Los_Angeles", "Africa/Nairobi", "Africa/Lagos", "Asia/Dubai", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney"].map(function (z) { return h("option", { value: z }); }));
   root.appendChild(tz);
   window.studioWorkspace = { get project() { return P; }, select: select, setLayer: setLayer, addLayer: addLayer, save: save, isDirty: function () { return dirty; }, box: function (i) { return box(P.overlays[i]); }, natural: natural };

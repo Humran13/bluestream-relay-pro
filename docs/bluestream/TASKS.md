@@ -16,6 +16,15 @@
 | Studio UI | stream controls (create/start/stop/confirm), status, destinations attach, BLOCKED takeover, Program (live) view | I,V (fake engine) U(real relay + YouTube) |
 | Studio UI | Settings (General/Stream/Output/Audio/Video/Hotkeys/Advanced), server-side validated, capacity check, scaler option in FFmpeg | I,V (real FFmpeg in container) |
 | Studio UI | screen/window/game/camera capture, recording, virtual camera, NVENC, mixer | not offered (architecture) |
+| Live | playing video canvas: uploaded video (copy/540p on-demand preview), existing relay/playlist + own output via read-only HLS, states/retry | I,V (real FFmpeg container; real playback in Edge + Firefox) |
+| Live | Live-sources tab: monitor existing relay read-only, create playlist from videos, no mutating call | I,V (fake engine) U(real relay) |
+| Live | hot apply (text content), staged restart + health verification + auto rollback, state chain draft/applied/pipeline/output | I,V (frame-level in container) U(real VPS) |
+| Live | compositor output proof: text, rect, PNG, countdown, PiP video decoded from the encoded stream | I,V (container, real FFmpeg) |
+| Live | encoders: libx264 default, NVENC with real init test, refusal not fallback | I,V (refusal path) U(real GPU encode) |
+| Live | layer lock/rename, font/alignment/background box, countdown by duration | I,V |
+| Live | browser source activation (isolated renderer on a real host) | G |
+| Live | shuffle / repeat-one for playlists | not offered (engine loops in order) |
+| Live | read-only restart forensics script (publisher restart counter) | I,V (static guard) U(real VPS run) |
 | Previews | real source frame + overlay image thumbnails on a hardened host via read-only bridge ops (no permission widening) | I,V (unit + CI ffmpeg) U(real VPS) |
 | Editor | drag, resize, 8 handles, snap, keyboard, touch, crop, layer order, visibility, real source frame, mobile | I,V (Playwright x3 engines) |
 | Editor | Save draft, Apply to Live (confirmed single-stream restart), revision rollback (10) | I,V |
@@ -32,3 +41,6 @@
 | Docker validation | real nginx-rtmp + FFmpeg e2e, real-account permissions, editor x3 engines, 10-min benchmark, container-restart recovery | I,V (Docker) |
 | Docker-first deployment | docker/ image + Compose + bluestream.sh preflight/up/down/diag, bsunitd, DOCKER.md | I,V (Docker Desktop); U (real VPS, real YouTube, Linux preflight) |
 | Release | staging, failure injection on systemd, 4-vCPU benchmark, 72 h soak | B/PENDING |
+| Existing stream | edit an existing relay in Studio (open from the Studio page / Live sources), draft vs on air, activate/remove, publishers untouched | I,V (container, real stack) U(real VPS, real YouTube) |
+| Existing stream | swap-based activation keeps ONE platform session; continuous timeline; A/V sync; hot text; structural edits; failure containment | I,V (container) |
+| Existing stream | frame-seamless switching | not possible with this architecture (measured ~2 s stall) |

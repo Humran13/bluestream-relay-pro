@@ -41,9 +41,22 @@ def png(path, w, h, rgb):
 png(tmp + "/media/logo.png", 200, 100, (220, 40, 40))      # 2:1
 png(tmp + "/media/badge.png", 100, 100, (40, 120, 220))    # 1:1
 png(tmp + "/media/banner.png", 400, 100, (40, 200, 90))    # 4:1
+import shutil  # noqa: E402
+
+FIX = ROOT / "tests" / "browser" / "fixtures"
+shutil.copy(FIX / "motion.mp4", tmp + "/media/motion.mp4")    # a real, moving H.264 clip (testsrc2)
 for name in ("loop.mp4", "intro.webm", "song.mp3"):         # placeholders: listed, not decoded here
     with open(tmp + "/media/" + name, "wb") as fh:
         fh.write(b"\x00" * 1024)
+if shutil.which("ffmpeg") and os.environ.get("E2E_REAL_MEDIA") == "1":
+    # REAL media so the real preview proxy (stream copy AND the 540p transcode) is exercised by a real browser
+    import subprocess
+    ff = ["ffmpeg", "-v", "error", "-y"]
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=5", "-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-c:v", "libx264",
+                         "-pix_fmt", "yuv420p", "-g", "25", "-c:a", "aac", "-shortest", tmp + "/media/loop.mp4"], check=True)
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=5", "-c:v", "libvpx", "-b:v", "800k", tmp + "/media/intro.webm"], check=True)
+    with open(tmp + "/media/broken.mp4", "wb") as fh:
+        fh.write(os.urandom(4096))                              # listed but not a video: must fail clearly, never spin forever
 
 
 class E2EEngine(FakeEngine):
@@ -84,22 +97,87 @@ class E2EEngine(FakeEngine):
         self.payloads[("dest", name)] = list(ids)
         return self._mutation("relay_destinations_set", name, tuple(ids))
 
+    def relay_swap_ready(self, name):
+        old = name.startswith("oldsup")
+        return {"active": "yes", "ready": "no" if old else "yes", "reason": "OLD_SUPERVISOR" if old else ""}
+
+    def relay_swap_source(self, name):
+        return self._mutation("relay_swap_source", name)
+
     def read(self, op, *values):
         if op == "studio_health":
+            from webapp.studio import overlay as ovl, store
+            name = values[0]
+            mk = ovl.read_marker(name)
+            if mk is not None:                  # an EXISTING stream with overlays switched on/off (in-place)
+                try:
+                    rev = store.load_published(mk["project"]).revision
+                except Exception:
+                    rev = 0
+                on = mk["enabled"]
+                return {"state": "HEALTHY", "detail": "encoding at real time", "speed": "1.0", "fps": "25", "cpu_cores": "0.3", "rss_mb": "300",
+                        "dropped_frames": "0", "restarts": "0", "revision": str(rev), "plan": "overlay-live-composition" if on else "", "pending_restart": "",
+                        "overlay": "on" if on else "off"}
+            try:
+                pub = store.load_published(name)
+                rev, plan = pub.revision, ("live-composition" if pub.runs_live_encode else "prerender-then-copy")
+            except Exception:
+                rev, plan = 0, ""
+            if name.startswith("ws-fail-"):
+                rev = 1                      # simulates a restart that never brings the NEW revision up (drives the rollback test)
             return {"state": "HEALTHY", "detail": "encoding at real time", "speed": "1.01", "fps": "30", "cpu_cores": "1.2",
-                    "rss_mb": "300", "dropped_frames": "0", "restarts": "0"}
+                    "rss_mb": "300", "dropped_frames": "0", "restarts": "0", "revision": str(rev), "plan": plan, "pending_restart": ""}
         if op == "relay_publisher_status":
             return [{"id": d, "display_name": d, "state": "LIVE", "detail": "publishing"} for d in self.payloads.get(("dest", values[0]), [])]
         raise KeyError(op)
 
 
 payloads = {
-    "relay_list": [], "playlist_list": [], "snapshot": {},
+    "relay_list": [{"name": "dino", "type": "local-file", "active": "yes", "health": "HEALTHY", "health_detail": "hls fresh", "source": tmp + "/media/motion.mp4"},
+                   {"name": "sleepy", "type": "url", "active": "no", "health": "STOPPED", "health_detail": ""},
+                   {"name": "ghost", "type": "url", "active": "yes", "health": "HEALTHY", "health_detail": ""},
+                   {"name": "oldsup", "type": "url", "active": "yes", "health": "HEALTHY", "health_detail": ""}],
+    "playlist_list": [{"name": "promo", "active": "yes", "health": "HEALTHY"}],
+    "snapshot": {"domain": "127.0.0.1:4874", "https_configured": "no"},
     "media_list": [{"name": "logo.png", "size": 2048}, {"name": "badge.png", "size": 1024}, {"name": "banner.png", "size": 4096},
-                   {"name": "loop.mp4", "size": 5 * 1024 * 1024}, {"name": "intro.webm", "size": 900000}, {"name": "song.mp3", "size": 3000000}],
+                   {"name": "loop.mp4", "size": 5 * 1024 * 1024}, {"name": "motion.mp4", "size": 157100}, {"name": "broken.mp4", "size": 4096}, {"name": "intro.webm", "size": 900000}, {"name": "song.mp3", "size": 3000000}],
     "destination_list": [{"name": "yt-main", "display_name": "YouTube main", "platform": "youtube", "server_url": "rtmps://a.rtmps.youtube.com/live2/<redacted>",
                           "enabled": "yes", "has_stream_key": "yes", "attached_count": "0"}],
 }
 app, state_dir = make_app(tmp, engine=E2EEngine(payloads), config={"WEB_UPLOAD_DIR": tmp + "/upload", "DISK_RESERVE_BYTES": 0})
+# Public HLS exactly like nginx serves it (no login). "ghost" has no files -> 404, to test the disconnected state.
+from flask import abort, send_from_directory  # noqa: E402
+
+
+@app.route("/hls/<kind>/<name>/<path:f>")
+def hls(kind, name, f):
+    if name == "ghost":
+        abort(404)
+    return send_from_directory(str(FIX / "hls"), f)
+
+
+@app.route("/__e2e/relay/<name>", methods=["GET"])
+def e2e_relay(name):
+    """Test-only: an existing running relay (so every test edits its OWN stream and parallel browsers never share state)."""
+    payloads["relay_list"].append({"name": name, "type": "local-file", "active": "yes", "health": "HEALTHY", "health_detail": "", "source": tmp + "/media/motion.mp4"})
+    return "ok"
+
+
+if not shutil.which("ffmpeg"):
+    # No FFmpeg on this machine (dev box): serve a prebuilt fragmented MP4 so the BROWSER side of the preview is still exercised.
+    # The real proxy (copy + transcode) is verified against real FFmpeg in test_studio_live.py.
+    from webapp.studio import preview  # noqa: E402
+
+    class _Clip:
+        def __init__(self):
+            self.stdout = open(str(FIX / "motion_frag.mp4"), "rb")
+
+        def kill(self):
+            self.stdout.close()
+
+        def wait(self, timeout=None):
+            return 0
+    preview.open_proxy = lambda asset: (_Clip(), "copy") if asset == "motion.mp4" else None
+
 print("studio e2e server ready; admin password:", ADMIN_PASSWORD, "state:", state_dir, flush=True)
-app.run(host="127.0.0.1", port=int(os.environ.get("STUDIO_E2E_PORT", "4874")), threaded=True)
+app.run(host=os.environ.get("STUDIO_E2E_HOST", "127.0.0.1"), port=int(os.environ.get("STUDIO_E2E_PORT", "4874")), threaded=True)
